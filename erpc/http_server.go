@@ -405,9 +405,34 @@ func (s *HttpServer) createRequestHandler() http.Handler {
 		// We no longer need the top-level body; drop reference early to free its backing array
 		body = nil
 
-		for i, reqBody := range requests {
-			wg.Add(1)
-			go func(index int, rawReq json.RawMessage, headers http.Header, queryArgs map[string][]string) {
+		batchHandled := false
+		if isBatch && !isAdmin && !isHealthCheck {
+			batchInfo, detectErr := detectEthCallBatchInfo(requests, architecture, chainId)
+			if detectErr != nil {
+				lg.Info().Err(detectErr).
+				Int("requestCount", len(requests)).
+				Msg("eth_call batch detection failed, processing individually")
+			}
+			if batchInfo != nil && isMulticall3AggregationEnabled(project, batchInfo.networkId) {
+				batchHandled = s.handleEthCallBatchAggregation(
+					httpCtx,
+					&startedAt,
+					r,
+					project,
+					lg,
+					batchInfo,
+					requests,
+					headers,
+					queryArgs,
+					responses,
+				)
+			}
+		}
+
+		if !batchHandled {
+			for i, reqBody := range requests {
+				wg.Add(1)
+				go func(index int, rawReq json.RawMessage, headers http.Header, queryArgs map[string][]string) {
 				defer func() {
 					defer wg.Done()
 					if rec := recover(); rec != nil {
@@ -565,10 +590,11 @@ func (s *HttpServer) createRequestHandler() http.Handler {
 
 				responses[index] = resp
 				common.EndRequestSpan(requestCtx, resp, nil)
-			}(i, reqBody, headers, queryArgs)
-		}
+				}(i, reqBody, headers, queryArgs)
+			}
 
-		wg.Wait()
+			wg.Wait()
+		}
 
 		httpCtx, writeResponseSpan := common.StartDetailSpan(httpCtx, "HttpServer.WriteResponse")
 		defer writeResponseSpan.End()
@@ -1616,4 +1642,26 @@ func stripAddrDecorations(s string) string {
 		return s[1 : len(s)-1]
 	}
 	return s
+}
+
+// isMulticall3AggregationEnabled checks if multicall3 aggregation is enabled for a given network.
+// Returns true (default) if no explicit config is set, or if the config is explicitly set to enabled.
+func isMulticall3AggregationEnabled(project *PreparedProject, networkId string) bool {
+	if project == nil || project.Config == nil {
+		return true // Default to enabled
+	}
+
+	project.cfgMu.RLock()
+	defer project.cfgMu.RUnlock()
+
+	for _, nwCfg := range project.Config.Networks {
+		if nwCfg != nil && nwCfg.NetworkId() == networkId {
+			if nwCfg.Evm != nil && nwCfg.Evm.Multicall3Aggregation != nil {
+				return nwCfg.Evm.Multicall3Aggregation.Enabled
+			}
+			break
+		}
+	}
+
+	return true // Default to enabled
 }
