@@ -9915,14 +9915,16 @@ func TestNetwork_EvmGetLogs(t *testing.T) {
 
 		// Mock responses for each individual block
 		// First block (0x11118000)
-		gock.New("http://rpc1.localhost").
-			Post("").
-			Filter(func(request *http.Request) bool {
-				body := util.SafeReadBody(request)
-				return strings.Contains(body, "eth_getLogs") &&
-					strings.Contains(body, `"fromBlock":"0x11118000"`) &&
-					strings.Contains(body, `"toBlock":"0x11118000"`)
-			}).
+			gock.New("http://rpc1.localhost").
+				Post("").
+				Filter(func(request *http.Request) bool {
+					body := util.SafeReadBody(request)
+					return strings.Contains(body, "eth_getLogs") &&
+						strings.Contains(body, `"fromBlock"`) &&
+						strings.Contains(body, "0x11118000") &&
+						strings.Contains(body, `"toBlock"`) &&
+						strings.Contains(body, "0x11118000")
+				}).
 			Reply(200).
 			JSON(map[string]interface{}{
 				"jsonrpc": "2.0",
@@ -9933,14 +9935,16 @@ func TestNetwork_EvmGetLogs(t *testing.T) {
 			})
 
 		// Second block (0x11118001)
-		gock.New("http://rpc1.localhost").
-			Post("").
-			Filter(func(request *http.Request) bool {
-				body := util.SafeReadBody(request)
-				return strings.Contains(body, "eth_getLogs") &&
-					strings.Contains(body, `"fromBlock":"0x11118001"`) &&
-					strings.Contains(body, `"toBlock":"0x11118001"`)
-			}).
+			gock.New("http://rpc1.localhost").
+				Post("").
+				Filter(func(request *http.Request) bool {
+					body := util.SafeReadBody(request)
+					return strings.Contains(body, "eth_getLogs") &&
+						strings.Contains(body, `"fromBlock"`) &&
+						strings.Contains(body, "0x11118001") &&
+						strings.Contains(body, `"toBlock"`) &&
+						strings.Contains(body, "0x11118001")
+				}).
 			Reply(200).
 			JSON(map[string]interface{}{
 				"jsonrpc": "2.0",
@@ -9951,14 +9955,16 @@ func TestNetwork_EvmGetLogs(t *testing.T) {
 			})
 
 		// Third block (0x11118002)
-		gock.New("http://rpc1.localhost").
-			Post("").
-			Filter(func(request *http.Request) bool {
-				body := util.SafeReadBody(request)
-				return strings.Contains(body, "eth_getLogs") &&
-					strings.Contains(body, `"fromBlock":"0x11118002"`) &&
-					strings.Contains(body, `"toBlock":"0x11118002"`)
-			}).
+			gock.New("http://rpc1.localhost").
+				Post("").
+				Filter(func(request *http.Request) bool {
+					body := util.SafeReadBody(request)
+					return strings.Contains(body, "eth_getLogs") &&
+						strings.Contains(body, `"fromBlock"`) &&
+						strings.Contains(body, "0x11118002") &&
+						strings.Contains(body, `"toBlock"`) &&
+						strings.Contains(body, "0x11118002")
+				}).
 			Reply(200).
 			JSON(map[string]interface{}{
 				"jsonrpc": "2.0",
@@ -10046,14 +10052,16 @@ func TestNetwork_EvmGetLogs(t *testing.T) {
 		}`)
 
 		// Mock single response since we expect no splitting
-		gock.New("http://rpc1.localhost").
-			Post("").
-			Filter(func(request *http.Request) bool {
-				body := util.SafeReadBody(request)
-				return strings.Contains(body, "eth_getLogs") &&
-					strings.Contains(body, `"fromBlock":"0x11118000"`) &&
-					strings.Contains(body, `"toBlock":"0x11118050"`)
-			}).
+			gock.New("http://rpc1.localhost").
+				Post("").
+				Filter(func(request *http.Request) bool {
+					body := util.SafeReadBody(request)
+					return strings.Contains(body, "eth_getLogs") &&
+						strings.Contains(body, `"fromBlock"`) &&
+						strings.Contains(body, "0x11118000") &&
+						strings.Contains(body, `"toBlock"`) &&
+						strings.Contains(body, "0x11118050")
+				}).
 			Reply(200).
 			JSON(map[string]interface{}{
 				"jsonrpc": "2.0",
@@ -10129,14 +10137,16 @@ func TestNetwork_EvmGetLogs(t *testing.T) {
 		}`)
 
 		// Mock single response since we expect no splitting
-		gock.New("http://rpc1.localhost").
-			Post("").
-			Filter(func(request *http.Request) bool {
-				body := util.SafeReadBody(request)
-				return strings.Contains(body, "eth_getLogs") &&
-					strings.Contains(body, `"fromBlock":"0x11118000"`) &&
-					strings.Contains(body, `"toBlock":"0x111180ff"`)
-			}).
+			gock.New("http://rpc1.localhost").
+				Post("").
+				Filter(func(request *http.Request) bool {
+					body := util.SafeReadBody(request)
+					return strings.Contains(body, "eth_getLogs") &&
+						strings.Contains(body, `"fromBlock"`) &&
+						strings.Contains(body, "0x11118000") &&
+						strings.Contains(body, `"toBlock"`) &&
+						strings.Contains(body, "0x111180ff")
+				}).
 			Reply(200).
 			JSON(map[string]interface{}{
 				"jsonrpc": "2.0",
@@ -10262,14 +10272,16 @@ func TestNetwork_EvmGetLogs(t *testing.T) {
 		middleRangeRequest.SetNetwork(network)
 
 		// Mock response for the middle range that will be cached
-		gock.New("http://rpc1.localhost").
-			Post("").
-			Filter(func(request *http.Request) bool {
-				body := util.SafeReadBody(request)
-				return strings.Contains(body, "eth_getLogs") &&
-					strings.Contains(body, `"fromBlock":"0x11118100"`) &&
-					strings.Contains(body, `"toBlock":"0x111181ff"`)
-			}).
+			gock.New("http://rpc1.localhost").
+				Post("").
+				Filter(func(request *http.Request) bool {
+					body := util.SafeReadBody(request)
+					return strings.Contains(body, "eth_getLogs") &&
+						strings.Contains(body, `"fromBlock"`) &&
+						strings.Contains(body, "0x11118100") &&
+						strings.Contains(body, `"toBlock"`) &&
+						strings.Contains(body, "0x111181ff")
+				}).
 			Reply(200).
 			JSON(map[string]interface{}{
 				"jsonrpc": "2.0",
@@ -10300,14 +10312,16 @@ func TestNetwork_EvmGetLogs(t *testing.T) {
 		fullRangeRequest.SetNetwork(network)
 
 		// Mock responses for the first and last ranges
-		gock.New("http://rpc1.localhost").
-			Post("").
-			Filter(func(request *http.Request) bool {
-				body := util.SafeReadBody(request)
-				return strings.Contains(body, "eth_getLogs") &&
-					strings.Contains(body, `"fromBlock":"0x11118000"`) &&
-					strings.Contains(body, `"toBlock":"0x111180ff"`)
-			}).
+			gock.New("http://rpc1.localhost").
+				Post("").
+				Filter(func(request *http.Request) bool {
+					body := util.SafeReadBody(request)
+					return strings.Contains(body, "eth_getLogs") &&
+						strings.Contains(body, `"fromBlock"`) &&
+						strings.Contains(body, "0x11118000") &&
+						strings.Contains(body, `"toBlock"`) &&
+						strings.Contains(body, "0x111180ff")
+				}).
 			Reply(200).
 			JSON(map[string]interface{}{
 				"jsonrpc": "2.0",
@@ -10317,14 +10331,16 @@ func TestNetwork_EvmGetLogs(t *testing.T) {
 				},
 			})
 
-		gock.New("http://rpc1.localhost").
-			Post("").
-			Filter(func(request *http.Request) bool {
-				body := util.SafeReadBody(request)
-				return strings.Contains(body, "eth_getLogs") &&
-					strings.Contains(body, `"fromBlock":"0x11118200"`) &&
-					strings.Contains(body, `"toBlock":"0x111182ff"`)
-			}).
+			gock.New("http://rpc1.localhost").
+				Post("").
+				Filter(func(request *http.Request) bool {
+					body := util.SafeReadBody(request)
+					return strings.Contains(body, "eth_getLogs") &&
+						strings.Contains(body, `"fromBlock"`) &&
+						strings.Contains(body, "0x11118200") &&
+						strings.Contains(body, `"toBlock"`) &&
+						strings.Contains(body, "0x111182ff")
+				}).
 			Reply(200).
 			JSON(map[string]interface{}{
 				"jsonrpc": "2.0",
@@ -10334,14 +10350,16 @@ func TestNetwork_EvmGetLogs(t *testing.T) {
 				},
 			})
 
-		gock.New("http://rpc1.localhost").
-			Post("").
-			Filter(func(request *http.Request) bool {
-				body := util.SafeReadBody(request)
-				return strings.Contains(body, "eth_getLogs") &&
-					strings.Contains(body, `"fromBlock":"0x11118300"`) &&
-					strings.Contains(body, `"toBlock":"0x11118300"`)
-			}).
+			gock.New("http://rpc1.localhost").
+				Post("").
+				Filter(func(request *http.Request) bool {
+					body := util.SafeReadBody(request)
+					return strings.Contains(body, "eth_getLogs") &&
+						strings.Contains(body, `"fromBlock"`) &&
+						strings.Contains(body, "0x11118300") &&
+						strings.Contains(body, `"toBlock"`) &&
+						strings.Contains(body, "0x11118300")
+				}).
 			Reply(200).
 			JSON(map[string]interface{}{
 				"jsonrpc": "2.0",
