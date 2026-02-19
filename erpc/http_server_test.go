@@ -7646,6 +7646,84 @@ func TestHttpServer_EvmGetBlockByNumber(t *testing.T) {
 	})
 }
 
+func TestHttpServer_BatchLevelUpstreamSelectionReuse(t *testing.T) {
+	util.ResetGock()
+	defer util.ResetGock()
+	util.SetupMocksForEvmStatePoller()
+	defer util.AssertNoPendingMocks(t, 0)
+
+	origGetSorted := getSortedUpstreamsForNetwork
+	var getSortedCalls atomic.Int32
+	getSortedUpstreamsForNetwork = func(
+		ctx context.Context,
+		registry *upstream.UpstreamsRegistry,
+		networkID string,
+		method string,
+	) ([]common.Upstream, error) {
+		getSortedCalls.Add(1)
+		return origGetSorted(ctx, registry, networkID, method)
+	}
+	defer func() {
+		getSortedUpstreamsForNetwork = origGetSorted
+	}()
+
+	cfg := &common.Config{
+		Server: &common.ServerConfig{
+			MaxTimeout: common.Duration(5 * time.Second).Ptr(),
+		},
+		Projects: []*common.ProjectConfig{
+			{
+				Id: "test_project",
+				Networks: []*common.NetworkConfig{
+					{
+						Architecture: common.ArchitectureEvm,
+						Evm: &common.EvmNetworkConfig{
+							ChainId: 123,
+						},
+					},
+				},
+				Upstreams: []*common.UpstreamConfig{
+					{
+						Id:       "rpc1",
+						Type:     common.UpstreamTypeEvm,
+						Endpoint: "http://rpc1.localhost",
+						Evm: &common.EvmUpstreamConfig{
+							ChainId: 123,
+						},
+					},
+				},
+			},
+		},
+		RateLimiters: &common.RateLimiterConfig{},
+	}
+
+	gock.New("http://rpc1.localhost").
+		Post("").
+		Filter(func(request *http.Request) bool {
+			body := util.SafeReadBody(request)
+			return strings.Contains(body, "eth_getBalance")
+		}).
+		Times(1).
+		Reply(200).
+		JSON(map[string]interface{}{
+			"jsonrpc": "2.0",
+			"id":      1,
+			"result":  "0x10",
+		})
+
+	sendRequest, _, _, shutdown, _ := createServerTestFixtures(cfg, t)
+	defer shutdown()
+
+	batchBody := `[
+{"jsonrpc":"2.0","method":"eth_getBalance","params":["0xabc","latest"],"id":1},
+{"jsonrpc":"2.0","method":"eth_getBalance","params":["0xabc","latest"],"id":1}
+]`
+	statusCode, _, body := sendRequest(batchBody, nil, nil)
+	assert.Equal(t, http.StatusOK, statusCode)
+	assert.Contains(t, body, `"result":"0x10"`)
+	assert.Equal(t, int32(1), getSortedCalls.Load(), "homogeneous batch should reuse sorted upstream selection")
+}
+
 func createServerTestFixtures(cfg *common.Config, t *testing.T) (
 	func(body string, headers map[string]string, queryParams map[string]string) (int, map[string]string, string),
 	func(host string) (int, map[string]string, string),
