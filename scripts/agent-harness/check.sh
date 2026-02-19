@@ -82,8 +82,19 @@ required_refs=(
   scripts/agent-harness/check.sh
 )
 
+contains_literal() {
+  local needle=$1
+  local file=$2
+
+  if command -v rg >/dev/null 2>&1; then
+    rg -Fq -- "$needle" "$file"
+  else
+    grep -Fq -- "$needle" "$file"
+  fi
+}
+
 for ref in "${required_refs[@]}"; do
-  if ! rg -Fq "$ref" AGENTS.md; then
+  if ! contains_literal "$ref" AGENTS.md; then
     echo "AGENTS.md missing harness reference: $ref"
     missing=1
   fi

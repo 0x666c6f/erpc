@@ -6,9 +6,9 @@ concurrency:
 
 on:
   push:
-    branches: [main, morpho-main]
+    branches: [morpho-main]
   pull_request:
-    branches: [main, morpho-main]
+    branches: [morpho-main]
   schedule:
     - cron: '17 6 * * 1'
   workflow_dispatch:
