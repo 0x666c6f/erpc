@@ -78,7 +78,6 @@ Core packages
 - util/
 
 Config
-- erpc.yaml
 - erpc.dist.yaml
 - erpc.dist.ts
 - prometheus.yaml

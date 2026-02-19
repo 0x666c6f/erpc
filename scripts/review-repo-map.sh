@@ -5,12 +5,16 @@ root=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
 cd "$root"
 
 repo_name=$(basename "$root")
+in_git=0
+if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  in_git=1
+fi
 
 echo "Repo: ${repo_name}"
 echo
 
 echo "Top-level"
-if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+if [[ $in_git -eq 1 ]]; then
   git ls-files | awk -F/ '{print $1}' | sort -u | sed 's/^/- /'
 else
   ls -1 | sed 's/^/- /'
@@ -37,7 +41,11 @@ echo
 
 echo "Config"
 for file in erpc.yaml erpc.dist.yaml erpc.dist.ts prometheus.yaml docker-compose.yml; do
-  [[ -f "$file" ]] || continue
+  if [[ $in_git -eq 1 ]]; then
+    git ls-files --error-unmatch "$file" >/dev/null 2>&1 || continue
+  else
+    [[ -f "$file" ]] || continue
+  fi
   echo "- $file"
 done
 if [[ -d kube ]]; then
