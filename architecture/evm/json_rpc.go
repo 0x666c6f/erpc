@@ -280,36 +280,36 @@ func NormalizeHttpJsonRpc(ctx context.Context, nrq *common.NormalizedRequest, jr
 		}
 
 		updated := false
-			for idx, grouped := range indexToChanges {
-				val := workingParams[idx]
-				valUpdated := false
-				for _, ch := range grouped {
+		for idx, grouped := range indexToChanges {
+			val := workingParams[idx]
+			valUpdated := false
+			for _, ch := range grouped {
 				next, changed := setByPath(val, ch.path[1:], ch.newVal)
 				if changed {
 					val = next
 					valUpdated = true
 				}
 			}
-				if valUpdated {
-					workingParams[idx] = val
-					updated = true
-				}
+			if valUpdated {
+				workingParams[idx] = val
+				updated = true
 			}
-
-			for _, ch := range fallbackChanges {
-				if np, ok := replaceParamAtPath(workingParams, ch.path, ch.newVal); ok {
-					workingParams = np
-					updated = true
-				}
-			}
-
-			if updated {
-				jrq.Params = workingParams
-				jrq.MarkModified()
-			}
-			jrq.Unlock()
 		}
+
+		for _, ch := range fallbackChanges {
+			if np, ok := replaceParamAtPath(workingParams, ch.path, ch.newVal); ok {
+				workingParams = np
+				updated = true
+			}
+		}
+
+		if updated {
+			jrq.Params = workingParams
+			jrq.MarkModified()
+		}
+		jrq.Unlock()
 	}
+}
 
 // replaceParamAtPath returns a new params slice with the value at the given path replaced.
 // The path format mirrors cache method refs: first element is the params index (int),
