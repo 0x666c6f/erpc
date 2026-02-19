@@ -2,9 +2,11 @@ package common
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -48,4 +50,56 @@ func TestBatchUpstreamSelectionCache_ResolveConcurrentSingleLoaderCall(t *testin
 	wg.Wait()
 
 	assert.Equal(t, int32(1), loaderCalls.Load())
+}
+
+func TestBatchUpstreamSelectionCache_ResolveLoaderPanicReturnsErrorAndUnblocksWaiters(t *testing.T) {
+	cache := NewBatchUpstreamSelectionCache()
+	key := BatchUpstreamSelectionKey{
+		NetworkID: "evm:1",
+		Method:    "eth_getBalance",
+		Finality:  DataFinalityStateUnfinalized,
+	}
+
+	errCh := make(chan error, 2)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var secondLoaderCalled atomic.Bool
+
+	go func() {
+		_, _, err := cache.Resolve(key, func() ([]Upstream, error) {
+			close(started)
+			<-release
+			panic("boom")
+		})
+		errCh <- err
+	}()
+
+	<-started
+	go func() {
+		_, _, err := cache.Resolve(key, func() ([]Upstream, error) {
+			secondLoaderCalled.Store(true)
+			return nil, nil
+		})
+		errCh <- err
+	}()
+
+	close(release)
+
+	select {
+	case err := <-errCh:
+		require.Error(t, err)
+		assert.True(t, strings.Contains(err.Error(), "loader panic"))
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for panic resolver result")
+	}
+
+	select {
+	case err := <-errCh:
+		require.Error(t, err)
+		assert.True(t, strings.Contains(err.Error(), "loader panic"))
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for waiter resolver result")
+	}
+
+	assert.False(t, secondLoaderCalled.Load())
 }

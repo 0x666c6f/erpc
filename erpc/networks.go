@@ -32,6 +32,13 @@ type FailsafeExecutor struct {
 	consensusPolicyEnabled bool
 }
 
+type getSortedUpstreamsForNetworkFn func(
+	ctx context.Context,
+	registry *upstream.UpstreamsRegistry,
+	networkID string,
+	method string,
+) ([]common.Upstream, error)
+
 type Network struct {
 	networkId                string
 	networkLabel             string
@@ -48,11 +55,12 @@ type Network struct {
 	upstreamsRegistry        *upstream.UpstreamsRegistry
 	selectionPolicyEvaluator *PolicyEvaluator
 	initializer              *util.Initializer
+	getSortedUpstreamsFn     getSortedUpstreamsForNetworkFn
 }
 
 type skipNetworkRateLimitKey struct{}
 
-var getSortedUpstreamsForNetwork = func(
+func defaultGetSortedUpstreamsForNetwork(
 	ctx context.Context,
 	registry *upstream.UpstreamsRegistry,
 	networkID string,
@@ -377,7 +385,11 @@ func (n *Network) Forward(ctx context.Context, req *common.NormalizedRequest) (*
 
 	loadUpstreams := func() ([]common.Upstream, error) {
 		_, upstreamSpan := common.StartDetailSpan(ctx, "GetSortedUpstreams")
-		upsList, err := getSortedUpstreamsForNetwork(ctx, n.upstreamsRegistry, n.networkId, method)
+		getSortedUpstreams := n.getSortedUpstreamsFn
+		if getSortedUpstreams == nil {
+			getSortedUpstreams = defaultGetSortedUpstreamsForNetwork
+		}
+		upsList, err := getSortedUpstreams(ctx, n.upstreamsRegistry, n.networkId, method)
 		upstreamSpan.SetAttributes(attribute.Int("upstreams.count", len(upsList)))
 		if common.IsTracingDetailed {
 			names := make([]string, len(upsList))

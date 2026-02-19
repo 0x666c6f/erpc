@@ -2,6 +2,7 @@ package common
 
 import (
 	"context"
+	"fmt"
 	"sync"
 )
 
@@ -25,6 +26,8 @@ type BatchUpstreamSelectionCache struct {
 	inflight map[BatchUpstreamSelectionKey]*batchUpstreamSelectionPromise
 }
 
+type batchUpstreamSelectionCacheContextKey struct{}
+
 func NewBatchUpstreamSelectionCache() *BatchUpstreamSelectionCache {
 	return &BatchUpstreamSelectionCache{
 		entries:  make(map[BatchUpstreamSelectionKey][]Upstream),
@@ -36,14 +39,14 @@ func WithBatchUpstreamSelectionCache(ctx context.Context, cache *BatchUpstreamSe
 	if ctx == nil || cache == nil {
 		return ctx
 	}
-	return context.WithValue(ctx, UpstreamsContextKey, cache)
+	return context.WithValue(ctx, batchUpstreamSelectionCacheContextKey{}, cache)
 }
 
 func BatchUpstreamSelectionCacheFromContext(ctx context.Context) *BatchUpstreamSelectionCache {
 	if ctx == nil {
 		return nil
 	}
-	if v := ctx.Value(UpstreamsContextKey); v != nil {
+	if v := ctx.Value(batchUpstreamSelectionCacheContextKey{}); v != nil {
 		if c, ok := v.(*BatchUpstreamSelectionCache); ok {
 			return c
 		}
@@ -83,8 +86,21 @@ func (c *BatchUpstreamSelectionCache) Resolve(
 		c.inflight[key] = pending
 		c.mu.Unlock()
 
-		ups, err := loader()
-		cloned := cloneUpstreamSlice(ups)
+		var (
+			cloned []Upstream
+			err    error
+		)
+		func() {
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					err = fmt.Errorf("batch upstream selection loader panic: %v", recovered)
+				}
+			}()
+
+			var ups []Upstream
+			ups, err = loader()
+			cloned = cloneUpstreamSlice(ups)
+		}()
 
 		c.mu.Lock()
 		delete(c.inflight, key)

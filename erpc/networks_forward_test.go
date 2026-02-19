@@ -522,9 +522,9 @@ func TestNetwork_Forward_BatchSelectionCacheReuse(t *testing.T) {
 			"result":  "0x1",
 		})
 
-	origGetSorted := getSortedUpstreamsForNetwork
+	origGetSorted := network.getSortedUpstreamsFn
 	var getSortedCalls atomic.Int32
-	getSortedUpstreamsForNetwork = func(
+	network.getSortedUpstreamsFn = func(
 		ctx context.Context,
 		registry *upstream.UpstreamsRegistry,
 		networkID string,
@@ -534,7 +534,7 @@ func TestNetwork_Forward_BatchSelectionCacheReuse(t *testing.T) {
 		return origGetSorted(ctx, registry, networkID, method)
 	}
 	defer func() {
-		getSortedUpstreamsForNetwork = origGetSorted
+		network.getSortedUpstreamsFn = origGetSorted
 	}()
 
 	batchCtx := common.WithBatchUpstreamSelectionCache(ctx, common.NewBatchUpstreamSelectionCache())

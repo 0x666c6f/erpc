@@ -7652,21 +7652,6 @@ func TestHttpServer_BatchLevelUpstreamSelectionReuse(t *testing.T) {
 	util.SetupMocksForEvmStatePoller()
 	defer util.AssertNoPendingMocks(t, 0)
 
-	origGetSorted := getSortedUpstreamsForNetwork
-	var getSortedCalls atomic.Int32
-	getSortedUpstreamsForNetwork = func(
-		ctx context.Context,
-		registry *upstream.UpstreamsRegistry,
-		networkID string,
-		method string,
-	) ([]common.Upstream, error) {
-		getSortedCalls.Add(1)
-		return origGetSorted(ctx, registry, networkID, method)
-	}
-	defer func() {
-		getSortedUpstreamsForNetwork = origGetSorted
-	}()
-
 	cfg := &common.Config{
 		Server: &common.ServerConfig{
 			MaxTimeout: common.Duration(5 * time.Second).Ptr(),
@@ -7701,9 +7686,10 @@ func TestHttpServer_BatchLevelUpstreamSelectionReuse(t *testing.T) {
 		Post("").
 		Filter(func(request *http.Request) bool {
 			body := util.SafeReadBody(request)
-			return strings.Contains(body, "eth_getBalance")
+			return strings.Contains(body, "eth_getBalance") &&
+				(strings.Contains(body, "0xabc") || strings.Contains(body, "0xdef"))
 		}).
-		Times(1).
+		Times(2).
 		Reply(200).
 		JSON(map[string]interface{}{
 			"jsonrpc": "2.0",
@@ -7711,12 +7697,32 @@ func TestHttpServer_BatchLevelUpstreamSelectionReuse(t *testing.T) {
 			"result":  "0x10",
 		})
 
-	sendRequest, _, _, shutdown, _ := createServerTestFixtures(cfg, t)
+	sendRequest, _, _, shutdown, erpcInstance := createServerTestFixtures(cfg, t)
 	defer shutdown()
+
+	prj, err := erpcInstance.GetProject("test_project")
+	require.NoError(t, err)
+	network, err := prj.GetNetwork(context.Background(), "evm:123")
+	require.NoError(t, err)
+
+	origGetSorted := network.getSortedUpstreamsFn
+	var getSortedCalls atomic.Int32
+	network.getSortedUpstreamsFn = func(
+		ctx context.Context,
+		registry *upstream.UpstreamsRegistry,
+		networkID string,
+		method string,
+	) ([]common.Upstream, error) {
+		getSortedCalls.Add(1)
+		return origGetSorted(ctx, registry, networkID, method)
+	}
+	defer func() {
+		network.getSortedUpstreamsFn = origGetSorted
+	}()
 
 	batchBody := `[
 {"jsonrpc":"2.0","method":"eth_getBalance","params":["0xabc","latest"],"id":1},
-{"jsonrpc":"2.0","method":"eth_getBalance","params":["0xabc","latest"],"id":1}
+{"jsonrpc":"2.0","method":"eth_getBalance","params":["0xdef","latest"],"id":2}
 ]`
 	statusCode, _, body := sendRequest(batchBody, nil, nil)
 	assert.Equal(t, http.StatusOK, statusCode)
