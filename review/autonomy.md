@@ -7,12 +7,14 @@ Goal: high-success autonomous coding loops with low supervision.
 - `AGENTS.md`: entry rules, safety rails, command contract.
 - `review/README.md`: harness index + execution path.
 - `review/repo-map.md`: generated repo topology snapshot.
+- `review/skills-shell-tips.md`: skill-routing + shell-operation guardrails.
 - `review/contracts.md`: user-facing/API/config invariants.
 - `review/data-models.md`: state/caches/storage invariants.
 - `review/checklist.md`: severity rubric + output format.
 - `review/runbooks/*.md`: bugfix/feature/review procedures.
 - `scripts/agent-harness/*.sh`: mechanical checks + maintenance.
 - `.github/workflows/agent-automations.yml`: scheduled autonomous loops.
+- `artifacts/agent/`: boundary for generated agent runtime artifacts.
 
 ## Trigger Matrix
 
@@ -33,7 +35,8 @@ Per PR:
 1. `scripts/agent-harness/context.sh --staged`
 2. `scripts/agent-harness/suggest-doc-updates.sh --staged`
 3. `scripts/agent-harness/review-load.sh --staged`
-4. `scripts/agent-harness/check.sh`
+4. `scripts/agent-harness/skills-shell-check.sh`
+5. `scripts/agent-harness/check.sh`
 
 Weekly (or after major refactors):
 1. `scripts/agent-harness/update-repo-map.sh`

@@ -20,12 +20,14 @@ Codex + review agents. eRPC repo (Go + TS + infra/config).
 
 - Entry + guardrails: `AGENTS.md`
 - Harness index: `review/README.md`
+- Skills+shell guidance: `review/skills-shell-tips.md`
 - Repo map: `review/repo-map.md` (generated)
 - Contract surfaces: `review/contracts.md`
 - Stateful/data invariants: `review/data-models.md`
 - Severity rubric: `review/checklist.md`
 - Maintenance triggers: `review/autonomy.md`
 - Mechanical scripts: `scripts/agent-harness/*.sh`
+- Artifact boundary: `artifacts/agent/`
 - Scheduled loops: `.github/workflows/agent-automations.yml`
 
 ## Review Depth Protocol (Repo-Aware)
@@ -59,11 +61,13 @@ Codex + review agents. eRPC repo (Go + TS + infra/config).
 - Refresh map: `make agent-refresh`
 - Harness checks: `make agent-check`
 - Direct check script: `scripts/agent-harness/check.sh`
+- Skills+shell check: `scripts/agent-harness/skills-shell-check.sh`
 - Review bottleneck budget: `make agent-review-load`
 - Direct review-load script: `scripts/agent-harness/review-load.sh`
 - PR mergeability scan: `make agent-pr-health`
 - Random latent-bug sweep: `make agent-random-bug`
 - Contribution digest: `make agent-digest`
+- Artifact boundary path: `artifacts/agent/`
 - Full autonomous gate:
   - `make agent-gate` (build + fast tests)
   - `make agent-gate-full` (build + full tests)

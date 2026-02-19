@@ -12,6 +12,7 @@ help:
 	@echo " agent-check                   Verify autonomous harness artifacts"
 	@echo " agent-gate                    Harness check + build + fast tests"
 	@echo " agent-gate-full               Harness check + build + full tests"
+	@echo " agent-skills-shell-check      Verify skills-routing and shell guidance guardrails"
 	@echo " agent-review-load             Estimate review bottleneck risk for current diff"
 	@echo " agent-pr-health               Show PR mergeability/check-health (requires gh auth)"
 	@echo " agent-random-bug              Run random latent-bug package scan"
@@ -53,6 +54,10 @@ agent-gate:
 .PHONY: agent-gate-full
 agent-gate-full:
 	@scripts/agent-harness/gate.sh --full
+
+.PHONY: agent-skills-shell-check
+agent-skills-shell-check:
+	@scripts/agent-harness/skills-shell-check.sh
 
 .PHONY: agent-review-load
 agent-review-load:

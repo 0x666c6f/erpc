@@ -10,6 +10,7 @@ required_files=(
   review/checklist.md
   review/contracts.md
   review/data-models.md
+  review/skills-shell-tips.md
   review/repo-map.md
   review/autonomy.md
   review/runbooks/bugfix.md
@@ -22,6 +23,7 @@ required_files=(
   scripts/agent-harness/update-repo-map.sh
   scripts/agent-harness/suggest-doc-updates.sh
   scripts/agent-harness/review-load.sh
+  scripts/agent-harness/skills-shell-check.sh
   scripts/agent-harness/pr-health.sh
   scripts/agent-harness/random-bug-scan.sh
   scripts/agent-harness/merged-digest.sh
@@ -47,6 +49,7 @@ required_exec=(
   scripts/agent-harness/update-repo-map.sh
   scripts/agent-harness/suggest-doc-updates.sh
   scripts/agent-harness/review-load.sh
+  scripts/agent-harness/skills-shell-check.sh
   scripts/agent-harness/pr-health.sh
   scripts/agent-harness/random-bug-scan.sh
   scripts/agent-harness/merged-digest.sh
@@ -70,9 +73,11 @@ required_refs=(
   review/checklist.md
   review/contracts.md
   review/data-models.md
+  review/skills-shell-tips.md
   review/repo-map.md
   review/autonomy.md
   scripts/agent-harness/review-load.sh
+  scripts/agent-harness/skills-shell-check.sh
   scripts/agent-harness/context.sh
   scripts/agent-harness/check.sh
 )
@@ -97,5 +102,7 @@ if ! cmp -s "$tmp" review/repo-map.md; then
   diff -u review/repo-map.md "$tmp" || true
   exit 1
 fi
+
+scripts/agent-harness/skills-shell-check.sh
 
 echo "Harness check OK"

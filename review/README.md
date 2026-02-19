@@ -21,12 +21,14 @@ Repo-aware, exhaustive reviews + autonomous coding loops for Go + TS + config.
 - Review checklist: `review/checklist.md`
 - Contracts: `review/contracts.md`
 - Data models: `review/data-models.md`
+- Skills/shell guidance: `review/skills-shell-tips.md`
 - Maintenance triggers: `review/autonomy.md`
 
 ## Mechanical Maintenance
 
 - Refresh generated map: `make agent-refresh`
 - Verify harness integrity: `make agent-check`
+- Verify skills/shell conventions: `make agent-skills-shell-check`
 - Review-load signal: `make agent-review-load`
 - PR mergeability signal: `make agent-pr-health`
 - Random latent-bug scan: `make agent-random-bug`
