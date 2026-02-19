@@ -25,6 +25,7 @@ Top-level
 - Makefile
 - README.md
 - architecture
+- artifacts
 - assets
 - auth
 - biome.json
