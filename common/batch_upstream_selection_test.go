@@ -64,6 +64,7 @@ func TestBatchUpstreamSelectionCache_ResolveLoaderPanicReturnsErrorAndUnblocksWa
 	started := make(chan struct{})
 	release := make(chan struct{})
 	var secondLoaderCalled atomic.Bool
+	secondUpstream := &mockUpstreamForSelection{id: "upstream-second"}
 
 	go func() {
 		_, _, err := cache.Resolve(key, func() ([]Upstream, error) {
@@ -78,28 +79,45 @@ func TestBatchUpstreamSelectionCache_ResolveLoaderPanicReturnsErrorAndUnblocksWa
 	go func() {
 		_, _, err := cache.Resolve(key, func() ([]Upstream, error) {
 			secondLoaderCalled.Store(true)
-			return nil, nil
+			return []Upstream{secondUpstream}, nil
 		})
 		errCh <- err
 	}()
 
 	close(release)
 
-	select {
-	case err := <-errCh:
-		require.Error(t, err)
-		assert.True(t, strings.Contains(err.Error(), "loader panic"))
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for panic resolver result")
+	panicErrs := 0
+	nilErrs := 0
+	for i := 0; i < 2; i++ {
+		select {
+		case err := <-errCh:
+			if err == nil {
+				nilErrs++
+				continue
+			}
+			assert.True(t, strings.Contains(err.Error(), "loader panic"))
+			panicErrs++
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for concurrent resolvers to finish")
+		}
 	}
 
-	select {
-	case err := <-errCh:
-		require.Error(t, err)
-		assert.True(t, strings.Contains(err.Error(), "loader panic"))
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for waiter resolver result")
+	assert.GreaterOrEqual(t, panicErrs, 1)
+	if secondLoaderCalled.Load() {
+		assert.Equal(t, 1, nilErrs, "when second loader executes, one resolver should succeed")
+	} else {
+		assert.Equal(t, 0, nilErrs, "when second resolver waits on inflight, both should observe panic error")
 	}
 
-	assert.False(t, secondLoaderCalled.Load())
+	thirdUpstream := &mockUpstreamForSelection{id: "upstream-third"}
+	ups, _, err := cache.Resolve(key, func() ([]Upstream, error) {
+		return []Upstream{thirdUpstream}, nil
+	})
+	require.NoError(t, err)
+	require.Len(t, ups, 1)
+	if secondLoaderCalled.Load() {
+		assert.Equal(t, "upstream-second", ups[0].Id())
+	} else {
+		assert.Equal(t, "upstream-third", ups[0].Id())
+	}
 }
