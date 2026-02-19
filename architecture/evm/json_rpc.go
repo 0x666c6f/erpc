@@ -262,17 +262,54 @@ func NormalizeHttpJsonRpc(ctx context.Context, nrq *common.NormalizedRequest, jr
 	if needsUpdate && !skipInterpolation {
 		// Apply copy-on-write updates while holding write lock to avoid races.
 		jrq.Lock()
-		workingParams := jrq.Params
+		origParams := jrq.Params
+		workingParams := make([]interface{}, len(origParams))
+		copy(workingParams, origParams)
+
+		indexToChanges := make(map[int][]change, len(changes))
+		var fallbackChanges []change
 		for _, ch := range changes {
-			if np, ok := replaceParamAtPath(workingParams, ch.path, ch.newVal); ok {
-				workingParams = np
+			if len(ch.path) == 0 {
+				continue
 			}
+			if idx, ok := ch.path[0].(int); ok && idx >= 0 && idx < len(workingParams) {
+				indexToChanges[idx] = append(indexToChanges[idx], ch)
+				continue
+			}
+			fallbackChanges = append(fallbackChanges, ch)
 		}
-		jrq.Params = workingParams
-		jrq.MarkModified()
-		jrq.Unlock()
+
+		updated := false
+			for idx, grouped := range indexToChanges {
+				val := workingParams[idx]
+				valUpdated := false
+				for _, ch := range grouped {
+				next, changed := setByPath(val, ch.path[1:], ch.newVal)
+				if changed {
+					val = next
+					valUpdated = true
+				}
+			}
+				if valUpdated {
+					workingParams[idx] = val
+					updated = true
+				}
+			}
+
+			for _, ch := range fallbackChanges {
+				if np, ok := replaceParamAtPath(workingParams, ch.path, ch.newVal); ok {
+					workingParams = np
+					updated = true
+				}
+			}
+
+			if updated {
+				jrq.Params = workingParams
+				jrq.MarkModified()
+			}
+			jrq.Unlock()
+		}
 	}
-}
 
 // replaceParamAtPath returns a new params slice with the value at the given path replaced.
 // The path format mirrors cache method refs: first element is the params index (int),
