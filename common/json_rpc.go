@@ -1323,6 +1323,7 @@ type JsonRpcRequest struct {
 	Params  []interface{} `json:"params"`
 
 	cacheHash atomic.Value
+	modified  atomic.Bool
 }
 
 func NewJsonRpcRequest(method string, params []interface{}) *JsonRpcRequest {
@@ -1358,12 +1359,17 @@ func (r *JsonRpcRequest) Clone() *JsonRpcRequest {
 		}
 	}
 
-	return &JsonRpcRequest{
+	cloned := &JsonRpcRequest{
 		JSONRPC: r.JSONRPC,
 		ID:      r.ID,
 		Method:  r.Method,
 		Params:  clonedParams,
 	}
+	if r.modified.Load() {
+		cloned.modified.Store(true)
+	}
+
+	return cloned
 }
 
 // deepCopyValue creates a deep copy of a value to avoid concurrent access issues
@@ -1398,7 +1404,40 @@ func (r *JsonRpcRequest) SetID(id interface{}) error {
 	defer r.Unlock()
 
 	r.ID = id
+	r.modified.Store(true)
 	return nil
+}
+
+func (r *JsonRpcRequest) SetParams(params []interface{}) error {
+	r.Lock()
+	defer r.Unlock()
+
+	r.Params = params
+	r.modified.Store(true)
+	return nil
+}
+
+func (r *JsonRpcRequest) AppendParam(param interface{}) error {
+	r.Lock()
+	defer r.Unlock()
+
+	r.Params = append(r.Params, param)
+	r.modified.Store(true)
+	return nil
+}
+
+func (r *JsonRpcRequest) IsModified() bool {
+	if r == nil {
+		return false
+	}
+	return r.modified.Load()
+}
+
+func (r *JsonRpcRequest) MarkModified() {
+	if r == nil {
+		return
+	}
+	r.modified.Store(true)
 }
 
 func (r *JsonRpcRequest) UnmarshalJSON(data []byte) error {
