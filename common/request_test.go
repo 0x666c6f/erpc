@@ -368,6 +368,44 @@ func TestNormalizedRequestForwardBody_RawFastPathWhenUnmodified(t *testing.T) {
 	}
 }
 
+func TestNormalizedRequestForwardBody_InvalidatesRawAfterNormalization(t *testing.T) {
+	raw := []byte(`{"method":"eth_blockNumber","params":[]}`)
+	req := NewNormalizedRequest(raw)
+
+	jrq, err := req.JsonRpcRequest()
+	if err != nil {
+		t.Fatalf("expected JsonRpcRequest parse to succeed: %v", err)
+	}
+	if jrq == nil {
+		t.Fatalf("expected JsonRpcRequest to be non-nil")
+	}
+	if !jrq.WasNormalized() {
+		t.Fatalf("expected parsed request to be marked normalized")
+	}
+	if req.Body() != nil {
+		t.Fatalf("expected raw body to be hidden after normalization")
+	}
+
+	forwardBody, err := req.ForwardBody()
+	if err != nil {
+		t.Fatalf("expected ForwardBody to succeed: %v", err)
+	}
+	if string(forwardBody) == string(raw) {
+		t.Fatalf("expected ForwardBody to re-marshal normalized request")
+	}
+
+	var payload map[string]interface{}
+	if err := SonicCfg.Unmarshal(forwardBody, &payload); err != nil {
+		t.Fatalf("expected marshaled body to be valid json: %v", err)
+	}
+	if payload["jsonrpc"] != "2.0" {
+		t.Fatalf("expected marshaled body to include jsonrpc=2.0, got: %v", payload["jsonrpc"])
+	}
+	if payload["id"] == nil {
+		t.Fatalf("expected marshaled body to include generated id")
+	}
+}
+
 func TestNormalizedRequestForwardBody_InvalidatesRawAfterMutation(t *testing.T) {
 	raw := []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_call","params":[{"to":"0x0000000000000000000000000000000000000001"}]}`)
 	req := NewNormalizedRequest(raw)

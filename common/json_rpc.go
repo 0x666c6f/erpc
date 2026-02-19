@@ -1322,8 +1322,9 @@ type JsonRpcRequest struct {
 	Method  string        `json:"method"`
 	Params  []interface{} `json:"params"`
 
-	cacheHash atomic.Value
-	modified  atomic.Bool
+	cacheHash  atomic.Value
+	modified   atomic.Bool
+	normalized atomic.Bool
 }
 
 func NewJsonRpcRequest(method string, params []interface{}) *JsonRpcRequest {
@@ -1367,6 +1368,9 @@ func (r *JsonRpcRequest) Clone() *JsonRpcRequest {
 	}
 	if r.modified.Load() {
 		cloned.modified.Store(true)
+	}
+	if r.normalized.Load() {
+		cloned.normalized.Store(true)
 	}
 
 	return cloned
@@ -1440,23 +1444,42 @@ func (r *JsonRpcRequest) MarkModified() {
 	r.modified.Store(true)
 }
 
-func (r *JsonRpcRequest) UnmarshalJSON(data []byte) error {
-	type Alias JsonRpcRequest
-	aux := &struct {
-		*Alias
-		ID json.RawMessage `json:"id,omitempty"`
-	}{
-		Alias: (*Alias)(r),
+func (r *JsonRpcRequest) WasNormalized() bool {
+	if r == nil {
+		return false
 	}
-	aux.JSONRPC = "2.0"
+	return r.normalized.Load()
+}
 
-	if err := SonicCfg.Unmarshal(data, &aux); err != nil {
+func (r *JsonRpcRequest) UnmarshalJSON(data []byte) error {
+	r.modified.Store(false)
+	r.normalized.Store(false)
+
+	wireReq := struct {
+		JSONRPC *string          `json:"jsonrpc"`
+		ID      *json.RawMessage `json:"id"`
+		Method  string           `json:"method"`
+		Params  []interface{}    `json:"params"`
+	}{}
+
+	if err := SonicCfg.Unmarshal(data, &wireReq); err != nil {
 		return err
 	}
 
-	if aux.ID != nil {
+	normalized := false
+	r.Method = wireReq.Method
+	r.Params = wireReq.Params
+
+	if wireReq.JSONRPC == nil || *wireReq.JSONRPC == "" {
+		r.JSONRPC = "2.0"
+		normalized = true
+	} else {
+		r.JSONRPC = *wireReq.JSONRPC
+	}
+
+	if wireReq.ID != nil {
 		var id interface{}
-		if err := SonicCfg.Unmarshal(aux.ID, &id); err != nil {
+		if err := SonicCfg.Unmarshal(*wireReq.ID, &id); err != nil {
 			return err
 		}
 		switch v := id.(type) {
@@ -1464,19 +1487,24 @@ func (r *JsonRpcRequest) UnmarshalJSON(data []byte) error {
 			r.ID = int64(v)
 		case string:
 			r.ID = v
+		default:
+			r.ID = v
 		}
+	} else {
+		r.ID = nil
 	}
 
 	if r.ID == nil {
 		r.ID = util.RandomID()
+		normalized = true
 	} else {
-		switch r.ID.(type) {
-		case string:
-			if r.ID.(string) == "" {
-				r.ID = util.RandomID()
-			}
+		if v, ok := r.ID.(string); ok && v == "" {
+			r.ID = util.RandomID()
+			normalized = true
 		}
 	}
+
+	r.normalized.Store(normalized)
 
 	return nil
 }

@@ -684,7 +684,7 @@ func (c *GenericHttpJsonRpcClient) sendSingleRequest(ctx context.Context, req *c
 			methodErr,
 			c.upstream,
 			req.NetworkId(),
-			"",
+			method,
 			0,
 			0,
 			0,

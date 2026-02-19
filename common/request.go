@@ -955,8 +955,10 @@ func (r *NormalizedRequest) Body() []byte {
 	if r == nil {
 		return nil
 	}
-	if jrq := r.jsonRpcRequest.Load(); jrq != nil && jrq.IsModified() {
-		return nil
+	if jrq := r.jsonRpcRequest.Load(); jrq != nil {
+		if jrq.IsModified() || jrq.WasNormalized() {
+			return nil
+		}
 	}
 	return r.body
 }
