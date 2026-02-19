@@ -359,6 +359,10 @@ func resultToJsonRpcResponse(result *common.NormalizedResponse, exec failsafe.Ex
 
 // classifyAndHashResponse computes and caches the response type, hash, and size for a result.
 func classifyAndHashResponse(r *execResult, exec failsafe.Execution[*common.NormalizedResponse], config *config) {
+	if responseAnalysisCached(r) {
+		return
+	}
+
 	if r.Err != nil {
 		// Classify agreed-upon JSON-RPC errors and execution exceptions as consensus-valid errors.
 		// Only true infrastructure issues (like timeouts, network/server failures) are infrastructure errors.
@@ -398,6 +402,25 @@ func classifyAndHashResponse(r *execResult, exec failsafe.Execution[*common.Norm
 	if r.CachedHash == "" {
 		r.CachedResponseType = ResponseTypeInfrastructureError
 		r.CachedHash = "error:generic"
+	}
+}
+
+// responseAnalysisCached reports whether classifyAndHashResponse already populated stable cached fields.
+func responseAnalysisCached(r *execResult) bool {
+	if r == nil || r.CachedHash == "" {
+		return false
+	}
+
+	switch r.CachedResponseType {
+	case ResponseTypeNonEmpty, ResponseTypeEmpty:
+		return r.Err == nil && r.Result != nil
+	case ResponseTypeConsensusError:
+		return r.Err != nil
+	case ResponseTypeInfrastructureError:
+		// Infra classification can come from an actual error or a malformed success result.
+		return r.Err != nil || r.Result == nil || r.CachedHash == "error:generic"
+	default:
+		return false
 	}
 }
 

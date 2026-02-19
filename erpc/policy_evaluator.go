@@ -44,6 +44,11 @@ type upstreamState struct {
 
 type metricData map[string]interface{}
 
+type stateEntry struct {
+	upstream common.Upstream
+	state    *upstreamState
+}
+
 func NewPolicyEvaluator(
 	networkId string,
 	logger *zerolog.Logger,
@@ -96,9 +101,6 @@ func (p *PolicyEvaluator) Start(ctx context.Context) error {
 }
 
 func (p *PolicyEvaluator) evaluateUpstreams() error {
-	p.upstreamsMu.Lock()
-	defer p.upstreamsMu.Unlock()
-
 	// Get all upstreams for this network
 	upsList := p.upstreamsRegistry.GetNetworkUpstreams(p.appCtx, p.networkId)
 	if len(upsList) == 0 {
@@ -230,50 +232,70 @@ func (p *PolicyEvaluator) evaluateMethod(method string, upsList []*upstream.Upst
 
 	// Update states based on evaluation
 	now := time.Now()
+	stateEntries := p.getOrCreateStateEntries(method, upsList)
+
+	for _, entry := range stateEntries {
+		isSelected := selectedUpstreams[entry.upstream.Id()]
+		isActive := p.updateState(entry.state, isSelected, now)
+
+		// Tracker updates can be slow; keep them outside shared evaluator locks.
+		if !isActive {
+			p.metricsTracker.Cordon(entry.upstream, method, "excluded by selection policy")
+		} else {
+			p.metricsTracker.Uncordon(entry.upstream, method, "included by selection policy")
+		}
+	}
+
+	return nil
+}
+
+func (p *PolicyEvaluator) getOrCreateStateEntries(method string, upsList []*upstream.Upstream) []stateEntry {
+	p.upstreamsMu.Lock()
+	defer p.upstreamsMu.Unlock()
+
 	stateMap := p.getStateMap(method)
+	stateEntries := make([]stateEntry, 0, len(upsList))
 
 	for _, ups := range upsList {
-		id := ups.Id()
-		state, exists := stateMap[id]
+		state, exists := stateMap[ups.Id()]
 		if !exists {
 			state = &upstreamState{
 				mu:       &sync.RWMutex{},
 				isActive: true,
 			}
-			stateMap[id] = state
+			stateMap[ups.Id()] = state
 		}
 
-		state.mu.Lock()
-
-		if selectedUpstreams[id] {
-			state.isActive = true
-			state.sampleCounter = 0
-			state.resampleInterval = time.Time{}
-		} else {
-			if state.isActive {
-				// Newly deactivated
-				state.isActive = false
-				// Only initialize resampling state when resampling is enabled
-				if p.config.ResampleExcluded {
-					state.resampleInterval = now.Add(p.config.ResampleInterval.Duration())
-					state.sampleCounter = p.config.ResampleCount
-				}
-			}
-		}
-
-		state.lastEvalTime = now
-
-		// Update tracker state
-		if !state.isActive {
-			p.metricsTracker.Cordon(ups, method, "excluded by selection policy")
-		} else {
-			p.metricsTracker.Uncordon(ups, method, "included by selection policy")
-		}
-
-		state.mu.Unlock()
+		stateEntries = append(stateEntries, stateEntry{
+			upstream: ups,
+			state:    state,
+		})
 	}
 
-	return nil
+	return stateEntries
+}
+
+func (p *PolicyEvaluator) updateState(state *upstreamState, isSelected bool, now time.Time) bool {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+
+	if isSelected {
+		state.isActive = true
+		state.sampleCounter = 0
+		state.resampleInterval = time.Time{}
+	} else if state.isActive {
+		// Newly deactivated
+		state.isActive = false
+		// Only initialize resampling state when resampling is enabled
+		if p.config.ResampleExcluded {
+			state.resampleInterval = now.Add(p.config.ResampleInterval.Duration())
+			state.sampleCounter = p.config.ResampleCount
+		}
+	}
+
+	state.lastEvalTime = now
+
+	return state.isActive
 }
 
 func (p *PolicyEvaluator) getStateMap(method string) map[string]*upstreamState {
