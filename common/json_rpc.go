@@ -1470,7 +1470,7 @@ func (r *JsonRpcRequest) UnmarshalJSON(data []byte) error {
 	r.Method = wireReq.Method
 	r.Params = wireReq.Params
 
-	if wireReq.JSONRPC == nil || *wireReq.JSONRPC == "" {
+	if wireReq.JSONRPC == nil {
 		r.JSONRPC = "2.0"
 		normalized = true
 	} else {
