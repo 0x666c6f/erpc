@@ -21,6 +21,45 @@ import (
 	"github.com/rs/zerolog"
 )
 
+// ScoringConfig bundles all project-level scoring/routing parameters.
+// Pass nil to NewUpstreamsRegistry to use defaults.
+type ScoringConfig struct {
+	RoutingStrategy   string
+	ScoreGranularity  string
+	PenaltyDecayRate  float64
+	SwitchHysteresis  float64
+	MinSwitchInterval time.Duration
+}
+
+func (c *ScoringConfig) withDefaults() *ScoringConfig {
+	out := &ScoringConfig{}
+	if c != nil {
+		*out = *c
+	}
+	if out.RoutingStrategy == "" {
+		out.RoutingStrategy = "score-based"
+	}
+	if out.ScoreGranularity == "" {
+		out.ScoreGranularity = "upstream"
+	}
+	if out.PenaltyDecayRate == 0 {
+		out.PenaltyDecayRate = 0.95
+	} else if out.PenaltyDecayRate < 0 {
+		out.PenaltyDecayRate = 0
+	}
+	if out.SwitchHysteresis == 0 {
+		out.SwitchHysteresis = 0.10
+	} else if out.SwitchHysteresis < 0 {
+		out.SwitchHysteresis = 0
+	}
+	if out.MinSwitchInterval == 0 {
+		out.MinSwitchInterval = 2 * time.Minute
+	} else if out.MinSwitchInterval < 0 {
+		out.MinSwitchInterval = 0
+	}
+	return out
+}
+
 // Scoring tunables (kept local to this file for now)
 const (
 	// Number of requests after which we fully trust an upstream's per-method metrics
@@ -110,8 +149,13 @@ func NewUpstreamsRegistry(
 	mt *health.Tracker,
 	scoreRefreshInterval time.Duration,
 	scoringCfg *ScoringConfig,
-	onUpstreamRegistered func(*Upstream) error,
+	onUpstreamRegistered ...func(*Upstream) error,
 ) *UpstreamsRegistry {
+	var onRegistered func(*Upstream) error
+	if len(onUpstreamRegistered) > 0 {
+		onRegistered = onUpstreamRegistered[0]
+	}
+
 	lg := logger.With().Str("component", "upstreams").Logger()
 	return &UpstreamsRegistry{
 		appCtx:               appCtx,
@@ -141,7 +185,7 @@ func NewUpstreamsRegistry(
 		upstreamsMu:            &sync.RWMutex{},
 		networkMu:              &sync.Map{},
 		initializer:            util.NewInitializer(appCtx, &lg, nil),
-		onUpstreamRegistered:   onUpstreamRegistered,
+		onUpstreamRegistered:   onRegistered,
 		scoreMetricsMode:       telemetry.ScoreModeCompact,
 	}
 }
@@ -485,12 +529,87 @@ func (u *UpstreamsRegistry) RUnlockUpstreams() {
 	u.upstreamsMu.RUnlock()
 }
 
+func (u *UpstreamsRegistry) refreshRoundRobin() error {
+	u.upstreamsMu.RLock()
+	if len(u.allUpstreams) == 0 {
+		u.upstreamsMu.RUnlock()
+		u.logger.Trace().Str("projectId", u.prjId).Msg("no upstreams yet to refresh scores")
+		return nil
+	}
+
+	type key struct{ network, method string }
+	work := make(map[key][]*Upstream)
+	for networkId, methods := range u.sortedUpstreams {
+		for method := range methods {
+			var src []*Upstream
+			if networkId == "*" {
+				src = u.allUpstreams
+			} else {
+				src = u.networkUpstreams[networkId]
+			}
+			cp := make([]*Upstream, len(src))
+			copy(cp, src)
+			work[key{network: networkId, method: method}] = cp
+		}
+	}
+	u.upstreamsMu.RUnlock()
+
+	type pairResult struct {
+		network, method string
+		sorted          []*Upstream
+	}
+	var results []pairResult
+	for km, upsList := range work {
+		if len(upsList) == 0 {
+			continue
+		}
+		active := u.filterCordoned(upsList, km.method)
+		if len(active) == 0 {
+			continue
+		}
+		if _, ok := u.rotationCounters[km.network]; !ok {
+			u.rotationCounters[km.network] = make(map[string]uint64)
+		}
+		u.rotationCounters[km.network][km.method]++
+		offset := int(u.rotationCounters[km.network][km.method] % uint64(len(active)))
+		rotated := make([]*Upstream, len(active))
+		for i := range active {
+			rotated[i] = active[(i+offset)%len(active)]
+		}
+		results = append(results, pairResult{network: km.network, method: km.method, sorted: rotated})
+	}
+
+	u.upstreamsMu.Lock()
+	for _, res := range results {
+		if _, ok := u.sortedUpstreams[res.network]; !ok {
+			u.sortedUpstreams[res.network] = make(map[string][]*Upstream)
+		}
+		u.sortedUpstreams[res.network][res.method] = res.sorted
+		u.recordScores(res.sorted, res.network, res.method, nil)
+	}
+	u.emitRoutingPriority()
+	u.upstreamsMu.Unlock()
+
+	return nil
+}
+
 func (u *UpstreamsRegistry) RefreshUpstreamNetworkMethodScores() error {
 	u.refreshMu.Lock()
 	defer u.refreshMu.Unlock()
 
 	_, span := common.StartDetailSpan(u.appCtx, "UpstreamsRegistry.RefreshUpstreamNetworkMethodScores")
 	defer span.End()
+
+	switch u.scoringCfg.RoutingStrategy {
+	case "round-robin":
+		return u.refreshRoundRobin()
+	case "", "score-based":
+		// default
+	default:
+		u.logger.Warn().
+			Str("routingStrategy", u.scoringCfg.RoutingStrategy).
+			Msg("unknown routing strategy, defaulting to score-based")
+	}
 
 	// Snapshot current workset under lock after pruning stale entries and cap enforcement.
 	now := time.Now()
@@ -569,88 +688,11 @@ func (u *UpstreamsRegistry) RefreshUpstreamNetworkMethodScores() error {
 			sorted := u.stickySort(active, penalties, km.network, "*", prev)
 			networkResults[km.network] = &networkResult{penalties, sorted}
 		}
-
-		// Normalize effective metrics for scoring
-		normRespLatencies := normalizeValuesLog(effLat)
-		normErrorRates := normalizeValues(effErr)
-		normThrottledRates := normalizeValues(effThr)
-		normTotalRequests := normalizeValues(totalRequests)
-		normBlockHeadLags := normalizeValuesLog(blockHeadLags)
-		normFinalizationLags := normalizeValuesLog(finalizationLags)
-		normMisbehaviorRates := normalizeValues(misbehaviorRates)
-
-		// Calculate instantaneous scores, then apply EMA smoothing using previous scores
-		scores := make(map[string]float64, len(upsList))
-		for i, ups := range upsList {
-			upsId := ups.Id()
-			instant := u.calculateScore(
-				ups,
-				km.network,
-				km.method,
-				nil,
-				normTotalRequests[i],
-				normRespLatencies[i],
-				normErrorRates[i],
-				normThrottledRates[i],
-				normBlockHeadLags[i],
-				normFinalizationLags[i],
-				normMisbehaviorRates[i],
-			)
-			// Previous smoothed score captured during snapshot
-			prev := prevScores[km][upsId]
-			// Guard against NaN/Inf propagation in EMA smoothing.
-			// NaN can occur from metrics collection edge cases (e.g., division by zero)
-			// and once present will propagate indefinitely through EMA calculations.
-			if math.IsNaN(prev) || math.IsInf(prev, 0) {
-				u.logger.Warn().
-					Str("upstreamId", upsId).
-					Str("network", km.network).
-					Str("method", km.method).
-					Float64("prev", prev).
-					Msg("previous EMA score was NaN/Inf, resetting to 0")
-				prev = 0
-			}
-			if math.IsNaN(instant) || math.IsInf(instant, 0) {
-				u.logger.Warn().
-					Str("upstreamId", upsId).
-					Str("network", km.network).
-					Str("method", km.method).
-					Float64("instant", instant).
-					Msg("instant score calculation returned NaN/Inf, using 0")
-				instant = 0
-			}
-			// Apply EMA smoothing even when previous score is zero.
-			// Using prev==0 for first-time entries only scales all scores uniformly,
-			// preserving ordering while ensuring consistent EMA application.
-			smoothed := scoreEMAPreviousWeight*prev + (1.0-scoreEMAPreviousWeight)*instant
-			scores[upsId] = smoothed
-			// Emit score metric according to configured mode.
-			// compact: collapse upstream and category into 'n/a' to reduce cardinality
-			// detailed: include full upstream and category
-			// Respect emission mode
-			if u.scoreMetricsMode == telemetry.ScoreModeNone {
-				// Do not emit anything in 'none' mode
-				// Continue to compute and store scores, but skip metric emission
-			} else if !math.IsNaN(smoothed) && !math.IsInf(smoothed, 0) {
-				// Only emit valid scores to Prometheus (defense-in-depth against NaN/Inf)
-				upLabel := "n/a"
-				catLabel := "n/a"
-				if u.scoreMetricsMode == telemetry.ScoreModeDetailed {
-					upLabel = upsId
-					catLabel = km.method
-				}
-				telemetry.MetricUpstreamScoreOverall.WithLabelValues(u.prjId, ups.VendorName(), ups.NetworkLabel(), upLabel, catLabel).Set(smoothed)
-			} else {
-				// Defense-in-depth triggered: smoothed score is NaN/Inf despite input guards
-				u.logger.Error().
-					Str("upstreamId", upsId).
-					Str("network", km.network).
-					Str("method", km.method).
-					Float64("prev", prev).
-					Float64("instant", instant).
-					Float64("smoothed", smoothed).
-					Msg("smoothed score is NaN/Inf despite input guards - not emitting to Prometheus")
-			}
+		for km := range work {
+			nr := networkResults[km.network]
+			cp := make([]*Upstream, len(nr.sorted))
+			copy(cp, nr.sorted)
+			results = append(results, pairResult{km.network, km.method, nr.penalties, cp})
 		}
 	} else {
 		// Per-method: compute penalty per (upstream, method) pair
@@ -1380,6 +1422,144 @@ func (u *UpstreamsRegistry) scheduleScoreCalculationTimers(ctx context.Context) 
 			}
 		}
 	}()
+}
+
+func (u *UpstreamsRegistry) calculateScore(
+	ups *Upstream,
+	networkId,
+	method string,
+	finalities []common.DataFinalityState,
+	normTotalRequests,
+	normRespLatency,
+	normErrorRate,
+	normThrottledRate,
+	normBlockHeadLag,
+	normFinalizationLag,
+	normMisbehaviorRate float64,
+) float64 {
+	mul := ups.getScoreMultipliers(networkId, method, finalities)
+
+	score := 0.0
+	if mul.TotalRequests != nil && *mul.TotalRequests > 0 {
+		score += expCurve(1-normTotalRequests) * *mul.TotalRequests
+	}
+	if mul.RespLatency != nil && *mul.RespLatency > 0 {
+		score += expCurve(1-normRespLatency) * *mul.RespLatency
+	}
+	if mul.ErrorRate != nil && *mul.ErrorRate > 0 {
+		score += expCurve(1-normErrorRate) * *mul.ErrorRate
+	}
+	if mul.ThrottledRate != nil && *mul.ThrottledRate > 0 {
+		score += expCurve(1-normThrottledRate) * *mul.ThrottledRate
+	}
+	if mul.BlockHeadLag != nil && *mul.BlockHeadLag > 0 {
+		score += expCurve(1-normBlockHeadLag) * *mul.BlockHeadLag
+	}
+	if mul.FinalizationLag != nil && *mul.FinalizationLag > 0 {
+		score += expCurve(1-normFinalizationLag) * *mul.FinalizationLag
+	}
+	if mul.Misbehaviors != nil && *mul.Misbehaviors > 0 {
+		score += expCurve(1-normMisbehaviorRate) * *mul.Misbehaviors
+	}
+	if mul.Overall != nil && *mul.Overall > 0 {
+		score *= *mul.Overall
+	}
+	return score
+}
+
+func expCurve(x float64) float64 {
+	return math.Pow(x, 2.0)
+}
+
+func normalizeValues(values []float64) []float64 {
+	if len(values) == 0 {
+		return []float64{}
+	}
+
+	max := 0.0
+	for _, value := range values {
+		if math.IsNaN(value) || math.IsInf(value, 0) {
+			continue
+		}
+		if value > max {
+			max = value
+		}
+	}
+
+	normalized := make([]float64, len(values))
+	for i, value := range values {
+		if math.IsNaN(value) || math.IsInf(value, 0) {
+			normalized[i] = 0
+			continue
+		}
+		if max > 0 {
+			normalized[i] = value / max
+		} else {
+			normalized[i] = 0
+		}
+	}
+
+	return normalized
+}
+
+func normalizeValuesLog(values []float64) []float64 {
+	if len(values) == 0 {
+		return []float64{}
+	}
+
+	dataMin := math.MaxFloat64
+	dataMax := 0.0
+	hasValidValue := false
+	for _, v := range values {
+		if math.IsNaN(v) || math.IsInf(v, 0) || v < 0 {
+			continue
+		}
+		hasValidValue = true
+		if v < dataMin {
+			dataMin = v
+		}
+		if v > dataMax {
+			dataMax = v
+		}
+	}
+
+	if !hasValidValue {
+		return make([]float64, len(values))
+	}
+
+	normalized := make([]float64, len(values))
+	if dataMin == dataMax {
+		if dataMin > 0 {
+			for i := range normalized {
+				normalized[i] = 1.0
+			}
+		}
+		return normalized
+	}
+
+	logMinOffset := math.Log(dataMin + 1.0)
+	logMaxOffset := math.Log(dataMax + 1.0)
+	denom := logMaxOffset - logMinOffset
+
+	for i, v := range values {
+		if math.IsNaN(v) || math.IsInf(v, 0) || v < 0 {
+			normalized[i] = 0.0
+			continue
+		}
+		logVOffset := math.Log(v + 1.0)
+		norm := (logVOffset - logMinOffset) / denom
+		if math.IsNaN(norm) || math.IsInf(norm, 0) {
+			normalized[i] = 0.0
+		} else if norm < 0.0 {
+			normalized[i] = 0.0
+		} else if norm > 1.0 {
+			normalized[i] = 1.0
+		} else {
+			normalized[i] = norm
+		}
+	}
+
+	return normalized
 }
 
 func (u *UpstreamsRegistry) GetUpstreamsHealth() (*UpstreamsHealth, error) {

@@ -79,5 +79,6 @@ func (m *Multiplexer) Close(ctx context.Context, resp *common.NormalizedResponse
 
 		m.resp = resp
 		m.err = err
+		close(m.done)
 	})
 }

@@ -64,6 +64,7 @@ func (r *JsonRpcResponse) SetResult(result []byte) {
 	r.resultMu.Lock()
 	defer r.resultMu.Unlock()
 	r.result = result
+	r.clearCanonicalHashCache()
 }
 
 func (r *JsonRpcResponse) GetResultBytes() []byte {
@@ -128,6 +129,10 @@ func (r *JsonRpcResponse) Free() {
 	r.resultMu.Unlock()
 
 	// Clear canonical hash caches
+	r.clearCanonicalHashCache()
+}
+
+func (r *JsonRpcResponse) clearCanonicalHashCache() {
 	r.canonicalHashWithIgnored.Range(func(key, _ any) bool {
 		r.canonicalHashWithIgnored.Delete(key)
 		return true
@@ -270,6 +275,7 @@ func (r *JsonRpcResponse) ParseFromStream(ctx []context.Context, reader io.Reade
 	}
 
 	const noCopyBufThreshold = 64 << 10 // match util.maxBufCap; avoid copies for non-pooled buffers
+	r.clearCanonicalHashCache()
 
 	data, returnBuf, err := util.ReadAll(reader, expectedSize)
 	if err != nil {
@@ -290,11 +296,6 @@ func (r *JsonRpcResponse) ParseFromStream(ctx []context.Context, reader io.Reade
 		ID     json.RawMessage `json:"id"`
 		Result json.RawMessage `json:"result"`
 		Error  json.RawMessage `json:"error"`
-	}
-
-	// Return buffer after we're done parsing and copying what we need
-	if returnBuf != nil {
-		defer returnBuf()
 	}
 
 	// Use Sonic's Unmarshal which works directly with bytes
@@ -360,6 +361,7 @@ func (r *JsonRpcResponse) ParseFromBytes(ctx context.Context, data []byte) error
 	}
 
 	const noCopyBufThreshold = 64 << 10 // match util.maxBufCap; avoid copies for non-pooled buffers
+	r.clearCanonicalHashCache()
 
 	// Parse into a temporary struct to extract fields without string conversion
 	var temp struct {
@@ -427,6 +429,7 @@ func (r *JsonRpcResponse) SetResultWriter(w util.ByteWriter) {
 	r.resultMu.Lock()
 	defer r.resultMu.Unlock()
 	r.resultWriter = w
+	r.clearCanonicalHashCache()
 }
 
 func (r *JsonRpcResponse) ParseError(raw string) error {
