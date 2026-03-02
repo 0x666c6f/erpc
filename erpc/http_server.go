@@ -490,7 +490,7 @@ func (s *HttpServer) createRequestHandler() http.Handler {
 				// Validate the raw JSON-RPC payload early
 				if err := nq.Validate(); err != nil {
 					responses[index] = processErrorBody(&lg, &startedAt, nq, err, &common.TRUE)
-					common.EndRequestSpan(requestCtx, nil, responses[index])
+					common.EndRequestSpan(requestCtx, nil, err)
 					return
 				}
 
@@ -565,8 +565,9 @@ func (s *HttpServer) createRequestHandler() http.Handler {
 				if reqArchitecture == "" || reqChainId == "" {
 					networkIdFromBody, extractErr := extractNetworkIdFromRequestBody(nq.Body())
 					if extractErr != nil {
-						responses[index] = processErrorBody(&rlg, &startedAt, nq, common.NewErrInvalidRequest(extractErr), &common.TRUE)
-						common.EndRequestSpan(requestCtx, nil, extractErr)
+						invalidReqErr := common.NewErrInvalidRequest(extractErr)
+						responses[index] = processErrorBody(&rlg, &startedAt, nq, invalidReqErr, &common.TRUE)
+						common.EndRequestSpan(requestCtx, nil, invalidReqErr)
 						return
 					}
 					if networkIdFromBody != "" {

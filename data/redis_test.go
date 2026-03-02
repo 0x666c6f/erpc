@@ -717,6 +717,48 @@ func TestRedisReverseIndexLookup(t *testing.T) {
 	require.Equal(t, value, got)
 }
 
+func TestRedisReverseIndexLookup_ScriptFailureFallback(t *testing.T) {
+	m, err := miniredis.Run()
+	require.NoError(t, err)
+	defer m.Close()
+
+	logger := zerolog.New(io.Discard)
+	ctx := context.Background()
+
+	cfg := &common.RedisConnectorConfig{
+		Addr:        m.Addr(),
+		InitTimeout: common.Duration(2 * time.Second),
+		GetTimeout:  common.Duration(2 * time.Second),
+		SetTimeout:  common.Duration(2 * time.Second),
+	}
+	err = cfg.SetDefaults()
+	require.NoError(t, err)
+
+	connector, err := NewRedisConnector(ctx, &logger, "test-reverse-index-script-fallback", cfg)
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		return connector.initializer.State() == util.StateReady
+	}, 3*time.Second, 100*time.Millisecond, "connector did not become ready")
+
+	rangeKey := "eth_getTransactionReceipt:script-fallback"
+	concretePartitionKey := "evm:123:latest"
+	wildcardPartitionKey := "evm:123:*"
+	value := []byte("tx-receipt-value")
+
+	err = connector.Set(ctx, concretePartitionKey, rangeKey, value, nil)
+	require.NoError(t, err)
+
+	origScript := redisReverseLookupScript
+	redisReverseLookupScript = redis.NewScript(`return redis.call("NONEXISTENT_COMMAND", KEYS[1])`)
+	t.Cleanup(func() {
+		redisReverseLookupScript = origScript
+	})
+
+	got, err := connector.Get(ctx, ConnectorReverseIndex, wildcardPartitionKey, rangeKey, nil)
+	require.NoError(t, err)
+	require.Equal(t, value, got)
+}
+
 func TestRedisReverseIndexLookup_ExpiryCleansReverseIndex(t *testing.T) {
 	m, err := miniredis.Run()
 	require.NoError(t, err)

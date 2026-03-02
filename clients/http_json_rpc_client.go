@@ -481,10 +481,12 @@ func (c *GenericHttpJsonRpcClient) processBatchResponse(requests map[interface{}
 	searcher.ConcurrentRead = false
 	searcher.ValidateJSON = false
 	bodyText := ""
+	bodyTextCopied := false
 	bodyTextCopy := func() string {
-		if bodyText == "" {
+		if !bodyTextCopied {
 			// Copy out of pooled memory for any value that can outlive cleanup().
 			bodyText = string(bodyBytes)
+			bodyTextCopied = true
 		}
 		return bodyText
 	}
