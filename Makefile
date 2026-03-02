@@ -104,18 +104,26 @@ build:
 
 TEST_PARALLEL ?= 1
 TEST_P ?= $(TEST_PARALLEL)
+PKG_EXCLUDE_REGEX := ^github\.com/erpc/erpc/(cmd|test)($$|/)
+HAS_RG := $(shell command -v rg >/dev/null 2>&1 && echo 1 || echo 0)
+ifeq ($(HAS_RG),1)
+PKG_FILTER_CMD := rg -v '$(PKG_EXCLUDE_REGEX)'
+else
+PKG_FILTER_CMD := grep -Ev '$(PKG_EXCLUDE_REGEX)'
+endif
+GO_TEST_PACKAGES := $$(go list ./... | $(PKG_FILTER_CMD))
 
 .PHONY: test
 test:
 	@go clean -testcache
 	@go test ./cmd/... -count 1 -parallel $(TEST_PARALLEL) -p $(TEST_P)
-	@go test $$(go list ./... | rg -v '^github\.com/erpc/erpc/cmd($$|/)' | rg -v '^github\.com/erpc/erpc/test($$|/)') -covermode=atomic -v -race -count 1 -parallel $(TEST_PARALLEL) -p $(TEST_P) -timeout 15m -failfast=false
+	@go test $(GO_TEST_PACKAGES) -covermode=atomic -v -race -count 1 -parallel $(TEST_PARALLEL) -p $(TEST_P) -timeout 15m -failfast=false
 
 .PHONY: test-fast
 test-fast:
 	@go clean -testcache
 	@go test ./cmd/... -count 1 -parallel $(TEST_PARALLEL) -p $(TEST_P) -v
-	@go test $$(go list ./... | rg -v '^github\.com/erpc/erpc/cmd($$|/)' | rg -v '^github\.com/erpc/erpc/test($$|/)') -count 1 -parallel $(TEST_PARALLEL) -p $(TEST_P) -v -timeout 10m -failfast=false
+	@go test $(GO_TEST_PACKAGES) -count 1 -parallel $(TEST_PARALLEL) -p $(TEST_P) -v -timeout 10m -failfast=false
 
 .PHONY: test-parallel
 test-parallel:
@@ -129,7 +137,7 @@ test-parallel-max:
 test-race:
 	@go clean -testcache
 	@go test ./cmd/... -count 5 -parallel 5 -v -race
-	@go test $$(go list ./... | rg -v '^github\.com/erpc/erpc/cmd($$|/)' | rg -v '^github\.com/erpc/erpc/test($$|/)') -count 15 -parallel 15 -p 15 -v -timeout 30m -race
+	@go test $(GO_TEST_PACKAGES) -count 15 -parallel 15 -p 15 -v -timeout 30m -race
 
 .PHONY: bench
 bench:
@@ -138,7 +146,7 @@ bench:
 .PHONY: coverage
 coverage:
 	@go clean -testcache
-	@go test -coverprofile=coverage.txt -covermode=atomic $$(go list ./... | rg -v '^github\.com/erpc/erpc/cmd($$|/)' | rg -v '^github\.com/erpc/erpc/test($$|/)')
+	@go test -coverprofile=coverage.txt -covermode=atomic $(GO_TEST_PACKAGES)
 	@go tool cover -html=coverage.txt
 
 .PHONY: up

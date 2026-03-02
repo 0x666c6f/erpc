@@ -16,9 +16,13 @@ pkg_list=()
 while IFS= read -r pkg; do
   pkg_list+=("$pkg")
 done < <(
-  go list ./... \
-    | rg -v '^github\.com/erpc/erpc/cmd($|/)' \
-    | rg -v '^github\.com/erpc/erpc/test($|/)'
+  if command -v rg >/dev/null 2>&1; then
+    go list ./... \
+      | rg -v '^github\.com/erpc/erpc/(cmd|test)($|/)'
+  else
+    go list ./... \
+      | grep -Ev '^github\.com/erpc/erpc/(cmd|test)($|/)'
+  fi
 )
 
 if [[ ${#pkg_list[@]} -eq 0 ]]; then
