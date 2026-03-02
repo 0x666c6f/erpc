@@ -13,6 +13,52 @@ export declare const EvmSyncingStateUnknown: EvmSyncingState;
 export declare const EvmSyncingStateSyncing: EvmSyncingState;
 export declare const EvmSyncingStateNotSyncing: EvmSyncingState;
 export type EvmStatePoller = any;
+/**
+ * EvmStatePollerDiagnostics contains diagnostic information about the state poller
+ * including block bounds, probe status, and any detection issues.
+ */
+export interface EvmStatePollerDiagnostics {
+    enabled: boolean;
+    /**
+     * Block head information
+     */
+    latestBlock: number;
+    finalizedBlock: number;
+    /**
+     * Syncing state
+     */
+    syncingState: string;
+    skipSyncingCheck?: boolean;
+    syncingCheckError?: string;
+    /**
+     * Latest block detection status
+     */
+    skipLatestBlockCheck?: boolean;
+    latestBlockFailureCount?: number;
+    latestBlockSuccessfulOnce?: boolean;
+    latestBlockDetectionIssue?: string;
+    /**
+     * Finalized block detection status
+     */
+    skipFinalizedCheck?: boolean;
+    finalizedBlockFailureCount?: number;
+    finalizedBlockSuccessfulOnce?: boolean;
+    finalizedBlockDetectionIssue?: string;
+    /**
+     * Earliest block bounds per probe type
+     */
+    earliestByProbe?: {
+        [key: EvmAvailabilityProbeType]: EvmProbeEarliestInfo | undefined;
+    };
+}
+/**
+ * EvmProbeEarliestInfo contains information about earliest block detection for a specific probe type
+ */
+export interface EvmProbeEarliestInfo {
+    probeType: EvmAvailabilityProbeType;
+    earliestBlock: number;
+    schedulerRunning?: boolean;
+}
 export type CacheDAL = any;
 export interface MockCacheDal {
     mock: any;
@@ -305,6 +351,34 @@ export interface ProjectConfig {
     scoreMetricsWindowSize?: Duration;
     scoreRefreshInterval?: Duration;
     /**
+     * RoutingStrategy selects the upstream ordering algorithm.
+     * "score-based" (default): penalty-based sticky routing.
+     * "round-robin": time-rotating equal distribution across upstreams.
+     */
+    routingStrategy?: string;
+    /**
+     * ScoreGranularity controls whether penalties are computed per-upstream or per-method.
+     * "upstream" (default): one penalty across all methods using aggregate metrics.
+     * "method": separate penalty per (upstream, method) pair.
+     */
+    scoreGranularity?: string;
+    /**
+     * ScorePenaltyDecayRate is the fraction of previous penalty retained per refresh tick (0..1).
+     * Lower = faster forgetting. At 0.85 with 30s ticks a penalty halves in ~2 minutes.
+     * Use a negative value (e.g. -1) to disable EMA memory entirely (instant penalty = no decay).
+     */
+    scorePenaltyDecayRate?: number;
+    /**
+     * ScoreSwitchHysteresis prevents primary flip-flop: the challenger's penalty
+     * must be at least this fraction lower than the current primary's penalty to
+     * trigger a switch (0..1). For example 0.10 means 10% better. Negative disables stickiness.
+     */
+    scoreSwitchHysteresis?: number;
+    /**
+     * ScoreMinSwitchInterval is the cooldown between primary upstream switches.
+     */
+    scoreMinSwitchInterval?: Duration;
+    /**
      * ScoreMetricsMode controls label cardinality for upstream score metrics for this project.
      * Allowed values:
      * - "compact": emit compact series by setting upstream and category labels to 'n/a'
@@ -335,6 +409,7 @@ export interface NetworkDefaults {
     selectionPolicy?: SelectionPolicyConfig;
     directiveDefaults?: DirectiveDefaultsConfig;
     evm?: TsEvmNetworkConfigForDefaults;
+    multiplexing?: boolean;
 }
 export interface CORSConfig {
     allowedOrigins: string[];
@@ -485,11 +560,30 @@ export interface RetryPolicyConfig {
     backoffFactor?: number;
     jitter?: Duration;
     emptyResultConfidence?: AvailbilityConfidence;
+    /**
+     * EmptyResultAccept lists methods for which an empty/null result is considered valid
+     * and should NOT be retried (e.g. eth_getLogs, eth_call where empty is a legitimate response).
+     */
+    emptyResultAccept?: string[];
+    /**
+     * @deprecated: use EmptyResultAccept instead.
+     */
     emptyResultIgnore?: string[];
     /**
      * EmptyResultMaxAttempts limits total attempts when retries are triggered due to empty responses.
      */
     emptyResultMaxAttempts?: number;
+    /**
+     * EmptyResultDelay is the fixed delay between retry attempts triggered by empty results.
+     * When set, empty result retries wait this long instead of using the normal error delay/backoff.
+     */
+    emptyResultDelay?: Duration;
+    /**
+     * BlockUnavailableDelay is the fixed delay before retrying when all upstreams failed because the
+     * requested block is not yet available (ErrUpstreamBlockUnavailable). This gives upstream nodes
+     * time to receive and index the block before the retry. Typical values: 500ms-2s for fast chains.
+     */
+    blockUnavailableDelay?: Duration;
 }
 export interface CircuitBreakerPolicyConfig {
     failureThresholdCount: number;
@@ -531,6 +625,24 @@ export interface ConsensusPolicyConfig {
     preferNonEmpty?: boolean;
     preferLargerResponses?: boolean;
     misbehaviorsDestination?: MisbehaviorsDestinationConfig;
+    /**
+     * PreferHighestValueFor specifies methods that should use highest-value comparison
+     * instead of hash-based consensus. Map key is method name, value is array of field paths.
+     * Field paths: "result" for direct result value (e.g., eth_getTransactionCount returns hex),
+     * or field name for nested result objects (e.g., "nonce" for result.nonce).
+     * When multiple fields are specified, they act as tie-breakers in order.
+     */
+    preferHighestValueFor?: {
+        [key: string]: string[];
+    };
+    /**
+     * FireAndForget when true, allows consensus to return a response to the client immediately
+     * upon short-circuit, but does NOT cancel in-flight requests to other upstreams.
+     * This is useful for write operations like eth_sendRawTransaction where you want to
+     * broadcast the transaction to as many nodes as possible while still returning quickly.
+     * Default is false (normal behavior - cancel remaining requests on short-circuit).
+     */
+    fireAndForget?: boolean;
 }
 export type MisbehaviorsDestinationType = string;
 export declare const MisbehaviorsDestinationTypeFile: MisbehaviorsDestinationType;
@@ -648,6 +760,7 @@ export interface NetworkConfig {
     directiveDefaults?: DirectiveDefaultsConfig;
     alias?: string;
     methods?: MethodsConfig;
+    multiplexing?: boolean;
 }
 export interface DirectiveDefaultsConfig {
     retryEmpty?: boolean;
@@ -661,6 +774,11 @@ export interface DirectiveDefaultsConfig {
     enforceHighestBlock?: boolean;
     enforceGetLogsBlockRange?: boolean;
     enforceNonNullTaggedBlocks?: boolean;
+    /**
+     * ValidateTransactionsRoot: checks transactionsRoot vs transaction count consistency.
+     * Defaults to true. Disable for non-standard chains that use unusual trie roots.
+     */
+    validateTransactionsRoot?: boolean;
     /**
      * Validation: Header Field Lengths
      */
@@ -734,6 +852,14 @@ export interface EvmNetworkConfig {
      * Default includes common point-lookup methods like eth_getBlockByNumber, eth_getTransactionByHash, etc.
      */
     markEmptyAsErrorMethods?: string[];
+    /**
+     * IdempotentTransactionBroadcast enables idempotency handling for eth_sendRawTransaction.
+     * When enabled (default), "already known" and verified "nonce too low" errors are converted
+     * to success responses with the transaction hash. This allows failsafe policies (retry/hedge)
+     * to work safely with transaction broadcasting.
+     * Set to false to disable this behavior and return raw upstream errors.
+     */
+    idempotentTransactionBroadcast?: boolean;
 }
 /**
  * EvmIntegrityConfig is deprecated. Use DirectiveDefaultsConfig for validation settings.
@@ -841,6 +967,7 @@ export interface NetworkStrategyConfig {
      * RateLimitBudget, if set, is applied to the authenticated user (client IP)
      */
     rateLimitBudget?: string;
+    ipAsUser?: boolean;
 }
 export type LabelMode = string;
 export declare const ErrorLabelModeVerbose: LabelMode;

@@ -25,7 +25,7 @@ func buildRegistryForBench(b *testing.B, numNetworks, upstreamsPerNetwork int, m
 
 	vr := thirdparty.NewVendorsRegistry()
 	pr, _ := thirdparty.NewProvidersRegistry(&log.Logger, vr, nil, nil)
-	rlr, _ := NewRateLimitersRegistry(nil, &log.Logger)
+	rlr, _ := NewRateLimitersRegistry(context.Background(), nil, &log.Logger)
 	mt := health.NewTracker(&log.Logger, "bench-prj", time.Minute)
 
 	reg := NewUpstreamsRegistry(
@@ -40,6 +40,7 @@ func buildRegistryForBench(b *testing.B, numNetworks, upstreamsPerNetwork int, m
 		nil, // proxy pool registry
 		mt,
 		0,   // scoreRefreshInterval
+		nil, // scoringCfg
 		nil, // onUpstreamRegistered
 	)
 

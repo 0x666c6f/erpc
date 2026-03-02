@@ -387,7 +387,7 @@ func setupTestNetworkForMultiplexer(t *testing.T, ctx context.Context) *Network 
 		// No caching to test pure multiplexing
 	}
 
-	rateLimitersRegistry, err := upstream.NewRateLimitersRegistry(&common.RateLimiterConfig{}, &log.Logger)
+	rateLimitersRegistry, err := upstream.NewRateLimitersRegistry(context.Background(), &common.RateLimiterConfig{}, &log.Logger)
 	require.NoError(t, err)
 
 	metricsTracker := health.NewTracker(&log.Logger, "test", time.Minute)
@@ -419,6 +419,7 @@ func setupTestNetworkForMultiplexer(t *testing.T, ctx context.Context) *Network 
 		nil,
 		metricsTracker,
 		1*time.Second,
+		nil,
 		nil,
 	)
 

@@ -44,7 +44,7 @@ func TestNetwork_Forward_InfiniteLoopWithAllUpstreamsSkipping(t *testing.T) {
 				},
 			},
 		})
-		rlr, _ := upstream.NewRateLimitersRegistry(&common.RateLimiterConfig{
+		rlr, _ := upstream.NewRateLimitersRegistry(context.Background(), &common.RateLimiterConfig{
 			Budgets: []*common.RateLimitBudgetConfig{},
 		}, logger)
 		mt := health.NewTracker(logger, "testProject", 2*time.Second)
@@ -63,7 +63,7 @@ func TestNetwork_Forward_InfiniteLoopWithAllUpstreamsSkipping(t *testing.T) {
 		upsReg := upstream.NewUpstreamsRegistry(
 			ctx, logger, "testProject",
 			[]*common.UpstreamConfig{up1},
-			ssr, rlr, vr, pr, nil, mt, 1*time.Second, nil,
+			ssr, rlr, vr, pr, nil, mt, 1*time.Second, nil, nil,
 		)
 		upsReg.Bootstrap(ctx)
 		time.Sleep(100 * time.Millisecond)
@@ -132,7 +132,7 @@ func TestNetwork_Forward_InfiniteLoopWithAllUpstreamsSkipping(t *testing.T) {
 		})
 		require.NoError(t, err)
 
-		rlr, err := upstream.NewRateLimitersRegistry(&common.RateLimiterConfig{Budgets: []*common.RateLimitBudgetConfig{}}, logger)
+		rlr, err := upstream.NewRateLimitersRegistry(context.Background(), &common.RateLimiterConfig{Budgets: []*common.RateLimitBudgetConfig{}}, logger)
 		require.NoError(t, err)
 
 		mt := health.NewTracker(logger, "testProject", 2*time.Second)
@@ -146,7 +146,7 @@ func TestNetwork_Forward_InfiniteLoopWithAllUpstreamsSkipping(t *testing.T) {
 			Evm:           &common.EvmUpstreamConfig{ChainId: 123},
 		}
 
-		upr := upstream.NewUpstreamsRegistry(ctx, logger, "testProject", []*common.UpstreamConfig{up1}, ssr, rlr, vr, pr, nil, mt, 0, nil)
+		upr := upstream.NewUpstreamsRegistry(ctx, logger, "testProject", []*common.UpstreamConfig{up1}, ssr, rlr, vr, pr, nil, mt, 0, nil, nil)
 		upr.Bootstrap(ctx)
 		time.Sleep(100 * time.Millisecond)
 		require.NoError(t, upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123)))
@@ -212,7 +212,7 @@ func TestNetwork_Forward_InfiniteLoopWithAllUpstreamsSkipping(t *testing.T) {
 		require.NoError(t, err)
 
 		// Setup rate limiters registry
-		rlr, err := upstream.NewRateLimitersRegistry(&common.RateLimiterConfig{
+		rlr, err := upstream.NewRateLimitersRegistry(context.Background(), &common.RateLimiterConfig{
 			Budgets: []*common.RateLimitBudgetConfig{},
 		}, logger)
 		require.NoError(t, err)
@@ -266,6 +266,7 @@ func TestNetwork_Forward_InfiniteLoopWithAllUpstreamsSkipping(t *testing.T) {
 			nil,
 			mt,
 			1*time.Second,
+			nil,
 			nil,
 		)
 
@@ -396,7 +397,7 @@ func TestNetwork_Forward_InfiniteLoopWithAllUpstreamsSkipping(t *testing.T) {
 		})
 		require.NoError(t, err)
 
-		rlr, err := upstream.NewRateLimitersRegistry(&common.RateLimiterConfig{
+		rlr, err := upstream.NewRateLimitersRegistry(context.Background(), &common.RateLimiterConfig{
 			Budgets: []*common.RateLimitBudgetConfig{},
 		}, logger)
 		require.NoError(t, err)
@@ -446,6 +447,7 @@ func TestNetwork_Forward_InfiniteLoopWithAllUpstreamsSkipping(t *testing.T) {
 			nil,
 			mt,
 			1*time.Second,
+			nil,
 			nil,
 		)
 

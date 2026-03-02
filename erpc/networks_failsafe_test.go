@@ -225,7 +225,7 @@ func TestNetworkFailsafe_RetryEmpty(t *testing.T) {
 			},
 			&common.RetryPolicyConfig{
 				MaxAttempts:       3,
-				EmptyResultIgnore: []string{"eth_getLogs", "eth_call"}, // eth_getTransactionByHash not in list
+				EmptyResultAccept: common.DefaultEmptyResultAccept(), // eth_getTransactionByHash not in list
 			},
 		)
 
@@ -252,9 +252,11 @@ func TestNetworkFailsafe_RetryEmpty(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, "0x123", result)
 
-		// Verify a retry occurred
-		assert.Equal(t, 1, resp.Retries())
-		assert.Equal(t, 2, resp.Attempts())
+		// With the try-all-upstreams-before-returning behavior, rpc2 is found
+		// within the same execution round (no retry delay needed). This is more
+		// efficient than the old behavior which required a full retry round.
+		assert.Equal(t, 0, resp.Retries())
+		assert.Equal(t, 1, resp.Attempts())
 	})
 
 	t.Run("RetryEmptyTrue_IgnoreIncludesReceipt_NoRetry", func(t *testing.T) {
@@ -304,7 +306,7 @@ func TestNetworkFailsafe_RetryEmpty(t *testing.T) {
 			&common.DirectiveDefaultsConfig{RetryEmpty: util.BoolPtr(true)},
 			&common.RetryPolicyConfig{
 				MaxAttempts:       3,
-				EmptyResultIgnore: []string{"eth_getTransactionReceipt"},
+				EmptyResultAccept: []string{"eth_getTransactionReceipt"},
 			},
 		)
 
@@ -725,7 +727,7 @@ func setupTestNetworkWithRetryConfig(t *testing.T, ctx context.Context, directiv
 		}},
 	}
 
-	rateLimitersRegistry, err := upstream.NewRateLimitersRegistry(&common.RateLimiterConfig{}, &log.Logger)
+	rateLimitersRegistry, err := upstream.NewRateLimitersRegistry(context.Background(), &common.RateLimiterConfig{}, &log.Logger)
 	require.NoError(t, err)
 
 	metricsTracker := health.NewTracker(&log.Logger, "test", time.Minute)
@@ -757,6 +759,7 @@ func setupTestNetworkWithRetryConfig(t *testing.T, ctx context.Context, directiv
 		nil,
 		metricsTracker,
 		time.Second,
+		nil,
 		nil,
 	)
 
@@ -801,7 +804,7 @@ func setupTestNetworkWithMultipleFailsafePolicies(t *testing.T, ctx context.Cont
 		Failsafe: failsafeConfigs,
 	}
 
-	rateLimitersRegistry, err := upstream.NewRateLimitersRegistry(&common.RateLimiterConfig{}, &log.Logger)
+	rateLimitersRegistry, err := upstream.NewRateLimitersRegistry(context.Background(), &common.RateLimiterConfig{}, &log.Logger)
 	require.NoError(t, err)
 
 	metricsTracker := health.NewTracker(&log.Logger, "test", time.Minute)
@@ -833,6 +836,7 @@ func setupTestNetworkWithMultipleFailsafePolicies(t *testing.T, ctx context.Cont
 		nil,
 		metricsTracker,
 		time.Second,
+		nil,
 		nil,
 	)
 

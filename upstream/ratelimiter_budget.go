@@ -3,6 +3,7 @@ package upstream
 import (
 	"context"
 	"fmt"
+	"math"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -24,7 +25,6 @@ type RateLimiterBudget struct {
 	Rules      []*RateLimitRule
 	registry   *RateLimitersRegistry
 	rulesMu    sync.RWMutex
-	cache      limiter.RateLimitCache
 	maxTimeout time.Duration
 }
 
@@ -67,17 +67,67 @@ func (b *RateLimiterBudget) AdjustBudget(rule *RateLimitRule, newMaxCount uint32
 	return nil
 }
 
+// AdjustBudgetByFactor reads currentMax, multiplies by factor, clamps to
+// [minBudget, maxBudget], and writes the result -- all under rulesMu.
+// Returns (prev, next, changed) so callers can log without holding the lock.
+func (b *RateLimiterBudget) AdjustBudgetByFactor(rule *RateLimitRule, factor float64, minBudget, maxBudget int) (prev, next uint32, changed bool) {
+	if rule == nil || rule.Config == nil {
+		return 0, 0, false
+	}
+	b.rulesMu.Lock()
+	defer b.rulesMu.Unlock()
+
+	prev = rule.Config.MaxCount
+	raw := math.Ceil(float64(prev) * factor)
+	// Clamp to a valid uint32 range before the narrowing cast.  A large
+	// increaseFactor can push the float64 product above math.MaxUint32,
+	// which causes Go's float64→uint32 conversion to wrap to an arbitrary
+	// small value -- the opposite of an increase.
+	if raw > math.MaxUint32 {
+		raw = math.MaxUint32
+	} else if raw < 0 {
+		raw = 0
+	}
+	next = uint32(raw)
+	if minBudget > 0 {
+		minClamped := uint32(max(0, minBudget))
+		if next < minClamped {
+			next = minClamped
+		}
+	}
+	if maxBudget > 0 {
+		maxClamped := uint32(max(0, maxBudget))
+		if next > maxClamped {
+			next = maxClamped
+		}
+	}
+
+	if next == prev {
+		return prev, next, false
+	}
+
+	rule.Config.MaxCount = next
+	telemetry.MetricRateLimiterBudgetMaxCount.WithLabelValues(b.Id, rule.Config.Method, rule.Config.ScopeString()).Set(float64(next))
+	return prev, next, true
+}
+
 // ruleResult holds the result of evaluating a single rule.
 type ruleResult struct {
 	rule    *RateLimitRule
 	allowed bool
 }
 
+// getCache returns the current cache from the registry (thread-safe)
+func (b *RateLimiterBudget) getCache() limiter.RateLimitCache {
+	return b.registry.GetCache()
+}
+
 // TryAcquirePermit evaluates all matching rules for the given method using Envoy's DoLimit.
 // Rules are evaluated in parallel for lower latency. Returns true if allowed, false if rate limited.
 func (b *RateLimiterBudget) TryAcquirePermit(ctx context.Context, projectId string, req *common.NormalizedRequest, method string, vendor string, upstreamId string, authLabel string, origin string) (bool, error) {
-	if b.cache == nil {
-		return true, nil
+	cache := b.getCache()
+	if cache == nil {
+		return true, nil // Fail-open when no cache is available
 	}
 
 	ctx, span := common.StartDetailSpan(ctx, "RateLimiter.TryAcquirePermit",
@@ -168,6 +218,11 @@ func (b *RateLimiterBudget) TryAcquirePermit(ctx context.Context, projectId stri
 // evaluateRule checks a single rate limit rule against the cache.
 // Returns true if allowed, false if over limit.
 func (b *RateLimiterBudget) evaluateRule(ctx context.Context, rule *RateLimitRule, method, clientIP, userLabel, networkLabel string) bool {
+	cache := b.getCache()
+	if cache == nil {
+		return true // Fail-open when no cache is available
+	}
+
 	// Build descriptor entries
 	entries := []*pb_struct.RateLimitDescriptor_Entry{{Key: "method", Value: method}}
 	if rule.Config.PerIP && clientIP != "" && clientIP != "n/a" {
@@ -205,9 +260,9 @@ func (b *RateLimiterBudget) evaluateRule(ctx context.Context, rule *RateLimitRul
 	var statuses []*pb.RateLimitResponse_DescriptorStatus
 	var timedOut bool
 	if b.maxTimeout > 0 {
-		statuses, timedOut = b.doLimitWithTimeout(ctx, rlReq, limits, method, userLabel, networkLabel)
+		statuses, timedOut = b.doLimitWithTimeout(ctx, cache, rlReq, limits, method, userLabel, networkLabel)
 	} else {
-		statuses = b.cache.DoLimit(ctx, rlReq, limits)
+		statuses = cache.DoLimit(ctx, rlReq, limits)
 	}
 
 	if timedOut {
@@ -246,13 +301,14 @@ func (r *RateLimitRule) statsKeySuffix() string {
 // Returns (statuses, timedOut). On timeout, returns (nil, true) and records fail-open metric.
 func (b *RateLimiterBudget) doLimitWithTimeout(
 	ctx context.Context,
+	cache limiter.RateLimitCache,
 	rlReq *pb.RateLimitRequest,
 	limits []*config.RateLimit,
 	method, userLabel, networkLabel string,
 ) ([]*pb.RateLimitResponse_DescriptorStatus, bool) {
 	resultCh := make(chan []*pb.RateLimitResponse_DescriptorStatus, 1)
 	go func() {
-		resultCh <- b.cache.DoLimit(ctx, rlReq, limits)
+		resultCh <- cache.DoLimit(ctx, rlReq, limits)
 	}()
 
 	timer := time.NewTimer(b.maxTimeout)

@@ -560,14 +560,15 @@ func TestNetwork_HedgePolicy(t *testing.T) {
 		util.ResetGock()
 		defer util.ResetGock()
 		util.SetupMocksForEvmStatePoller()
-		defer util.AssertNoPendingMocks(t, 0)
+		// Hedge concurrency makes exact mock consumption non-deterministic
+		// (primary and hedge goroutines share UpstreamIdx). Use Persist()
+		// and assert functional behavior instead.
 
 		requestBytes := []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_getBalance","params":["0x123","latest"]}`)
 
-		// Set up all mocks BEFORE creating network
-		// Primary fails
 		gock.New("http://rpc1.localhost").
 			Post("").
+			Persist().
 			Filter(func(r *http.Request) bool {
 				body := util.SafeReadBody(r)
 				return strings.Contains(body, "eth_getBalance")
@@ -583,9 +584,9 @@ func TestNetwork_HedgePolicy(t *testing.T) {
 				},
 			})
 
-		// Hedge also fails
 		gock.New("http://rpc2.localhost").
 			Post("").
+			Persist().
 			Filter(func(r *http.Request) bool {
 				body := util.SafeReadBody(r)
 				return strings.Contains(body, "eth_getBalance")
@@ -612,10 +613,21 @@ func TestNetwork_HedgePolicy(t *testing.T) {
 		req := common.NewNormalizedRequest(requestBytes)
 		resp, err := network.Forward(ctx, req)
 
-		// Should get error since all requests failed
 		require.Error(t, err)
 		require.Nil(t, resp)
-		assert.Contains(t, err.Error(), "ErrEndpointServerSideException")
+		assert.True(t, common.HasErrorCode(err, common.ErrCodeEndpointServerSideException),
+			"expected server-side exception in error chain, got: %v", err)
+
+		// Both upstreams must have been attempted (at least once across primary+hedge)
+		attemptedUpstreams := make(map[string]bool)
+		req.ErrorsByUpstream.Range(func(key, _ interface{}) bool {
+			if u, ok := key.(common.Upstream); ok {
+				attemptedUpstreams[u.Id()] = true
+			}
+			return true
+		})
+		assert.True(t, attemptedUpstreams["rpc1"], "rpc1 should have been attempted")
+		assert.True(t, attemptedUpstreams["rpc2"], "rpc2 should have been attempted")
 	})
 
 	t.Run("HedgePolicy_ContextCancellationDuringHedge", func(t *testing.T) {
@@ -968,7 +980,7 @@ func setupTestNetworkWithMultipleUpstreams(t *testing.T, ctx context.Context, nu
 func setupTestNetwork(t *testing.T, ctx context.Context, upstreamConfigs []*common.UpstreamConfig, networkConfig *common.NetworkConfig) *Network {
 	t.Helper()
 
-	rateLimitersRegistry, err := upstream.NewRateLimitersRegistry(&common.RateLimiterConfig{}, &log.Logger)
+	rateLimitersRegistry, err := upstream.NewRateLimitersRegistry(context.Background(), &common.RateLimiterConfig{}, &log.Logger)
 	require.NoError(t, err)
 
 	metricsTracker := health.NewTracker(&log.Logger, "test", time.Minute)
@@ -1000,6 +1012,7 @@ func setupTestNetwork(t *testing.T, ctx context.Context, upstreamConfigs []*comm
 		nil,
 		metricsTracker,
 		1*time.Second,
+		nil,
 		nil,
 	)
 

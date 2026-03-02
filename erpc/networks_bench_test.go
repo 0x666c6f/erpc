@@ -36,7 +36,7 @@ func BenchmarkNetworkForward_SimpleSuccess(b *testing.B) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	rlr, err := upstream.NewRateLimitersRegistry(&common.RateLimiterConfig{
+	rlr, err := upstream.NewRateLimitersRegistry(context.Background(), &common.RateLimiterConfig{
 		Budgets: []*common.RateLimitBudgetConfig{},
 	}, &log.Logger)
 	if err != nil {
@@ -81,6 +81,7 @@ func BenchmarkNetworkForward_SimpleSuccess(b *testing.B) {
 		nil,
 		mt,
 		1*time.Second,
+		nil,
 		nil,
 	)
 
@@ -141,7 +142,7 @@ func BenchmarkNetworkForward_MethodIgnoreCase(b *testing.B) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	rlr, err := upstream.NewRateLimitersRegistry(&common.RateLimiterConfig{
+	rlr, err := upstream.NewRateLimitersRegistry(context.Background(), &common.RateLimiterConfig{
 		Budgets: []*common.RateLimitBudgetConfig{},
 	}, &log.Logger)
 	if err != nil {
@@ -186,6 +187,7 @@ func BenchmarkNetworkForward_MethodIgnoreCase(b *testing.B) {
 		nil,
 		mt,
 		1*time.Second,
+		nil,
 		nil,
 	)
 
@@ -252,7 +254,7 @@ func BenchmarkNetworkForward_RetryFailures(b *testing.B) {
 			MaxAttempts: 3,
 		},
 	}
-	rlr, err := upstream.NewRateLimitersRegistry(&common.RateLimiterConfig{
+	rlr, err := upstream.NewRateLimitersRegistry(context.Background(), &common.RateLimiterConfig{
 		Budgets: []*common.RateLimitBudgetConfig{},
 	}, &log.Logger)
 	if err != nil {
@@ -298,6 +300,7 @@ func BenchmarkNetworkForward_RetryFailures(b *testing.B) {
 		nil,
 		mt,
 		1*time.Second,
+		nil,
 		nil,
 	)
 	upsReg.Bootstrap(ctx)
@@ -368,7 +371,7 @@ func BenchmarkNetworkForward_ConcurrentEthGetLogsIntegrityEnabled(b *testing.B) 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	rlr, err := upstream.NewRateLimitersRegistry(&common.RateLimiterConfig{
+	rlr, err := upstream.NewRateLimitersRegistry(context.Background(), &common.RateLimiterConfig{
 		Budgets: []*common.RateLimitBudgetConfig{},
 	}, &log.Logger)
 	if err != nil {
@@ -414,6 +417,7 @@ func BenchmarkNetworkForward_ConcurrentEthGetLogsIntegrityEnabled(b *testing.B) 
 		nil,
 		mt,
 		10*time.Second,
+		nil,
 		nil,
 	)
 	upsReg.Bootstrap(ctx)

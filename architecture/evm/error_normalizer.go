@@ -375,7 +375,9 @@ func ExtractJsonRpcError(r *http.Response, nr *common.NormalizedResponse, jr *co
 				strings.Contains(msg, "Header") ||
 				strings.Contains(msg, "Block") ||
 				strings.Contains(msg, "transaction") ||
-				strings.Contains(msg, "Transaction") {
+				strings.Contains(msg, "Transaction") ||
+				strings.Contains(msg, "state") ||
+				strings.Contains(msg, "State") {
 				return common.NewErrEndpointMissingData(
 					common.NewErrJsonRpcExceptionInternal(
 						int(code),
@@ -414,12 +416,18 @@ func ExtractJsonRpcError(r *http.Response, nr *common.NormalizedResponse, jr *co
 			strings.Contains(msg, "Unsupported method") ||
 			strings.Contains(msg, "not supported") ||
 			strings.Contains(msg, "method is not whitelisted") ||
+			strings.Contains(msg, "not allowed to access method") ||
 			strings.Contains(msg, "is not included in your current plan") {
+			method := ""
+			if nr != nil && nr.Request() != nil {
+				method, _ = nr.Request().Method()
+			}
+			details["vendorMessage"] = msg
 			return common.NewErrEndpointUnsupported(
 				common.NewErrJsonRpcExceptionInternal(
 					int(code),
 					common.JsonRpcErrorUnsupportedException,
-					err.Message,
+					fmt.Sprintf("The method %s does not exist/is not available", method),
 					nil,
 					details,
 				),

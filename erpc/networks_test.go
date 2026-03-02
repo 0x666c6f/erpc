@@ -45,7 +45,7 @@ func TestNetwork_Forward(t *testing.T) {
 		util.SetupMocksForEvmStatePoller()
 		defer util.AssertNoPendingMocks(t, 0)
 
-		rateLimitersRegistry, err := upstream.NewRateLimitersRegistry(
+		rateLimitersRegistry, err := upstream.NewRateLimitersRegistry(context.Background(),
 			&common.RateLimiterConfig{
 				Store: &common.RateLimitStoreConfig{
 					Driver: "memory",
@@ -122,6 +122,7 @@ func TestNetwork_Forward(t *testing.T) {
 			mt,
 			1*time.Second,
 			nil,
+			nil,
 		)
 		ntw, err := NewNetwork(
 			ctx,
@@ -179,7 +180,10 @@ func TestNetwork_Forward(t *testing.T) {
 		util.SetupMocksForEvmStatePoller()
 		defer util.AssertNoPendingMocks(t, 0)
 
-		// Two upstreams, each returns empty once
+		// Two upstreams, each returns empty once.
+		// With the broad loop, both upstreams are tried in a single execution.
+		// Since the block is available (state poller has the block), the empty
+		// result is accepted immediately — no retry needed.
 		gock.New("http://rpc1.localhost").
 			Post("").
 			Times(1).
@@ -212,7 +216,7 @@ func TestNetwork_Forward(t *testing.T) {
 				EmptyResultMaxAttempts: 2, // cap empties at 2 total attempts
 			},
 		}
-		rlr, err := upstream.NewRateLimitersRegistry(&common.RateLimiterConfig{Budgets: []*common.RateLimitBudgetConfig{}}, &log.Logger)
+		rlr, err := upstream.NewRateLimitersRegistry(context.Background(), &common.RateLimiterConfig{Budgets: []*common.RateLimitBudgetConfig{}}, &log.Logger)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -239,7 +243,7 @@ func TestNetwork_Forward(t *testing.T) {
 		if err != nil {
 			panic(err)
 		}
-		upr := upstream.NewUpstreamsRegistry(ctx, &log.Logger, "prjA", []*common.UpstreamConfig{up1, up2}, ssr, rlr, vr, pr, nil, mt, 0, nil)
+		upr := upstream.NewUpstreamsRegistry(ctx, &log.Logger, "prjA", []*common.UpstreamConfig{up1, up2}, ssr, rlr, vr, pr, nil, mt, 0, nil, nil)
 		upr.Bootstrap(ctx)
 		time.Sleep(100 * time.Millisecond)
 
@@ -283,8 +287,10 @@ func TestNetwork_Forward(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Expected nil error, got %v", err)
 		}
-		if resp.Attempts() != 2 {
-			t.Errorf("expected attempts=2, got %d", resp.Attempts())
+		// With broad loop: all upstreams tried in one round, block is available,
+		// so HandleIf accepts the empty result without triggering retries.
+		if resp.Attempts() != 1 {
+			t.Errorf("expected attempts=1, got %d", resp.Attempts())
 		}
 	})
 
@@ -331,7 +337,7 @@ func TestNetwork_Forward(t *testing.T) {
 		fsCfg := &common.FailsafeConfig{
 			Retry: &common.RetryPolicyConfig{MaxAttempts: 3}, // no EmptyResultMaxAttempts set
 		}
-		rlr, err := upstream.NewRateLimitersRegistry(&common.RateLimiterConfig{Budgets: []*common.RateLimitBudgetConfig{}}, &log.Logger)
+		rlr, err := upstream.NewRateLimitersRegistry(context.Background(), &common.RateLimiterConfig{Budgets: []*common.RateLimitBudgetConfig{}}, &log.Logger)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -359,7 +365,7 @@ func TestNetwork_Forward(t *testing.T) {
 		if err != nil {
 			panic(err)
 		}
-		upr := upstream.NewUpstreamsRegistry(ctx, &log.Logger, "prjA", []*common.UpstreamConfig{up1, up2, up3}, ssr, rlr, vr, pr, nil, mt, 0, nil)
+		upr := upstream.NewUpstreamsRegistry(ctx, &log.Logger, "prjA", []*common.UpstreamConfig{up1, up2, up3}, ssr, rlr, vr, pr, nil, mt, 0, nil, nil)
 		upr.Bootstrap(ctx)
 		time.Sleep(100 * time.Millisecond)
 
@@ -408,8 +414,10 @@ func TestNetwork_Forward(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Expected nil error, got %v", err)
 		}
-		if resp.Attempts() != 3 {
-			t.Errorf("expected attempts=3, got %d", resp.Attempts())
+		// With broad loop: all 3 upstreams tried in one round, block is available,
+		// so HandleIf accepts the empty result without triggering retries.
+		if resp.Attempts() != 1 {
+			t.Errorf("expected attempts=1, got %d", resp.Attempts())
 		}
 	})
 
@@ -447,7 +455,7 @@ func TestNetwork_Forward(t *testing.T) {
 		}
 		clr := clients.NewClientRegistry(&log.Logger, "prjA", nil, evm.NewJsonRpcErrorExtractor())
 		fsCfg := &common.FailsafeConfig{Retry: &common.RetryPolicyConfig{MaxAttempts: 3, EmptyResultMaxAttempts: 2}}
-		rlr, err := upstream.NewRateLimitersRegistry(&common.RateLimiterConfig{Budgets: []*common.RateLimitBudgetConfig{}}, &log.Logger)
+		rlr, err := upstream.NewRateLimitersRegistry(context.Background(), &common.RateLimiterConfig{Budgets: []*common.RateLimitBudgetConfig{}}, &log.Logger)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -473,7 +481,7 @@ func TestNetwork_Forward(t *testing.T) {
 		if err != nil {
 			panic(err)
 		}
-		upr := upstream.NewUpstreamsRegistry(ctx, &log.Logger, "prjA", []*common.UpstreamConfig{up1}, ssr, rlr, vr, pr, nil, mt, 0, nil)
+		upr := upstream.NewUpstreamsRegistry(ctx, &log.Logger, "prjA", []*common.UpstreamConfig{up1}, ssr, rlr, vr, pr, nil, mt, 0, nil, nil)
 		upr.Bootstrap(ctx)
 		time.Sleep(100 * time.Millisecond)
 		if err := upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123)); err != nil {
@@ -541,7 +549,7 @@ func TestNetwork_Forward(t *testing.T) {
 		}
 		clr := clients.NewClientRegistry(&log.Logger, "prjA", nil, evm.NewJsonRpcErrorExtractor())
 		fsCfg := &common.FailsafeConfig{Retry: &common.RetryPolicyConfig{MaxAttempts: 5, EmptyResultMaxAttempts: 2}}
-		rlr, err := upstream.NewRateLimitersRegistry(&common.RateLimiterConfig{Budgets: []*common.RateLimitBudgetConfig{}}, &log.Logger)
+		rlr, err := upstream.NewRateLimitersRegistry(context.Background(), &common.RateLimiterConfig{Budgets: []*common.RateLimitBudgetConfig{}}, &log.Logger)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -567,7 +575,7 @@ func TestNetwork_Forward(t *testing.T) {
 		if err != nil {
 			panic(err)
 		}
-		upr := upstream.NewUpstreamsRegistry(ctx, &log.Logger, "prjA", []*common.UpstreamConfig{up1}, ssr, rlr, vr, pr, nil, mt, 0, nil)
+		upr := upstream.NewUpstreamsRegistry(ctx, &log.Logger, "prjA", []*common.UpstreamConfig{up1}, ssr, rlr, vr, pr, nil, mt, 0, nil, nil)
 		upr.Bootstrap(ctx)
 		time.Sleep(100 * time.Millisecond)
 		if err := upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123)); err != nil {
@@ -626,8 +634,8 @@ func TestNetwork_Forward(t *testing.T) {
 			t.Fatal(err)
 		}
 		clr := clients.NewClientRegistry(&log.Logger, "prjA", nil, evm.NewJsonRpcErrorExtractor())
-		fsCfg := &common.FailsafeConfig{Retry: &common.RetryPolicyConfig{MaxAttempts: 5, EmptyResultMaxAttempts: 4, EmptyResultIgnore: []string{"eth_getBalance"}}}
-		rlr, err := upstream.NewRateLimitersRegistry(&common.RateLimiterConfig{Budgets: []*common.RateLimitBudgetConfig{}}, &log.Logger)
+		fsCfg := &common.FailsafeConfig{Retry: &common.RetryPolicyConfig{MaxAttempts: 5, EmptyResultMaxAttempts: 4, EmptyResultAccept: []string{"eth_getBalance"}}}
+		rlr, err := upstream.NewRateLimitersRegistry(context.Background(), &common.RateLimiterConfig{Budgets: []*common.RateLimitBudgetConfig{}}, &log.Logger)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -653,7 +661,7 @@ func TestNetwork_Forward(t *testing.T) {
 		if err != nil {
 			panic(err)
 		}
-		upr := upstream.NewUpstreamsRegistry(ctx, &log.Logger, "prjA", []*common.UpstreamConfig{up1}, ssr, rlr, vr, pr, nil, mt, 0, nil)
+		upr := upstream.NewUpstreamsRegistry(ctx, &log.Logger, "prjA", []*common.UpstreamConfig{up1}, ssr, rlr, vr, pr, nil, mt, 0, nil, nil)
 		upr.Bootstrap(ctx)
 		time.Sleep(100 * time.Millisecond)
 		if err := upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123)); err != nil {
@@ -684,16 +692,338 @@ func TestNetwork_Forward(t *testing.T) {
 			t.Fatalf("Unexpected error: %v", err)
 		}
 		if resp.Attempts() != 1 {
-			t.Errorf("expected attempts=1 when method in EmptyResultIgnore, got %d", resp.Attempts())
+			t.Errorf("expected attempts=1 when method in EmptyResultAccept, got %d", resp.Attempts())
 		}
 	})
+
+	t.Run("EmptyResultDelay_AppliedForEmptyResultRetries", func(t *testing.T) {
+		util.ResetGock()
+		defer util.ResetGock()
+		util.SetupMocksForEvmStatePoller()
+		defer util.AssertNoPendingMocks(t, 0)
+
+		// Two upstreams both return empty.
+		// With broad loop: both tried in one round, block is available → accepted immediately.
+		gock.New("http://rpc1.localhost").
+			Post("").
+			Times(1).
+			Filter(func(request *http.Request) bool {
+				return strings.Contains(util.SafeReadBody(request), "eth_getBalance")
+			}).
+			Reply(200).
+			JSON([]byte(`{"result":null}`))
+		gock.New("http://rpc2.localhost").
+			Post("").
+			Times(1).
+			Filter(func(request *http.Request) bool {
+				return strings.Contains(util.SafeReadBody(request), "eth_getBalance")
+			}).
+			Reply(200).
+			JSON([]byte(`{"result":null}`))
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		vr := thirdparty.NewVendorsRegistry()
+		pr, err := thirdparty.NewProvidersRegistry(&log.Logger, vr, []*common.ProviderConfig{}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		clr := clients.NewClientRegistry(&log.Logger, "prjA", nil, evm.NewJsonRpcErrorExtractor())
+		fsCfg := &common.FailsafeConfig{
+			Retry: &common.RetryPolicyConfig{
+				MaxAttempts:      2,
+				Delay:            common.Duration(10 * time.Millisecond),  // normal error delay: 10ms
+				EmptyResultDelay: common.Duration(300 * time.Millisecond), // empty result delay: 300ms
+			},
+		}
+		rlr, err := upstream.NewRateLimitersRegistry(context.Background(), &common.RateLimiterConfig{Budgets: []*common.RateLimitBudgetConfig{}}, &log.Logger)
+		if err != nil {
+			t.Fatal(err)
+		}
+		mt := health.NewTracker(&log.Logger, "prjA", 2*time.Second)
+
+		up1 := &common.UpstreamConfig{Id: "rpc1", Type: common.UpstreamTypeEvm, Endpoint: "http://rpc1.localhost", Evm: &common.EvmUpstreamConfig{ChainId: 123}}
+		up2 := &common.UpstreamConfig{Id: "rpc2", Type: common.UpstreamTypeEvm, Endpoint: "http://rpc2.localhost", Evm: &common.EvmUpstreamConfig{ChainId: 123}}
+		sharedStateCfg := &common.SharedStateConfig{
+			Connector: &common.ConnectorConfig{
+				Driver: common.DriverMemory,
+				Memory: &common.MemoryConnectorConfig{MaxItems: 100_000, MaxTotalSize: "1GB"},
+			},
+			LockMaxWait: common.Duration(200 * time.Millisecond), UpdateMaxWait: common.Duration(200 * time.Millisecond),
+			FallbackTimeout: common.Duration(3 * time.Second), LockTtl: common.Duration(4 * time.Second),
+		}
+		sharedStateCfg.SetDefaults("test")
+		ssr, err := data.NewSharedStateRegistry(ctx, &log.Logger, sharedStateCfg)
+		if err != nil {
+			panic(err)
+		}
+		upr := upstream.NewUpstreamsRegistry(ctx, &log.Logger, "prjA", []*common.UpstreamConfig{up1, up2}, ssr, rlr, vr, pr, nil, mt, 0, nil, nil)
+		upr.Bootstrap(ctx)
+		time.Sleep(100 * time.Millisecond)
+		if err := upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123)); err != nil {
+			t.Fatal(err)
+		}
+		pup1, err := upr.NewUpstream(up1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cl1, err := clr.GetOrCreateClient(ctx, pup1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pup1.Client = cl1
+		pup2, err := upr.NewUpstream(up2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cl2, err := clr.GetOrCreateClient(ctx, pup2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pup2.Client = cl2
+
+		ntw, err := NewNetwork(ctx, &log.Logger, "prjA", &common.NetworkConfig{Architecture: common.ArchitectureEvm, Evm: &common.EvmNetworkConfig{ChainId: 123}, Failsafe: []*common.FailsafeConfig{fsCfg}, DirectiveDefaults: &common.DirectiveDefaultsConfig{RetryEmpty: &common.TRUE}}, rlr, upr, mt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ntw.Bootstrap(ctx)
+		time.Sleep(50 * time.Millisecond)
+		upstream.ReorderUpstreams(upr)
+
+		fakeReq := common.NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","method":"eth_getBalance","params":["0xabc","latest"],"id":1}`))
+		fakeReq.ApplyDirectiveDefaults(ntw.Config().DirectiveDefaults)
+
+		resp, err := ntw.Forward(ctx, fakeReq)
+
+		if err != nil {
+			t.Fatalf("Expected nil error, got %v", err)
+		}
+		// With broad loop: all upstreams tried in one round, block is available,
+		// so HandleIf accepts the empty result without triggering retries or delays.
+		if resp.Attempts() != 1 {
+			t.Errorf("expected attempts=1, got %d", resp.Attempts())
+		}
+	})
+
+	t.Run("EmptyResultDelay_DoesNotAffectErrorRetries", func(t *testing.T) {
+		util.ResetGock()
+		defer util.ResetGock()
+		util.SetupMocksForEvmStatePoller()
+		defer util.AssertNoPendingMocks(t, 0)
+
+		// First attempt -> 500 error, second attempt -> success
+		gock.New("http://rpc1.localhost").
+			Post("").
+			Times(1).
+			Filter(func(request *http.Request) bool {
+				return strings.Contains(util.SafeReadBody(request), "eth_getBalance")
+			}).
+			Reply(500).
+			JSON([]byte(`{"error":{"message":"server error"}}`))
+		gock.New("http://rpc1.localhost").
+			Post("").
+			Times(1).
+			Filter(func(request *http.Request) bool {
+				return strings.Contains(util.SafeReadBody(request), "eth_getBalance")
+			}).
+			Reply(200).
+			JSON([]byte(`{"jsonrpc":"2.0","id":1,"result":"0x1234"}`))
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		vr := thirdparty.NewVendorsRegistry()
+		pr, err := thirdparty.NewProvidersRegistry(&log.Logger, vr, []*common.ProviderConfig{}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		clr := clients.NewClientRegistry(&log.Logger, "prjA", nil, evm.NewJsonRpcErrorExtractor())
+		fsCfg := &common.FailsafeConfig{
+			Retry: &common.RetryPolicyConfig{
+				MaxAttempts:      3,
+				Delay:            common.Duration(10 * time.Millisecond),  // normal error delay: 10ms
+				EmptyResultDelay: common.Duration(500 * time.Millisecond), // empty result delay: 500ms (should NOT be used)
+			},
+		}
+		rlr, err := upstream.NewRateLimitersRegistry(context.Background(), &common.RateLimiterConfig{Budgets: []*common.RateLimitBudgetConfig{}}, &log.Logger)
+		if err != nil {
+			t.Fatal(err)
+		}
+		mt := health.NewTracker(&log.Logger, "prjA", 2*time.Second)
+
+		up1 := &common.UpstreamConfig{Id: "rpc1", Type: common.UpstreamTypeEvm, Endpoint: "http://rpc1.localhost", Evm: &common.EvmUpstreamConfig{ChainId: 123}}
+		sharedStateCfg := &common.SharedStateConfig{
+			Connector: &common.ConnectorConfig{
+				Driver: common.DriverMemory,
+				Memory: &common.MemoryConnectorConfig{MaxItems: 100_000, MaxTotalSize: "1GB"},
+			},
+			LockMaxWait: common.Duration(200 * time.Millisecond), UpdateMaxWait: common.Duration(200 * time.Millisecond),
+			FallbackTimeout: common.Duration(3 * time.Second), LockTtl: common.Duration(4 * time.Second),
+		}
+		sharedStateCfg.SetDefaults("test")
+		ssr, err := data.NewSharedStateRegistry(ctx, &log.Logger, sharedStateCfg)
+		if err != nil {
+			panic(err)
+		}
+		upr := upstream.NewUpstreamsRegistry(ctx, &log.Logger, "prjA", []*common.UpstreamConfig{up1}, ssr, rlr, vr, pr, nil, mt, 0, nil, nil)
+		upr.Bootstrap(ctx)
+		time.Sleep(100 * time.Millisecond)
+		if err := upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123)); err != nil {
+			t.Fatal(err)
+		}
+		pup1, err := upr.NewUpstream(up1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cl1, err := clr.GetOrCreateClient(ctx, pup1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pup1.Client = cl1
+
+		ntw, err := NewNetwork(ctx, &log.Logger, "prjA", &common.NetworkConfig{Architecture: common.ArchitectureEvm, Evm: &common.EvmNetworkConfig{ChainId: 123}, Failsafe: []*common.FailsafeConfig{fsCfg}, DirectiveDefaults: &common.DirectiveDefaultsConfig{RetryEmpty: &common.TRUE}}, rlr, upr, mt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ntw.Bootstrap(ctx)
+		time.Sleep(50 * time.Millisecond)
+		upstream.ReorderUpstreams(upr)
+
+		fakeReq := common.NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","method":"eth_getBalance","params":["0xabc","latest"],"id":1}`))
+		fakeReq.ApplyDirectiveDefaults(ntw.Config().DirectiveDefaults)
+
+		start := time.Now()
+		resp, err := ntw.Forward(ctx, fakeReq)
+		elapsed := time.Since(start)
+
+		if err != nil {
+			t.Fatalf("Expected nil error, got %v", err)
+		}
+		if resp.Attempts() != 2 {
+			t.Errorf("expected attempts=2, got %d", resp.Attempts())
+		}
+		// Error retry should use the normal delay (10ms), not the emptyResultDelay (500ms)
+		if elapsed >= 400*time.Millisecond {
+			t.Errorf("expected elapsed < 400ms (normal delay=10ms), got %v — emptyResultDelay should not apply to error retries", elapsed)
+		}
+	})
+
+	t.Run("EmptyResultDelay_NotSetUsesNormalDelay", func(t *testing.T) {
+		util.ResetGock()
+		defer util.ResetGock()
+		util.SetupMocksForEvmStatePoller()
+		defer util.AssertNoPendingMocks(t, 0)
+
+		// Two upstreams both return empty
+		gock.New("http://rpc1.localhost").
+			Post("").
+			Times(1).
+			Filter(func(request *http.Request) bool {
+				return strings.Contains(util.SafeReadBody(request), "eth_getBalance")
+			}).
+			Reply(200).
+			JSON([]byte(`{"result":null}`))
+		gock.New("http://rpc2.localhost").
+			Post("").
+			Times(1).
+			Filter(func(request *http.Request) bool {
+				return strings.Contains(util.SafeReadBody(request), "eth_getBalance")
+			}).
+			Reply(200).
+			JSON([]byte(`{"result":null}`))
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		vr := thirdparty.NewVendorsRegistry()
+		pr, err := thirdparty.NewProvidersRegistry(&log.Logger, vr, []*common.ProviderConfig{}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		clr := clients.NewClientRegistry(&log.Logger, "prjA", nil, evm.NewJsonRpcErrorExtractor())
+		fsCfg := &common.FailsafeConfig{
+			Retry: &common.RetryPolicyConfig{
+				MaxAttempts: 2,
+				Delay:       common.Duration(10 * time.Millisecond), // normal delay only, no emptyResultDelay
+			},
+		}
+		rlr, err := upstream.NewRateLimitersRegistry(context.Background(), &common.RateLimiterConfig{Budgets: []*common.RateLimitBudgetConfig{}}, &log.Logger)
+		if err != nil {
+			t.Fatal(err)
+		}
+		mt := health.NewTracker(&log.Logger, "prjA", 2*time.Second)
+
+		up1 := &common.UpstreamConfig{Id: "rpc1", Type: common.UpstreamTypeEvm, Endpoint: "http://rpc1.localhost", Evm: &common.EvmUpstreamConfig{ChainId: 123}}
+		up2 := &common.UpstreamConfig{Id: "rpc2", Type: common.UpstreamTypeEvm, Endpoint: "http://rpc2.localhost", Evm: &common.EvmUpstreamConfig{ChainId: 123}}
+		sharedStateCfg := &common.SharedStateConfig{
+			Connector: &common.ConnectorConfig{
+				Driver: common.DriverMemory,
+				Memory: &common.MemoryConnectorConfig{MaxItems: 100_000, MaxTotalSize: "1GB"},
+			},
+			LockMaxWait: common.Duration(200 * time.Millisecond), UpdateMaxWait: common.Duration(200 * time.Millisecond),
+			FallbackTimeout: common.Duration(3 * time.Second), LockTtl: common.Duration(4 * time.Second),
+		}
+		sharedStateCfg.SetDefaults("test")
+		ssr, err := data.NewSharedStateRegistry(ctx, &log.Logger, sharedStateCfg)
+		if err != nil {
+			panic(err)
+		}
+		upr := upstream.NewUpstreamsRegistry(ctx, &log.Logger, "prjA", []*common.UpstreamConfig{up1, up2}, ssr, rlr, vr, pr, nil, mt, 0, nil, nil)
+		upr.Bootstrap(ctx)
+		time.Sleep(100 * time.Millisecond)
+		if err := upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123)); err != nil {
+			t.Fatal(err)
+		}
+		pup1, err := upr.NewUpstream(up1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cl1, err := clr.GetOrCreateClient(ctx, pup1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pup1.Client = cl1
+		pup2, err := upr.NewUpstream(up2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cl2, err := clr.GetOrCreateClient(ctx, pup2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pup2.Client = cl2
+
+		ntw, err := NewNetwork(ctx, &log.Logger, "prjA", &common.NetworkConfig{Architecture: common.ArchitectureEvm, Evm: &common.EvmNetworkConfig{ChainId: 123}, Failsafe: []*common.FailsafeConfig{fsCfg}, DirectiveDefaults: &common.DirectiveDefaultsConfig{RetryEmpty: &common.TRUE}}, rlr, upr, mt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ntw.Bootstrap(ctx)
+		time.Sleep(50 * time.Millisecond)
+		upstream.ReorderUpstreams(upr)
+
+		fakeReq := common.NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","method":"eth_getBalance","params":["0xabc","latest"],"id":1}`))
+		fakeReq.ApplyDirectiveDefaults(ntw.Config().DirectiveDefaults)
+
+		resp, err := ntw.Forward(ctx, fakeReq)
+
+		if err != nil {
+			t.Fatalf("Expected nil error, got %v", err)
+		}
+		// With broad loop: all upstreams tried in one round, block is available,
+		// so HandleIf accepts the empty result without triggering retries or delays.
+		if resp.Attempts() != 1 {
+			t.Errorf("expected attempts=1, got %d", resp.Attempts())
+		}
+	})
+
 	t.Run("ForwardNotRateLimitedOnNetworkLevel", func(t *testing.T) {
 		util.ResetGock()
 		defer util.ResetGock()
 		util.SetupMocksForEvmStatePoller()
 		defer util.AssertNoPendingMocks(t, 0)
 
-		rateLimitersRegistry, err := upstream.NewRateLimitersRegistry(
+		rateLimitersRegistry, err := upstream.NewRateLimitersRegistry(context.Background(),
 			&common.RateLimiterConfig{
 				Budgets: []*common.RateLimitBudgetConfig{
 					{
@@ -765,6 +1095,7 @@ func TestNetwork_Forward(t *testing.T) {
 			mt,
 			1*time.Second,
 			nil,
+			nil,
 		)
 		ntw, err := NewNetwork(
 			ctx,
@@ -829,7 +1160,7 @@ func TestNetwork_Forward(t *testing.T) {
 				MaxAttempts: 3,
 			},
 		}
-		rlr, err := upstream.NewRateLimitersRegistry(&common.RateLimiterConfig{
+		rlr, err := upstream.NewRateLimitersRegistry(context.Background(), &common.RateLimiterConfig{
 			Budgets: []*common.RateLimitBudgetConfig{},
 		}, &log.Logger)
 		if err != nil {
@@ -882,6 +1213,7 @@ func TestNetwork_Forward(t *testing.T) {
 			mt,
 			1*time.Second,
 			nil,
+			nil,
 		)
 		upr.Bootstrap(ctx)
 		time.Sleep(100 * time.Millisecond)
@@ -921,8 +1253,10 @@ func TestNetwork_Forward(t *testing.T) {
 
 		if err == nil {
 			t.Errorf("Expected an error, got nil")
-		} else if !strings.Contains(common.ErrorSummary(err), "ErrEndpointServerSideException") {
-			t.Errorf("Expected %v, got %v", "ErrEndpointServerSideException", err)
+		} else if !common.HasErrorCode(err, common.ErrCodeUpstreamsExhausted) {
+			t.Errorf("Expected ErrUpstreamsExhausted wrapping server error, got %v", err)
+		} else if !common.HasErrorCode(err, common.ErrCodeEndpointServerSideException) {
+			t.Errorf("Expected server-side exception inside ErrUpstreamsExhausted, got %v", err)
 		}
 	})
 
@@ -954,7 +1288,7 @@ func TestNetwork_Forward(t *testing.T) {
 				MaxAttempts: 3,
 			},
 		}
-		rlr, err := upstream.NewRateLimitersRegistry(&common.RateLimiterConfig{
+		rlr, err := upstream.NewRateLimitersRegistry(context.Background(), &common.RateLimiterConfig{
 			Budgets: []*common.RateLimitBudgetConfig{},
 		}, &log.Logger)
 		if err != nil {
@@ -1006,6 +1340,7 @@ func TestNetwork_Forward(t *testing.T) {
 			mt,
 			1*time.Second,
 			nil,
+			nil,
 		)
 		upr.Bootstrap(ctx)
 		time.Sleep(100 * time.Millisecond)
@@ -1049,8 +1384,10 @@ func TestNetwork_Forward(t *testing.T) {
 			t.Errorf("Expected an error, got nil")
 		}
 
-		if !strings.Contains(common.ErrorSummary(err), "ErrEndpointServerSideException") {
-			t.Errorf("Expected %v, got %v", "ErrEndpointServerSideException", err)
+		if !common.HasErrorCode(err, common.ErrCodeUpstreamsExhausted) {
+			t.Errorf("Expected ErrUpstreamsExhausted wrapping server error, got %v", err)
+		} else if !common.HasErrorCode(err, common.ErrCodeEndpointServerSideException) {
+			t.Errorf("Expected server-side exception inside ErrUpstreamsExhausted, got %v", err)
 		}
 	})
 
@@ -1095,7 +1432,7 @@ func TestNetwork_Forward(t *testing.T) {
 				MaxAttempts: 2,
 			},
 		}
-		rlr, err := upstream.NewRateLimitersRegistry(&common.RateLimiterConfig{
+		rlr, err := upstream.NewRateLimitersRegistry(context.Background(), &common.RateLimiterConfig{
 			Budgets: []*common.RateLimitBudgetConfig{},
 		}, &log.Logger)
 		if err != nil {
@@ -1156,6 +1493,7 @@ func TestNetwork_Forward(t *testing.T) {
 			nil,
 			mt,
 			1*time.Second,
+			nil,
 			nil,
 		)
 		upr.Bootstrap(ctx)
@@ -1261,7 +1599,7 @@ func TestNetwork_Forward(t *testing.T) {
 				MaxAttempts: 2,
 			},
 		}
-		rlr, err := upstream.NewRateLimitersRegistry(&common.RateLimiterConfig{
+		rlr, err := upstream.NewRateLimitersRegistry(context.Background(), &common.RateLimiterConfig{
 			Budgets: []*common.RateLimitBudgetConfig{},
 		}, &log.Logger)
 		if err != nil {
@@ -1323,6 +1661,7 @@ func TestNetwork_Forward(t *testing.T) {
 			mt,
 			1*time.Second,
 			nil,
+			nil,
 		)
 		upr.Bootstrap(ctx)
 		time.Sleep(100 * time.Millisecond)
@@ -1380,7 +1719,7 @@ func TestNetwork_Forward(t *testing.T) {
 		util.ResetGock()
 		defer util.ResetGock()
 		util.SetupMocksForEvmStatePoller()
-		defer util.AssertNoPendingMocks(t, 1)
+		defer util.AssertNoPendingMocks(t, 0)
 
 		// Prepare a JSON-RPC request payload as a byte array
 		var requestBytes = []byte(`{
@@ -1418,7 +1757,7 @@ func TestNetwork_Forward(t *testing.T) {
 
 		// Initialize various components for the test environment
 		clr := clients.NewClientRegistry(&log.Logger, "prjA", nil, evm.NewJsonRpcErrorExtractor())
-		rlr, err := upstream.NewRateLimitersRegistry(&common.RateLimiterConfig{
+		rlr, err := upstream.NewRateLimitersRegistry(context.Background(), &common.RateLimiterConfig{
 			Budgets: []*common.RateLimitBudgetConfig{},
 		}, &log.Logger)
 		if err != nil {
@@ -1478,6 +1817,7 @@ func TestNetwork_Forward(t *testing.T) {
 			nil,
 			mt,
 			1*time.Second,
+			nil,
 			nil,
 		)
 		upr.Bootstrap(ctx)
@@ -1528,7 +1868,8 @@ func TestNetwork_Forward(t *testing.T) {
 				},
 				Failsafe: []*common.FailsafeConfig{{
 					Retry: &common.RetryPolicyConfig{
-						MaxAttempts: 1,
+						MaxAttempts:       1,
+						EmptyResultAccept: []string{},
 					}},
 				},
 			},
@@ -1558,16 +1899,17 @@ func TestNetwork_Forward(t *testing.T) {
 			t.Fatalf("Expected nil error, got %v", err)
 		}
 
-		// Convert the raw response to a map to access custom fields like fromHost
+		// With EmptyResultAccept disabled, the broad loop tries both upstreams.
+		// rpc1 returns [] (empty), rpc2 returns [{"logIndex":444}] (non-empty).
+		// The broad loop prefers the non-empty result.
 		jrr, err := resp.JsonRpcResponse()
 		if err != nil {
 			t.Fatalf("Failed to get JsonRpcResponse: %v", err)
 		}
 
-		// Check that the result field is an empty array as expected
 		result := jrr.GetResultString()
-		if len(result) != 2 || result[0] != '[' || result[1] != ']' {
-			t.Fatalf("Expected result to be an empty array, got %s", result)
+		if !strings.Contains(result, "logIndex") {
+			t.Fatalf("Expected non-empty result from second upstream (broad loop prefers non-empty), got %s", result)
 		}
 	})
 	t.Run("RetryWhenNodeIsNotSynced", func(t *testing.T) {
@@ -1615,7 +1957,7 @@ func TestNetwork_Forward(t *testing.T) {
 				MaxAttempts: 2, // Allow up to 2 retry attempts
 			},
 		}
-		rlr, err := upstream.NewRateLimitersRegistry(&common.RateLimiterConfig{
+		rlr, err := upstream.NewRateLimitersRegistry(context.Background(), &common.RateLimiterConfig{
 			Budgets: []*common.RateLimitBudgetConfig{},
 		}, &log.Logger)
 		if err != nil {
@@ -1675,6 +2017,7 @@ func TestNetwork_Forward(t *testing.T) {
 			nil,
 			mt,
 			1*time.Second,
+			nil,
 			nil,
 		)
 		upr.Bootstrap(ctx)
@@ -1825,7 +2168,7 @@ func TestNetwork_Forward(t *testing.T) {
 		defer cancel()
 
 		clr := clients.NewClientRegistry(&log.Logger, "prjA", nil, evm.NewJsonRpcErrorExtractor())
-		rlr, err := upstream.NewRateLimitersRegistry(&common.RateLimiterConfig{
+		rlr, err := upstream.NewRateLimitersRegistry(context.Background(), &common.RateLimiterConfig{
 			Budgets: []*common.RateLimitBudgetConfig{},
 		}, &log.Logger)
 		if err != nil {
@@ -1885,6 +2228,7 @@ func TestNetwork_Forward(t *testing.T) {
 			nil,
 			mt,
 			1*time.Second,
+			nil,
 			nil,
 		)
 		upr.Bootstrap(ctx)
@@ -2017,7 +2361,7 @@ func TestNetwork_Forward(t *testing.T) {
 		defer cancel()
 
 		clr := clients.NewClientRegistry(&log.Logger, "prjA", nil, evm.NewJsonRpcErrorExtractor())
-		rlr, err := upstream.NewRateLimitersRegistry(&common.RateLimiterConfig{
+		rlr, err := upstream.NewRateLimitersRegistry(context.Background(), &common.RateLimiterConfig{
 			Budgets: []*common.RateLimitBudgetConfig{},
 		}, &log.Logger)
 		if err != nil {
@@ -2077,6 +2421,7 @@ func TestNetwork_Forward(t *testing.T) {
 			nil,
 			mt,
 			1*time.Second,
+			nil,
 			nil,
 		)
 		upr.Bootstrap(ctx)
@@ -2242,7 +2587,7 @@ func TestNetwork_Forward(t *testing.T) {
 
 		// Set up the test environment
 		clr := clients.NewClientRegistry(&log.Logger, "prjA", nil, evm.NewJsonRpcErrorExtractor())
-		rlr, _ := upstream.NewRateLimitersRegistry(&common.RateLimiterConfig{}, &log.Logger)
+		rlr, _ := upstream.NewRateLimitersRegistry(context.Background(), &common.RateLimiterConfig{}, &log.Logger)
 		vr := thirdparty.NewVendorsRegistry()
 		pr, _ := thirdparty.NewProvidersRegistry(&log.Logger, vr, []*common.ProviderConfig{}, nil)
 		mt := health.NewTracker(&log.Logger, "prjA", 2*time.Second)
@@ -2267,7 +2612,7 @@ func TestNetwork_Forward(t *testing.T) {
 			},
 		})
 
-		upr := upstream.NewUpstreamsRegistry(ctx, &log.Logger, "prjA", []*common.UpstreamConfig{up1, up2}, ssr, rlr, vr, pr, nil, mt, 0, nil)
+		upr := upstream.NewUpstreamsRegistry(ctx, &log.Logger, "prjA", []*common.UpstreamConfig{up1, up2}, ssr, rlr, vr, pr, nil, mt, 0, nil, nil)
 		upr.Bootstrap(ctx)
 		time.Sleep(100 * time.Millisecond)
 		_ = upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123))
@@ -2380,7 +2725,7 @@ func TestNetwork_Forward(t *testing.T) {
 				MaxAttempts: 2, // Allow up to 2 retry attempts
 			},
 		}
-		rlr, err := upstream.NewRateLimitersRegistry(&common.RateLimiterConfig{
+		rlr, err := upstream.NewRateLimitersRegistry(context.Background(), &common.RateLimiterConfig{
 			Budgets: []*common.RateLimitBudgetConfig{},
 		}, &log.Logger)
 		if err != nil {
@@ -2430,6 +2775,7 @@ func TestNetwork_Forward(t *testing.T) {
 			nil,
 			mt,
 			1*time.Second,
+			nil,
 			nil,
 		)
 		upr.Bootstrap(ctx)
@@ -2588,7 +2934,7 @@ func TestNetwork_Forward(t *testing.T) {
 				MaxAttempts: 2, // Allow up to 2 retry attempts
 			},
 		}
-		rlr, err := upstream.NewRateLimitersRegistry(&common.RateLimiterConfig{
+		rlr, err := upstream.NewRateLimitersRegistry(context.Background(), &common.RateLimiterConfig{
 			Budgets: []*common.RateLimitBudgetConfig{},
 		}, &log.Logger)
 		if err != nil {
@@ -2638,6 +2984,7 @@ func TestNetwork_Forward(t *testing.T) {
 			nil,
 			mt,
 			1*time.Second,
+			nil,
 			nil,
 		)
 		upr.Bootstrap(ctx)
@@ -2778,7 +3125,7 @@ func TestNetwork_Forward(t *testing.T) {
 				MaxAttempts: 2, // Allow up to 2 retry attempts
 			},
 		}
-		rlr, err := upstream.NewRateLimitersRegistry(&common.RateLimiterConfig{
+		rlr, err := upstream.NewRateLimitersRegistry(context.Background(), &common.RateLimiterConfig{
 			Budgets: []*common.RateLimitBudgetConfig{},
 		}, &log.Logger)
 		if err != nil {
@@ -2828,6 +3175,7 @@ func TestNetwork_Forward(t *testing.T) {
 			nil,
 			mt,
 			1*time.Second,
+			nil,
 			nil,
 		)
 		upr.Bootstrap(ctx)
@@ -2961,7 +3309,7 @@ func TestNetwork_Forward(t *testing.T) {
 				MaxAttempts: 2, // Allow up to 2 retry attempts
 			},
 		}
-		rlr, err := upstream.NewRateLimitersRegistry(&common.RateLimiterConfig{
+		rlr, err := upstream.NewRateLimitersRegistry(context.Background(), &common.RateLimiterConfig{
 			Budgets: []*common.RateLimitBudgetConfig{},
 		}, &log.Logger)
 		if err != nil {
@@ -3011,6 +3359,7 @@ func TestNetwork_Forward(t *testing.T) {
 			nil,
 			mt,
 			0,
+			nil,
 			nil,
 		)
 		upr.Bootstrap(ctx)
@@ -3163,7 +3512,7 @@ func TestNetwork_Forward(t *testing.T) {
 				MaxAttempts: 4, // Allow up to 4 attempts (1 initial + 3 retries)
 			},
 		}
-		rlr, err := upstream.NewRateLimitersRegistry(&common.RateLimiterConfig{
+		rlr, err := upstream.NewRateLimitersRegistry(context.Background(), &common.RateLimiterConfig{
 			Budgets: []*common.RateLimitBudgetConfig{},
 		}, &log.Logger)
 		if err != nil {
@@ -3221,6 +3570,7 @@ func TestNetwork_Forward(t *testing.T) {
 			nil,
 			mt,
 			0,
+			nil,
 			nil,
 		)
 		upr.Bootstrap(ctx)
@@ -3392,7 +3742,7 @@ func TestNetwork_Forward(t *testing.T) {
 				MaxAttempts: 2,
 			},
 		}
-		rlr, err := upstream.NewRateLimitersRegistry(&common.RateLimiterConfig{
+		rlr, err := upstream.NewRateLimitersRegistry(context.Background(), &common.RateLimiterConfig{
 			Budgets: []*common.RateLimitBudgetConfig{},
 		}, &log.Logger)
 		if err != nil {
@@ -3442,6 +3792,7 @@ func TestNetwork_Forward(t *testing.T) {
 			nil,
 			mt,
 			0,
+			nil,
 			nil,
 		)
 		upr.Bootstrap(ctx)
@@ -3583,7 +3934,7 @@ func TestNetwork_Forward(t *testing.T) {
 				MaxAttempts: 3, // Allow up to 3 retry attempts
 			},
 		}
-		rlr, err := upstream.NewRateLimitersRegistry(&common.RateLimiterConfig{
+		rlr, err := upstream.NewRateLimitersRegistry(context.Background(), &common.RateLimiterConfig{
 			Budgets: []*common.RateLimitBudgetConfig{},
 		}, &log.Logger)
 		if err != nil {
@@ -3633,6 +3984,7 @@ func TestNetwork_Forward(t *testing.T) {
 			nil,
 			mt,
 			0,
+			nil,
 			nil,
 		)
 		upr.Bootstrap(ctx)
@@ -3771,7 +4123,7 @@ func TestNetwork_Forward(t *testing.T) {
 				MaxAttempts: 2, // Allow up to 2 retry attempts
 			},
 		}
-		rlr, err := upstream.NewRateLimitersRegistry(&common.RateLimiterConfig{
+		rlr, err := upstream.NewRateLimitersRegistry(context.Background(), &common.RateLimiterConfig{
 			Budgets: []*common.RateLimitBudgetConfig{},
 		}, &log.Logger)
 		if err != nil {
@@ -3821,6 +4173,7 @@ func TestNetwork_Forward(t *testing.T) {
 			nil,
 			mt,
 			0,
+			nil,
 			nil,
 		)
 		upr.Bootstrap(ctx)
@@ -3952,7 +4305,7 @@ func TestNetwork_Forward(t *testing.T) {
 		}
 		clr := clients.NewClientRegistry(&log.Logger, "prjA", nil, evm.NewJsonRpcErrorExtractor())
 		fsCfg := &common.FailsafeConfig{}
-		rlr, err := upstream.NewRateLimitersRegistry(&common.RateLimiterConfig{
+		rlr, err := upstream.NewRateLimitersRegistry(context.Background(), &common.RateLimiterConfig{
 			Budgets: []*common.RateLimitBudgetConfig{},
 		}, &log.Logger)
 		if err != nil {
@@ -3990,6 +4343,7 @@ func TestNetwork_Forward(t *testing.T) {
 			nil,
 			mt,
 			1*time.Second,
+			nil,
 			nil,
 		)
 		upr.Bootstrap(ctx)
@@ -4081,7 +4435,7 @@ func TestNetwork_Forward(t *testing.T) {
 		}
 		clr := clients.NewClientRegistry(&log.Logger, "prjA", nil, evm.NewJsonRpcErrorExtractor())
 
-		rlr, err := upstream.NewRateLimitersRegistry(&common.RateLimiterConfig{
+		rlr, err := upstream.NewRateLimitersRegistry(context.Background(), &common.RateLimiterConfig{
 			Budgets: []*common.RateLimitBudgetConfig{},
 		}, &log.Logger)
 		if err != nil {
@@ -4122,6 +4476,7 @@ func TestNetwork_Forward(t *testing.T) {
 			nil,
 			mt,
 			1*time.Second,
+			nil,
 			nil,
 		)
 		upr.Bootstrap(ctx)
@@ -4219,7 +4574,7 @@ func TestNetwork_Forward(t *testing.T) {
 				MaxAttempts: 3,
 			},
 		}
-		rlr, err := upstream.NewRateLimitersRegistry(&common.RateLimiterConfig{
+		rlr, err := upstream.NewRateLimitersRegistry(context.Background(), &common.RateLimiterConfig{
 			Budgets: []*common.RateLimitBudgetConfig{},
 		}, &log.Logger)
 		if err != nil {
@@ -4280,6 +4635,7 @@ func TestNetwork_Forward(t *testing.T) {
 			nil,
 			mt,
 			1*time.Second,
+			nil,
 			nil,
 		)
 		upr.Bootstrap(ctx)
@@ -4391,7 +4747,7 @@ func TestNetwork_Forward(t *testing.T) {
 				MaxAttempts: 3,
 			},
 		}
-		rlr, err := upstream.NewRateLimitersRegistry(&common.RateLimiterConfig{
+		rlr, err := upstream.NewRateLimitersRegistry(context.Background(), &common.RateLimiterConfig{
 			Budgets: []*common.RateLimitBudgetConfig{},
 		}, &log.Logger)
 		if err != nil {
@@ -4432,6 +4788,7 @@ func TestNetwork_Forward(t *testing.T) {
 			nil,
 			mt,
 			1*time.Second,
+			nil,
 			nil,
 		)
 		upr.Bootstrap(ctx)
@@ -4521,7 +4878,7 @@ func TestNetwork_Forward(t *testing.T) {
 				MaxAttempts: 3,
 			},
 		}
-		rlr, err := upstream.NewRateLimitersRegistry(&common.RateLimiterConfig{
+		rlr, err := upstream.NewRateLimitersRegistry(context.Background(), &common.RateLimiterConfig{
 			Budgets: []*common.RateLimitBudgetConfig{},
 		}, &log.Logger)
 		if err != nil {
@@ -4566,6 +4923,7 @@ func TestNetwork_Forward(t *testing.T) {
 			nil,
 			mt,
 			1*time.Second,
+			nil,
 			nil,
 		)
 		upr.Bootstrap(ctx)
@@ -4623,7 +4981,7 @@ func TestNetwork_Forward(t *testing.T) {
 		util.SetupMocksForEvmStatePoller()
 		defer util.AssertNoPendingMocks(t, 0)
 
-		rateLimitersRegistry, err := upstream.NewRateLimitersRegistry(
+		rateLimitersRegistry, err := upstream.NewRateLimitersRegistry(context.Background(),
 			&common.RateLimiterConfig{
 				Budgets: []*common.RateLimitBudgetConfig{
 					{
@@ -4690,6 +5048,7 @@ func TestNetwork_Forward(t *testing.T) {
 			nil,
 			mt,
 			1*time.Second,
+			nil,
 			nil,
 		)
 
@@ -4769,7 +5128,7 @@ func TestNetwork_Forward(t *testing.T) {
 				MaxAttempts: 3,
 			},
 		}
-		rlr, err := upstream.NewRateLimitersRegistry(&common.RateLimiterConfig{
+		rlr, err := upstream.NewRateLimitersRegistry(context.Background(), &common.RateLimiterConfig{
 			Budgets: []*common.RateLimitBudgetConfig{},
 		}, &log.Logger)
 		if err != nil {
@@ -4809,6 +5168,7 @@ func TestNetwork_Forward(t *testing.T) {
 			nil,
 			mt,
 			1*time.Second,
+			nil,
 			nil,
 		)
 		upr.Bootstrap(ctx)
@@ -4851,8 +5211,10 @@ func TestNetwork_Forward(t *testing.T) {
 		if err == nil {
 			t.Errorf("Expected an error, got nil")
 		}
-		if !strings.Contains(common.ErrorSummary(err), "ErrFailsafeRetryExceeded") {
-			t.Errorf("Expected %v, got %v", "ErrFailsafeRetryExceeded", err)
+		if !common.HasErrorCode(err, common.ErrCodeUpstreamsExhausted) {
+			t.Errorf("Expected ErrUpstreamsExhausted after retries exhausted, got %v", err)
+		} else if !common.HasErrorCode(err, common.ErrCodeEndpointServerSideException) {
+			t.Errorf("Expected server-side exception inside ErrUpstreamsExhausted, got %v", err)
 		}
 	})
 	t.Run("ForwardRetryFailuresWithSuccess", func(t *testing.T) {
@@ -4899,7 +5261,7 @@ func TestNetwork_Forward(t *testing.T) {
 				MaxAttempts: 4,
 			},
 		}
-		rlr, err := upstream.NewRateLimitersRegistry(&common.RateLimiterConfig{
+		rlr, err := upstream.NewRateLimitersRegistry(context.Background(), &common.RateLimiterConfig{
 			Budgets: []*common.RateLimitBudgetConfig{},
 		}, &log.Logger)
 		if err != nil {
@@ -4939,6 +5301,7 @@ func TestNetwork_Forward(t *testing.T) {
 			nil,
 			mt,
 			1*time.Second,
+			nil,
 			nil,
 		)
 		upr.Bootstrap(ctx)
@@ -5027,7 +5390,7 @@ func TestNetwork_Forward(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		rlr, err := upstream.NewRateLimitersRegistry(&common.RateLimiterConfig{
+		rlr, err := upstream.NewRateLimitersRegistry(context.Background(), &common.RateLimiterConfig{
 			Budgets: []*common.RateLimitBudgetConfig{},
 		}, &log.Logger)
 		if err != nil {
@@ -5067,6 +5430,7 @@ func TestNetwork_Forward(t *testing.T) {
 			nil,
 			mt,
 			1*time.Second,
+			nil,
 			nil,
 		)
 		upr.Bootstrap(ctx)
@@ -5160,7 +5524,7 @@ func TestNetwork_Forward(t *testing.T) {
 				Duration: common.Duration(1 * time.Second),
 			},
 		}
-		rlr, err := upstream.NewRateLimitersRegistry(&common.RateLimiterConfig{
+		rlr, err := upstream.NewRateLimitersRegistry(context.Background(), &common.RateLimiterConfig{
 			Budgets: []*common.RateLimitBudgetConfig{},
 		}, &log.Logger)
 		if err != nil {
@@ -5200,6 +5564,7 @@ func TestNetwork_Forward(t *testing.T) {
 			nil,
 			mt,
 			1*time.Second,
+			nil,
 			nil,
 		)
 		upr.Bootstrap(ctx)
@@ -5293,7 +5658,7 @@ func TestNetwork_Forward(t *testing.T) {
 				MaxCount: 1,
 			},
 		}
-		rlr, err := upstream.NewRateLimitersRegistry(&common.RateLimiterConfig{
+		rlr, err := upstream.NewRateLimitersRegistry(context.Background(), &common.RateLimiterConfig{
 			Budgets: []*common.RateLimitBudgetConfig{},
 		}, &log.Logger)
 		if err != nil {
@@ -5339,6 +5704,7 @@ func TestNetwork_Forward(t *testing.T) {
 			nil,
 			mt,
 			1*time.Second,
+			nil,
 			nil,
 		)
 		upr.Bootstrap(ctx)
@@ -5446,7 +5812,7 @@ func TestNetwork_Forward(t *testing.T) {
 				MaxCount: 5,
 			},
 		}
-		rlr, err := upstream.NewRateLimitersRegistry(&common.RateLimiterConfig{
+		rlr, err := upstream.NewRateLimitersRegistry(context.Background(), &common.RateLimiterConfig{
 			Budgets: []*common.RateLimitBudgetConfig{},
 		}, &log.Logger)
 		if err != nil {
@@ -5492,6 +5858,7 @@ func TestNetwork_Forward(t *testing.T) {
 			nil,
 			mt,
 			1*time.Second,
+			nil,
 			nil,
 		)
 		upr.Bootstrap(ctx)
@@ -5597,7 +5964,7 @@ func TestNetwork_Forward(t *testing.T) {
 				MaxCount: 5,
 			},
 		}
-		rlr, err := upstream.NewRateLimitersRegistry(&common.RateLimiterConfig{
+		rlr, err := upstream.NewRateLimitersRegistry(context.Background(), &common.RateLimiterConfig{
 			Budgets: []*common.RateLimitBudgetConfig{},
 		}, &log.Logger)
 		if err != nil {
@@ -5643,6 +6010,7 @@ func TestNetwork_Forward(t *testing.T) {
 			nil,
 			mt,
 			1*time.Second,
+			nil,
 			nil,
 		)
 		upr.Bootstrap(ctx)
@@ -5755,7 +6123,7 @@ func TestNetwork_Forward(t *testing.T) {
 			},
 		}
 
-		rlr, err := upstream.NewRateLimitersRegistry(&common.RateLimiterConfig{
+		rlr, err := upstream.NewRateLimitersRegistry(context.Background(), &common.RateLimiterConfig{
 			Budgets: []*common.RateLimitBudgetConfig{},
 		}, &log.Logger)
 		if err != nil {
@@ -5794,6 +6162,7 @@ func TestNetwork_Forward(t *testing.T) {
 			nil,
 			mt,
 			1*time.Second,
+			nil,
 			nil,
 		)
 		upr.Bootstrap(ctx)
@@ -5889,7 +6258,7 @@ func TestNetwork_Forward(t *testing.T) {
 			},
 		}
 
-		rlr, err := upstream.NewRateLimitersRegistry(&common.RateLimiterConfig{
+		rlr, err := upstream.NewRateLimitersRegistry(context.Background(), &common.RateLimiterConfig{
 			Budgets: []*common.RateLimitBudgetConfig{},
 		}, &log.Logger)
 		if err != nil {
@@ -5928,6 +6297,7 @@ func TestNetwork_Forward(t *testing.T) {
 			nil,
 			mt,
 			1*time.Hour,
+			nil,
 			nil,
 		)
 		upr.Bootstrap(ctx)
@@ -6022,7 +6392,7 @@ func TestNetwork_Forward(t *testing.T) {
 			t.Fatal(err)
 		}
 		clr := clients.NewClientRegistry(&log.Logger, "prjA", nil, evm.NewJsonRpcErrorExtractor())
-		rlr, err := upstream.NewRateLimitersRegistry(&common.RateLimiterConfig{
+		rlr, err := upstream.NewRateLimitersRegistry(context.Background(), &common.RateLimiterConfig{
 			Budgets: []*common.RateLimitBudgetConfig{},
 		}, &log.Logger)
 		if err != nil {
@@ -6069,6 +6439,7 @@ func TestNetwork_Forward(t *testing.T) {
 			nil,
 			mt,
 			1*time.Second,
+			nil,
 			nil,
 		)
 		upr.Bootstrap(ctx)
@@ -6175,7 +6546,7 @@ func TestNetwork_Forward(t *testing.T) {
 		}
 		clr := clients.NewClientRegistry(&log.Logger, "prjA", nil, evm.NewJsonRpcErrorExtractor())
 		fsCfg := &common.FailsafeConfig{}
-		rlr, err := upstream.NewRateLimitersRegistry(&common.RateLimiterConfig{
+		rlr, err := upstream.NewRateLimitersRegistry(context.Background(), &common.RateLimiterConfig{
 			Budgets: []*common.RateLimitBudgetConfig{},
 		}, &log.Logger)
 		if err != nil {
@@ -6215,6 +6586,7 @@ func TestNetwork_Forward(t *testing.T) {
 			nil,
 			mt,
 			1*time.Second,
+			nil,
 			nil,
 		)
 		upr.Bootstrap(ctx)
@@ -6313,7 +6685,7 @@ func TestNetwork_Forward(t *testing.T) {
 				MaxAttempts: 2,
 			},
 		}
-		rlr, err := upstream.NewRateLimitersRegistry(&common.RateLimiterConfig{
+		rlr, err := upstream.NewRateLimitersRegistry(context.Background(), &common.RateLimiterConfig{
 			Budgets: []*common.RateLimitBudgetConfig{},
 		}, &log.Logger)
 		if err != nil {
@@ -6360,6 +6732,7 @@ func TestNetwork_Forward(t *testing.T) {
 			nil,
 			mt,
 			1*time.Second,
+			nil,
 			nil,
 		)
 		upr.Bootstrap(ctx)
@@ -6458,7 +6831,7 @@ func TestNetwork_Forward(t *testing.T) {
 				MaxAttempts: 2,
 			},
 		}
-		rlr, err := upstream.NewRateLimitersRegistry(&common.RateLimiterConfig{
+		rlr, err := upstream.NewRateLimitersRegistry(context.Background(), &common.RateLimiterConfig{
 			Budgets: []*common.RateLimitBudgetConfig{},
 		}, &log.Logger)
 		if err != nil {
@@ -6498,6 +6871,7 @@ func TestNetwork_Forward(t *testing.T) {
 			nil,
 			mt,
 			1*time.Second,
+			nil,
 			nil,
 		)
 		upr.Bootstrap(ctx)
@@ -6586,7 +6960,7 @@ func TestNetwork_Forward(t *testing.T) {
 				MaxAttempts: 2,
 			},
 		}
-		rlr, err := upstream.NewRateLimitersRegistry(&common.RateLimiterConfig{
+		rlr, err := upstream.NewRateLimitersRegistry(context.Background(), &common.RateLimiterConfig{
 			Budgets: []*common.RateLimitBudgetConfig{},
 		}, &log.Logger)
 		if err != nil {
@@ -6632,6 +7006,7 @@ func TestNetwork_Forward(t *testing.T) {
 			nil,
 			mt,
 			1*time.Second,
+			nil,
 			nil,
 		)
 		upr.Bootstrap(ctx)
@@ -6738,7 +7113,7 @@ func TestNetwork_Forward(t *testing.T) {
 				MaxAttempts: 2,
 			},
 		}
-		rlr, err := upstream.NewRateLimitersRegistry(&common.RateLimiterConfig{
+		rlr, err := upstream.NewRateLimitersRegistry(context.Background(), &common.RateLimiterConfig{
 			Budgets: []*common.RateLimitBudgetConfig{},
 		}, &log.Logger)
 		if err != nil {
@@ -6784,6 +7159,7 @@ func TestNetwork_Forward(t *testing.T) {
 			nil,
 			mt,
 			1*time.Second,
+			nil,
 			nil,
 		)
 		upr.Bootstrap(ctx)
@@ -6883,7 +7259,7 @@ func TestNetwork_Forward(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 		defer cancel()
 
-		rlr, err := upstream.NewRateLimitersRegistry(&common.RateLimiterConfig{
+		rlr, err := upstream.NewRateLimitersRegistry(context.Background(), &common.RateLimiterConfig{
 			Budgets: []*common.RateLimitBudgetConfig{},
 		}, &log.Logger)
 		if err != nil {
@@ -6939,6 +7315,7 @@ func TestNetwork_Forward(t *testing.T) {
 			nil,
 			mt,
 			1*time.Second,
+			nil,
 			nil,
 		)
 		upr.Bootstrap(ctx)
@@ -7019,7 +7396,7 @@ func TestNetwork_Forward(t *testing.T) {
 		defer cancel()
 
 		fsCfg := &common.FailsafeConfig{}
-		rlr, err := upstream.NewRateLimitersRegistry(&common.RateLimiterConfig{
+		rlr, err := upstream.NewRateLimitersRegistry(context.Background(), &common.RateLimiterConfig{
 			Budgets: []*common.RateLimitBudgetConfig{},
 		}, &log.Logger)
 		if err != nil {
@@ -7072,6 +7449,7 @@ func TestNetwork_Forward(t *testing.T) {
 			nil,
 			mt,
 			1*time.Second,
+			nil,
 			nil,
 		)
 		upr.Bootstrap(ctx)
@@ -7142,7 +7520,7 @@ func TestNetwork_Forward(t *testing.T) {
 		defer cancel()
 
 		fsCfg := &common.FailsafeConfig{}
-		rlr, err := upstream.NewRateLimitersRegistry(&common.RateLimiterConfig{
+		rlr, err := upstream.NewRateLimitersRegistry(context.Background(), &common.RateLimiterConfig{
 			Budgets: []*common.RateLimitBudgetConfig{},
 		}, &log.Logger)
 		if err != nil {
@@ -7194,6 +7572,7 @@ func TestNetwork_Forward(t *testing.T) {
 			nil,
 			mt,
 			1*time.Second,
+			nil,
 			nil,
 		)
 		upr.Bootstrap(ctx)
@@ -7264,7 +7643,7 @@ func TestNetwork_Forward(t *testing.T) {
 		defer cancel()
 
 		fsCfg := &common.FailsafeConfig{}
-		rlr, err := upstream.NewRateLimitersRegistry(&common.RateLimiterConfig{
+		rlr, err := upstream.NewRateLimitersRegistry(context.Background(), &common.RateLimiterConfig{
 			Budgets: []*common.RateLimitBudgetConfig{},
 		}, &log.Logger)
 		if err != nil {
@@ -7316,6 +7695,7 @@ func TestNetwork_Forward(t *testing.T) {
 			nil,
 			mt,
 			1*time.Second,
+			nil,
 			nil,
 		)
 		upr.Bootstrap(ctx)
@@ -7380,7 +7760,7 @@ func TestNetwork_Forward(t *testing.T) {
 
 		metricsTracker.Bootstrap(ctx)
 
-		rateLimitersRegistry, err := upstream.NewRateLimitersRegistry(&common.RateLimiterConfig{
+		rateLimitersRegistry, err := upstream.NewRateLimitersRegistry(context.Background(), &common.RateLimiterConfig{
 			Budgets: []*common.RateLimitBudgetConfig{},
 		}, &logger)
 		assert.NoError(t, err)
@@ -7424,6 +7804,10 @@ func TestNetwork_Forward(t *testing.T) {
 			nil,
 			metricsTracker,
 			1*time.Second,
+			&upstream.ScoringConfig{
+				ScoreGranularity: "method",
+				SwitchHysteresis: -1,
+			},
 			nil,
 		)
 
@@ -7463,7 +7847,6 @@ func TestNetwork_Forward(t *testing.T) {
 				Persist().
 				Post("/").
 				Filter(func(request *http.Request) bool {
-					// seek body in request without changing the original Body buffer
 					body := util.SafeReadBody(request)
 					return strings.Contains(body, method) && strings.Contains(request.Host, upstreamId)
 				}).
@@ -7474,7 +7857,6 @@ func TestNetwork_Forward(t *testing.T) {
 
 		upstream.ReorderUpstreams(upstreamsRegistry)
 
-		// Upstream A is faster for eth_call, Upstream B is faster for eth_traceTransaction, Upstream C is faster for eth_getLogs
 		mockRequests("eth_getLogs", "rpc1", 200*time.Millisecond)
 		mockRequests("eth_getLogs", "rpc2", 100*time.Millisecond)
 		mockRequests("eth_getLogs", "rpc3", 50*time.Millisecond)
@@ -7512,12 +7894,10 @@ func TestNetwork_Forward(t *testing.T) {
 						assert.NoError(t, err)
 					}
 				}(method)
-				// time.Sleep(1 * time.Millisecond)
 			}
 		}
 		wg.Wait()
 
-		// Stabilize EMA/confidence-weighted scores after heavy concurrent traffic
 		for i := 0; i < 5; i++ {
 			upstreamsRegistry.RefreshUpstreamNetworkMethodScores()
 			time.Sleep(100 * time.Millisecond)
@@ -7566,7 +7946,7 @@ func TestNetwork_Forward(t *testing.T) {
 		defer cancel()
 
 		fsCfg := &common.FailsafeConfig{}
-		rlr, err := upstream.NewRateLimitersRegistry(&common.RateLimiterConfig{
+		rlr, err := upstream.NewRateLimitersRegistry(context.Background(), &common.RateLimiterConfig{
 			Budgets: []*common.RateLimitBudgetConfig{},
 		}, &log.Logger)
 		if err != nil {
@@ -7631,6 +8011,7 @@ func TestNetwork_Forward(t *testing.T) {
 			nil,
 			mt,
 			1*time.Second,
+			nil,
 			nil,
 		)
 		upr.Bootstrap(ctx)
@@ -9236,7 +9617,7 @@ func TestNetwork_EvmGetLogs(t *testing.T) {
 			defer cancel()
 
 			// Build network with tight best-effort budgets to force fallback
-			rateLimitersRegistry, _ := upstream.NewRateLimitersRegistry(&common.RateLimiterConfig{}, &log.Logger)
+			rateLimitersRegistry, _ := upstream.NewRateLimitersRegistry(context.Background(), &common.RateLimiterConfig{}, &log.Logger)
 			metricsTracker := health.NewTracker(&log.Logger, "test", time.Minute)
 			vr := thirdparty.NewVendorsRegistry()
 			pr, err := thirdparty.NewProvidersRegistry(&log.Logger, vr, []*common.ProviderConfig{}, nil)
@@ -9272,6 +9653,7 @@ func TestNetwork_EvmGetLogs(t *testing.T) {
 				nil,
 				metricsTracker,
 				1*time.Second,
+				nil,
 				nil,
 			)
 
@@ -10170,7 +10552,7 @@ func TestNetwork_ThunderingHerdProtection(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		rlr, _ := upstream.NewRateLimitersRegistry(&common.RateLimiterConfig{}, &log.Logger)
+		rlr, _ := upstream.NewRateLimitersRegistry(context.Background(), &common.RateLimiterConfig{}, &log.Logger)
 		mt := health.NewTracker(&log.Logger, "prjA", 5*time.Second)
 
 		pollerInterval := 2000 * time.Millisecond
@@ -10217,7 +10599,7 @@ func TestNetwork_ThunderingHerdProtection(t *testing.T) {
 		ssr, _ := data.NewSharedStateRegistry(ctx, &log.Logger, sharedStateCfg)
 		upr := upstream.NewUpstreamsRegistry(
 			ctx, &log.Logger, "prjA", []*common.UpstreamConfig{upCfg},
-			ssr, rlr, vr, pr, nil, mt, 1*time.Second, nil,
+			ssr, rlr, vr, pr, nil, mt, 1*time.Second, nil, nil,
 		)
 		upr.Bootstrap(ctx)
 		time.Sleep(100 * time.Millisecond)
@@ -10372,7 +10754,7 @@ func TestNetwork_ThunderingHerdProtection(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		rlr, _ := upstream.NewRateLimitersRegistry(&common.RateLimiterConfig{}, &log.Logger)
+		rlr, _ := upstream.NewRateLimitersRegistry(context.Background(), &common.RateLimiterConfig{}, &log.Logger)
 		mt := health.NewTracker(&log.Logger, "prjA", 2*time.Second)
 
 		upCfg := &common.UpstreamConfig{
@@ -10407,7 +10789,7 @@ func TestNetwork_ThunderingHerdProtection(t *testing.T) {
 		ssr, _ := data.NewSharedStateRegistry(ctx, &log.Logger, sharedStateCfg)
 		upr := upstream.NewUpstreamsRegistry(
 			ctx, &log.Logger, "prjA", []*common.UpstreamConfig{upCfg},
-			ssr, rlr, vr, pr, nil, mt, 1*time.Second, nil,
+			ssr, rlr, vr, pr, nil, mt, 1*time.Second, nil, nil,
 		)
 		upr.Bootstrap(ctx)
 		time.Sleep(100 * time.Millisecond)
@@ -10557,7 +10939,7 @@ func TestNetwork_ThunderingHerdProtection(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		rlr, _ := upstream.NewRateLimitersRegistry(&common.RateLimiterConfig{}, &log.Logger)
+		rlr, _ := upstream.NewRateLimitersRegistry(context.Background(), &common.RateLimiterConfig{}, &log.Logger)
 		mt := health.NewTracker(&log.Logger, "prjA", 2*time.Second)
 
 		upCfg := &common.UpstreamConfig{
@@ -10599,6 +10981,7 @@ func TestNetwork_ThunderingHerdProtection(t *testing.T) {
 			nil,
 			mt,
 			1*time.Second,
+			nil,
 			nil,
 		)
 
@@ -10655,7 +11038,7 @@ func TestNetwork_ThunderingHerdProtection(t *testing.T) {
 func setupTestNetworkSimple(t *testing.T, ctx context.Context, upstreamConfig *common.UpstreamConfig, networkConfig *common.NetworkConfig) *Network {
 	t.Helper()
 
-	rateLimitersRegistry, _ := upstream.NewRateLimitersRegistry(&common.RateLimiterConfig{}, &log.Logger)
+	rateLimitersRegistry, _ := upstream.NewRateLimitersRegistry(context.Background(), &common.RateLimiterConfig{}, &log.Logger)
 	metricsTracker := health.NewTracker(&log.Logger, "test", time.Minute)
 
 	if upstreamConfig == nil {
@@ -10709,6 +11092,7 @@ func setupTestNetworkSimple(t *testing.T, ctx context.Context, upstreamConfig *c
 		nil,
 		metricsTracker,
 		1*time.Second,
+		nil,
 		nil,
 	)
 	if networkConfig == nil {
@@ -10764,7 +11148,7 @@ func setupTestNetworkWithFullAndArchiveNodeUpstreams(
 ) *Network {
 	t.Helper()
 
-	rateLimitersRegistry, _ := upstream.NewRateLimitersRegistry(&common.RateLimiterConfig{}, &log.Logger)
+	rateLimitersRegistry, _ := upstream.NewRateLimitersRegistry(context.Background(), &common.RateLimiterConfig{}, &log.Logger)
 	metricsTracker := health.NewTracker(&log.Logger, "test", time.Minute)
 
 	up1 := &common.UpstreamConfig{
@@ -10822,6 +11206,7 @@ func setupTestNetworkWithFullAndArchiveNodeUpstreams(
 		nil,
 		metricsTracker,
 		120*time.Second,
+		nil,
 		nil,
 	)
 
@@ -10929,7 +11314,7 @@ func TestNetwork_HighestLatestBlockNumber(t *testing.T) {
 			Reply(200).
 			JSON([]byte(`{"result":"0x7b"}`))
 
-		rateLimitersRegistry, _ := upstream.NewRateLimitersRegistry(&common.RateLimiterConfig{}, &log.Logger)
+		rateLimitersRegistry, _ := upstream.NewRateLimitersRegistry(context.Background(), &common.RateLimiterConfig{}, &log.Logger)
 		metricsTracker := health.NewTracker(&log.Logger, "test", time.Minute)
 
 		vr := thirdparty.NewVendorsRegistry()
@@ -10963,6 +11348,7 @@ func TestNetwork_HighestLatestBlockNumber(t *testing.T) {
 			nil,
 			metricsTracker,
 			1*time.Second,
+			nil,
 			nil,
 		)
 
@@ -11082,7 +11468,7 @@ func TestNetwork_HighestLatestBlockNumber(t *testing.T) {
 			Reply(200).
 			JSON([]byte(`{"result":"0x7b"}`))
 
-		rateLimitersRegistry, _ := upstream.NewRateLimitersRegistry(&common.RateLimiterConfig{}, &log.Logger)
+		rateLimitersRegistry, _ := upstream.NewRateLimitersRegistry(context.Background(), &common.RateLimiterConfig{}, &log.Logger)
 		metricsTracker := health.NewTracker(&log.Logger, "test", time.Minute)
 
 		vr := thirdparty.NewVendorsRegistry()
@@ -11116,6 +11502,7 @@ func TestNetwork_HighestLatestBlockNumber(t *testing.T) {
 			nil,
 			metricsTracker,
 			1*time.Second,
+			nil,
 			nil,
 		)
 
@@ -11240,7 +11627,7 @@ func TestNetwork_HighestLatestBlockNumber(t *testing.T) {
 			Reply(200).
 			JSON([]byte(`{"result":"0x7b"}`))
 
-		rateLimitersRegistry, _ := upstream.NewRateLimitersRegistry(&common.RateLimiterConfig{}, &log.Logger)
+		rateLimitersRegistry, _ := upstream.NewRateLimitersRegistry(context.Background(), &common.RateLimiterConfig{}, &log.Logger)
 		metricsTracker := health.NewTracker(&log.Logger, "test", time.Minute)
 
 		vr := thirdparty.NewVendorsRegistry()
@@ -11274,6 +11661,7 @@ func TestNetwork_HighestLatestBlockNumber(t *testing.T) {
 			nil,
 			metricsTracker,
 			1*time.Second,
+			nil,
 			nil,
 		)
 
@@ -11367,7 +11755,7 @@ func TestNetwork_HighestLatestBlockNumber(t *testing.T) {
 			Reply(200).
 			JSON([]byte(`{"result":"0x7b"}`))
 
-		rateLimitersRegistry, _ := upstream.NewRateLimitersRegistry(&common.RateLimiterConfig{}, &log.Logger)
+		rateLimitersRegistry, _ := upstream.NewRateLimitersRegistry(context.Background(), &common.RateLimiterConfig{}, &log.Logger)
 		metricsTracker := health.NewTracker(&log.Logger, "test", time.Minute)
 
 		vr := thirdparty.NewVendorsRegistry()
@@ -11401,6 +11789,7 @@ func TestNetwork_HighestLatestBlockNumber(t *testing.T) {
 			nil,
 			metricsTracker,
 			1*time.Second,
+			nil,
 			nil,
 		)
 
@@ -11501,7 +11890,7 @@ func TestNetwork_HighestFinalizedBlockNumber(t *testing.T) {
 			Reply(200).
 			JSON([]byte(`{"result":"0x7b"}`))
 
-		rateLimitersRegistry, _ := upstream.NewRateLimitersRegistry(&common.RateLimiterConfig{}, &log.Logger)
+		rateLimitersRegistry, _ := upstream.NewRateLimitersRegistry(context.Background(), &common.RateLimiterConfig{}, &log.Logger)
 		metricsTracker := health.NewTracker(&log.Logger, "test", time.Minute)
 
 		vr := thirdparty.NewVendorsRegistry()
@@ -11535,6 +11924,7 @@ func TestNetwork_HighestFinalizedBlockNumber(t *testing.T) {
 			nil,
 			metricsTracker,
 			1*time.Second,
+			nil,
 			nil,
 		)
 
@@ -11632,7 +12022,7 @@ func TestNetwork_HighestFinalizedBlockNumber(t *testing.T) {
 			Reply(200).
 			JSON([]byte(`{"result":"0x7b"}`))
 
-		rateLimitersRegistry, _ := upstream.NewRateLimitersRegistry(&common.RateLimiterConfig{}, &log.Logger)
+		rateLimitersRegistry, _ := upstream.NewRateLimitersRegistry(context.Background(), &common.RateLimiterConfig{}, &log.Logger)
 		metricsTracker := health.NewTracker(&log.Logger, "test", time.Minute)
 
 		vr := thirdparty.NewVendorsRegistry()
@@ -11666,6 +12056,7 @@ func TestNetwork_HighestFinalizedBlockNumber(t *testing.T) {
 			nil,
 			metricsTracker,
 			1*time.Second,
+			nil,
 			nil,
 		)
 
@@ -11761,7 +12152,7 @@ func TestNetwork_HighestFinalizedBlockNumber(t *testing.T) {
 			Reply(200).
 			JSON([]byte(`{"result":"0x7b"}`))
 
-		rateLimitersRegistry, _ := upstream.NewRateLimitersRegistry(&common.RateLimiterConfig{}, &log.Logger)
+		rateLimitersRegistry, _ := upstream.NewRateLimitersRegistry(context.Background(), &common.RateLimiterConfig{}, &log.Logger)
 		metricsTracker := health.NewTracker(&log.Logger, "test", time.Minute)
 
 		vr := thirdparty.NewVendorsRegistry()
@@ -11795,6 +12186,7 @@ func TestNetwork_HighestFinalizedBlockNumber(t *testing.T) {
 			nil,
 			metricsTracker,
 			1*time.Second,
+			nil,
 			nil,
 		)
 

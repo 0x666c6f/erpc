@@ -270,16 +270,17 @@ func (r *JsonRpcResponse) ParseFromStream(ctx []context.Context, reader io.Reade
 	if err != nil {
 		return err
 	}
-	// Return buffer after we're done parsing and copying what we need
-	if returnBuf != nil {
-		defer returnBuf()
-	}
 
 	// Parse into a temporary struct to extract fields without string conversion
 	var temp struct {
 		ID     json.RawMessage `json:"id"`
 		Result json.RawMessage `json:"result"`
 		Error  json.RawMessage `json:"error"`
+	}
+
+	// Return buffer after we're done parsing and copying what we need
+	if returnBuf != nil {
+		defer returnBuf()
 	}
 
 	// Use Sonic's Unmarshal which works directly with bytes
@@ -727,11 +728,6 @@ func (r *JsonRpcResponse) Clone() (*JsonRpcResponse, error) {
 	// Copy the canonical hash if it exists
 	if cached, ok := r.canonicalHashWithIgnored.Load(defaultCanonicalHashPlaceholder); ok {
 		clone.canonicalHashWithIgnored.Store(defaultCanonicalHashPlaceholder, cached)
-	}
-
-	// Only copy resultWriter if we didn't materialize the result above
-	if clone.result == nil && r.resultWriter != nil {
-		clone.resultWriter = r.resultWriter
 	}
 
 	return clone, nil

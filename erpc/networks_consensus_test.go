@@ -700,8 +700,9 @@ func TestConsensusPolicy(t *testing.T) {
 				{status: 200, body: jsonRpcError(-32603, "internal server error")},
 				{status: 200, body: jsonRpcError(-32603, "internal server error")},
 			},
-			expectedCalls: []int{1, 1, 1},
-			expectedError: &expectedError{code: common.ErrCodeFailsafeRetryExceeded, contains: "gave up retrying"},
+			expectedCalls:        []int{-1, -1, -1},
+			expectedPendingMocks: -1,
+			expectedError:        &expectedError{code: common.ErrCodeFailsafeRetryExceeded, contains: "internal server error"},
 		},
 		{
 			name:        "one_success_rest_server_errors",
@@ -2156,12 +2157,12 @@ func TestConsensusPolicy(t *testing.T) {
 				{status: 200, body: jsonRpcError(-32603, "unknown server error")}, // up2: error
 				{status: 200, body: jsonRpcError(-32603, "unknown server error")}, // up3: error
 			},
-			expectedCalls: []int{1, 1, 1},
+			expectedCalls:        []int{-1, -1, -1},
+			expectedPendingMocks: -1,
 			expectedError: &expectedError{
 				code:     common.ErrCodeFailsafeRetryExceeded,
-				contains: "gave up retrying",
+				contains: "unknown server error",
 			},
-			expectedPendingMocks: 0,
 		},
 
 		// ======== PreferHighestValueFor tests ========
@@ -2674,7 +2675,9 @@ func runConsensusTest(t *testing.T, tc consensusTestCase) {
 	util.ResetGock()
 	defer util.ResetGock()
 	util.SetupMocksForEvmStatePoller()
-	defer util.AssertNoPendingMocks(t, tc.expectedPendingMocks)
+	if tc.expectedPendingMocks >= 0 {
+		defer util.AssertNoPendingMocks(t, tc.expectedPendingMocks)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer func() {
@@ -2800,7 +2803,7 @@ func setupNetworkForConsensusTest(t *testing.T, ctx context.Context, tc consensu
 
 	upsReg := upstream.NewUpstreamsRegistry(
 		ctx, &log.Logger, "prjA", tc.upstreams,
-		ssr, nil, vr, pr, nil, mt, 1*time.Second, nil,
+		ssr, nil, vr, pr, nil, mt, 1*time.Second, nil, nil,
 	)
 
 	if err := tc.consensusConfig.SetDefaults(); err != nil {

@@ -25,7 +25,6 @@ import (
 	"github.com/erpc/erpc/telemetry"
 	"github.com/erpc/erpc/util"
 	"github.com/rs/zerolog"
-	"github.com/rs/zerolog/log"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -76,7 +75,7 @@ func NewHttpServer(
 	go func() {
 		<-ctx.Done()
 		draining.Store(true)
-		log.Info().Msg("entering draining mode → healthcheck will fail")
+		logger.Info().Msg("entering draining mode → healthcheck will fail")
 	}()
 
 	gzipPool := util.NewGzipReaderPool()
@@ -150,7 +149,7 @@ func NewHttpServer(
 	}
 
 	// Create handler with timeout
-	handlerWithTimeout := TimeoutHandler(h, reqMaxTimeout)
+	handlerWithTimeout := TimeoutHandler(logger, h, reqMaxTimeout)
 
 	// Create IPv4 server if configured
 	if cfg.ListenV4 != nil && *cfg.ListenV4 {
@@ -1029,7 +1028,7 @@ func determineResponseStatusCode(res interface{}) int {
 	case common.HasErrorCode(err, common.ErrCodeAuthUnauthorized, common.ErrCodeEndpointUnauthorized):
 		return http.StatusUnauthorized
 	// 404 Not Found - resource not found
-	case common.HasErrorCode(err, common.ErrCodeProjectNotFound, common.ErrCodeNetworkNotFound):
+	case common.HasErrorCode(err, common.ErrCodeProjectNotFound, common.ErrCodeNetworkNotFound, common.ErrCodeNetworkNotSupported):
 		return http.StatusNotFound
 	// 413 Request Entity Too Large
 	case common.HasErrorCode(err, common.ErrCodeEndpointRequestTooLarge):
@@ -1089,6 +1088,7 @@ func processErrorBody(logger *zerolog.Logger, startedAt *time.Time, nq *common.N
 			common.ErrCodeInvalidUrlPath,
 			common.ErrCodeInvalidRequest,
 			common.ErrCodeAuthUnauthorized,
+			common.ErrCodeAuthRateLimitRuleExceeded,
 			common.ErrCodeJsonRpcRequestUnmarshal,
 			common.ErrCodeProjectNotFound,
 		) {
@@ -1203,7 +1203,7 @@ func handleErrorResponse(
 	case common.HasErrorCode(err, common.ErrCodeAuthUnauthorized, common.ErrCodeEndpointUnauthorized):
 		statusCode = http.StatusUnauthorized
 	// 404 Not Found - resource not found at HTTP level
-	case common.HasErrorCode(err, common.ErrCodeProjectNotFound, common.ErrCodeNetworkNotFound):
+	case common.HasErrorCode(err, common.ErrCodeProjectNotFound, common.ErrCodeNetworkNotFound, common.ErrCodeNetworkNotSupported):
 		statusCode = http.StatusNotFound
 	// 413 Request Entity Too Large
 	case common.HasErrorCode(err, common.ErrCodeEndpointRequestTooLarge):
@@ -1402,25 +1402,6 @@ func (s *HttpServer) Shutdown(logger *zerolog.Logger) error {
 	}
 
 	return lastErr
-}
-
-type gzipResponseWriter struct {
-	http.ResponseWriter
-	gzipWriter *gzip.Writer
-}
-
-func (w *gzipResponseWriter) Flush() {
-	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
-		err := w.gzipWriter.Flush()
-		if err != nil {
-			log.Error().Err(err).Msg("failed to flush gzip writer")
-		}
-		flusher.Flush()
-	}
-}
-
-func (w *gzipResponseWriter) Write(b []byte) (int, error) {
-	return w.gzipWriter.Write(b)
 }
 
 // conditionalGzipWriter wraps ResponseWriter and decides whether to compress

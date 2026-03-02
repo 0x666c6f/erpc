@@ -50,12 +50,12 @@ func mustHexToBytes(hex string) []byte {
 
 // Helper to setup test network for integrity tests
 func setupIntegrityTestNetwork(t *testing.T, ctx context.Context, upstreams []*common.UpstreamConfig, ntwCfg *common.NetworkConfig) (*Network, *upstream.UpstreamsRegistry) {
-	rlr, _ := upstream.NewRateLimitersRegistry(&common.RateLimiterConfig{}, &log.Logger)
+	rlr, _ := upstream.NewRateLimitersRegistry(context.Background(), &common.RateLimiterConfig{}, &log.Logger)
 	mt := health.NewTracker(&log.Logger, "prjA", 2*time.Second)
 	vr := thirdparty.NewVendorsRegistry()
 	pr, _ := thirdparty.NewProvidersRegistry(&log.Logger, vr, nil, nil)
 	ssr, _ := data.NewSharedStateRegistry(ctx, &log.Logger, &common.SharedStateConfig{Connector: &common.ConnectorConfig{Driver: common.DriverMemory, Memory: &common.MemoryConnectorConfig{MaxItems: 100_000, MaxTotalSize: "1GB"}}})
-	upr := upstream.NewUpstreamsRegistry(ctx, &log.Logger, "prjA", upstreams, ssr, rlr, vr, pr, nil, mt, 1*time.Second, nil)
+	upr := upstream.NewUpstreamsRegistry(ctx, &log.Logger, "prjA", upstreams, ssr, rlr, vr, pr, nil, mt, 1*time.Second, nil, nil)
 	upr.Bootstrap(ctx)
 	time.Sleep(100 * time.Millisecond)
 

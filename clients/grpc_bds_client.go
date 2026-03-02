@@ -76,12 +76,14 @@ func NewGrpcBdsClient(
 	}
 
 	// Extract host and port from URL
-	// For grpc:// or grpc+bds:// schemes, use the host:port directly
 	target := parsedUrl.Host
 	if parsedUrl.Port() == "" {
-		// Default gRPC port if not specified
 		target = fmt.Sprintf("%s:50051", parsedUrl.Hostname())
 	}
+
+	// Use dns:/// prefix so gRPC resolves all A records (e.g. Kubernetes headless services)
+	// and round_robin distributes RPCs across them. For single-target hosts this is a no-op.
+	target = fmt.Sprintf("dns:///%s", target)
 
 	// Determine whether to use TLS based on port or URL scheme
 	var transportCredentials credentials.TransportCredentials
@@ -112,6 +114,26 @@ func NewGrpcBdsClient(
 		logger.Debug().Str("target", target).Msg("using insecure credentials for gRPC connection")
 	}
 
+	// gRPC service config: round_robin distributes RPCs across all resolved addresses
+	// (no-op for single-target hosts). Transparent retries handle transient failures
+	// (UNAVAILABLE from connection resets, TCP retransmits) without surfacing errors
+	// to callers. WaitForReady queues RPCs during brief reconnects instead of failing
+	// immediately with UNAVAILABLE.
+	serviceConfig := `{
+		"loadBalancingConfig": [{"round_robin":{}}],
+		"methodConfig": [{
+			"name": [{"service": ""}],
+			"waitForReady": true,
+			"retryPolicy": {
+				"maxAttempts": 3,
+				"initialBackoff": "0.05s",
+				"maxBackoff": "0.3s",
+				"backoffMultiplier": 2,
+				"retryableStatusCodes": ["UNAVAILABLE", "RESOURCE_EXHAUSTED"]
+			}
+		}]
+	}`
+
 	// Create gRPC connection with aggressive timeouts suitable for cache services
 	// These should fail fast to allow failover to other upstreams
 	conn, err := grpc.NewClient(target,
@@ -120,16 +142,17 @@ func NewGrpcBdsClient(
 			grpc.MaxCallRecvMsgSize(100*1024*1024),
 			grpc.MaxCallSendMsgSize(100*1024*1024),
 		),
+		grpc.WithDefaultServiceConfig(serviceConfig),
 		grpc.WithKeepaliveParams(keepalive.ClientParameters{
-			Time:                2 * time.Minute,
-			Timeout:             5 * time.Second, // Fail faster on dead connections
-			PermitWithoutStream: false,
+			Time:                30 * time.Second, // Detect dead connections faster (was 2min)
+			Timeout:             5 * time.Second,  // Fail fast on dead connections
+			PermitWithoutStream: true,             // Keep connection warm even during idle periods
 		}),
 		grpc.WithConnectParams(grpc.ConnectParams{
-			MinConnectTimeout: 200 * time.Millisecond, // Fail very fast for cache services
+			MinConnectTimeout: 500 * time.Millisecond, // Allow time for TLS handshake on cross-region
 			Backoff: backoff.Config{
-				BaseDelay:  100 * time.Millisecond, // Faster retries
-				Multiplier: 1.5,                    // Slightly less aggressive multiplier
+				BaseDelay:  50 * time.Millisecond, // Fast initial retry
+				Multiplier: 1.5,
 				Jitter:     0.2,
 				MaxDelay:   500 * time.Millisecond, // Don't backoff too long
 			},
@@ -269,16 +292,28 @@ func (c *GenericGrpcBdsClient) handleGetBlockByNumber(ctx context.Context, req *
 			IncludeTransactions: includeTransactions,
 		}
 
+		hashHex := hex.EncodeToString(blockHash)
 		c.logger.Debug().
-			Str("blockHash", hex.EncodeToString(blockHash)).
+			Str("blockHash", hashHex).
 			Interface("originalParam", params[0]).
 			Bool("includeTransactions", includeTransactions).
 			Msg("calling gRPC GetBlockByHash (from eth_getBlockByNumber with blockHash)")
 
+		ctx, grpcHashSpan := common.StartDetailSpan(ctx, "GrpcBdsClient.GetBlockByHash",
+			trace.WithAttributes(
+				attribute.String("block_hash", hashHex),
+				attribute.String("original_param", fmt.Sprintf("%v", params[0])),
+			),
+		)
 		grpcResp, err := c.rpcClient.GetBlockByHash(ctx, grpcReq)
 		if err != nil {
+			grpcHashSpan.SetAttributes(attribute.String("grpc_error", err.Error()))
+			common.SetTraceSpanError(grpcHashSpan, err)
+			grpcHashSpan.End()
 			return nil, fmt.Errorf("gRPC call failed: %w", err)
 		}
+		grpcHashSpan.SetAttributes(attribute.Bool("response_has_block", grpcResp.Block != nil))
+		grpcHashSpan.End()
 
 		var result interface{}
 		if grpcResp.Block != nil {
@@ -318,19 +353,33 @@ func (c *GenericGrpcBdsClient) handleGetBlockByNumber(ctx context.Context, req *
 		Bool("includeTransactions", includeTransactions).
 		Msg("calling gRPC GetBlockByNumber")
 
+	isTag := blockNumber == "latest" || blockNumber == "earliest" || blockNumber == "finalized" || blockNumber == "safe" || blockNumber == "pending"
 	ctx, grpcSpan := common.StartDetailSpan(ctx, "GrpcBdsClient.GetBlockByNumber",
 		trace.WithAttributes(
 			attribute.String("block_number", blockNumber),
+			attribute.Bool("is_block_tag", isTag),
+			attribute.String("original_param", fmt.Sprintf("%v", params[0])),
 		),
 	)
 	grpcResp, err := c.rpcClient.GetBlockByNumber(ctx, grpcReq)
-	grpcSpan.End()
 	if err != nil {
+		grpcSpan.SetAttributes(attribute.String("grpc_error", err.Error()))
+		common.SetTraceSpanError(grpcSpan, err)
+		grpcSpan.End()
 		return nil, fmt.Errorf("gRPC call failed: %w", err)
 	}
+	hasBlock := grpcResp.Block != nil
+	grpcSpan.SetAttributes(attribute.Bool("response_has_block", hasBlock))
+	if hasBlock {
+		grpcSpan.SetAttributes(
+			attribute.Int64("response_block_number", int64(grpcResp.Block.Number)),
+			attribute.String("response_block_hash", fmt.Sprintf("%x", grpcResp.Block.Hash)),
+		)
+	}
+	grpcSpan.End()
 
 	var result interface{}
-	if grpcResp.Block != nil {
+	if hasBlock {
 		result = evm.BlockToJsonRpc(grpcResp.Block, grpcResp.Transactions, grpcResp.FullTransactions, grpcResp.Withdrawals)
 	}
 
@@ -541,8 +590,8 @@ func (c *GenericGrpcBdsClient) handleGetLogs(ctx context.Context, req *common.No
 
 	ctx, grpcSpan := common.StartDetailSpan(ctx, "GrpcBdsClient.GetLogs",
 		trace.WithAttributes(
-			attribute.Int64("from_block", int64(*fromBlock)), // #nosec G115
-			attribute.Int64("to_block", int64(*toBlock)),     // #nosec G115
+			attribute.Int64("from_block", int64(*fromBlock)),
+			attribute.Int64("to_block", int64(*toBlock)),
 		),
 	)
 	grpcResp, err := c.rpcClient.GetLogs(ctx, grpcReq)
@@ -816,15 +865,18 @@ func (c *GenericGrpcBdsClient) normalizeGrpcError(err error) error {
 		return nil
 	}
 
-	// First check if this is a gRPC status error
-	st, ok := status.FromError(err)
-	if !ok {
-		// Not a gRPC error, return as transport failure
-		return common.NewErrEndpointTransportFailure(c.Url, err)
+	// status.FromError only checks the top-level error for GRPCStatus().
+	// Handler methods wrap gRPC errors with fmt.Errorf, so we walk the
+	// Unwrap chain to find the original gRPC status.
+	current := err
+	for current != nil {
+		if st, ok := status.FromError(current); ok {
+			return common.ExtractGrpcErrorFromGrpcStatus(st, c.upstream)
+		}
+		current = errors.Unwrap(current)
 	}
 
-	// Pass to the EVM error normalizer
-	return common.ExtractGrpcErrorFromGrpcStatus(st, c.upstream)
+	return common.NewErrEndpointTransportFailure(c.Url, err)
 }
 
 func (c *GenericGrpcBdsClient) shutdown() {
