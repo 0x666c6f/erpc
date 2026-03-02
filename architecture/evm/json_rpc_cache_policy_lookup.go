@@ -6,6 +6,9 @@ import (
 	"github.com/erpc/erpc/data"
 )
 
+// Immutable GET-policy lookup index.
+// Policies are grouped by exact/wildcard network+method buckets, then merged
+// back in original declaration order to preserve selection semantics.
 type cachePolicySnapshot struct {
 	policies  []*data.CachePolicy
 	getLookup *cacheGetPolicyLookup

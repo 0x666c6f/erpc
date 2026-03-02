@@ -27,7 +27,7 @@ type EvmJsonRpcCache struct {
 	// policies is kept for backward compatibility with tests that initialize the cache struct directly.
 	policies []*data.CachePolicy
 	// policySnapshot is immutable and swapped atomically on SetPolicies.
-	policySnapshot atomic.Value // *cachePolicySnapshot
+	policySnapshot atomic.Pointer[cachePolicySnapshot]
 	logger         *zerolog.Logger
 
 	// Envelope controls whether values are wrapped with a metadata header on write.
@@ -175,20 +175,24 @@ func (c *EvmJsonRpcCache) SetPolicies(policies []*data.CachePolicy) {
 
 func (c *EvmJsonRpcCache) setPolicySnapshot(policies []*data.CachePolicy) {
 	snapshot := newCachePolicySnapshot(policies)
-	c.policies = snapshot.policies
 	c.policySnapshot.Store(snapshot)
 }
 
 func (c *EvmJsonRpcCache) currentPolicySnapshot() *cachePolicySnapshot {
-	snapshotAny := c.policySnapshot.Load()
-	if snapshotAny != nil {
-		return snapshotAny.(*cachePolicySnapshot)
+	snapshot := c.policySnapshot.Load()
+	if snapshot != nil {
+		return snapshot
 	}
 
 	// Legacy fallback for tests that build EvmJsonRpcCache with struct literals.
-	snapshot := newCachePolicySnapshot(c.policies)
-	c.policies = snapshot.policies
-	c.policySnapshot.Store(snapshot)
+	snapshot = newCachePolicySnapshot(c.policies)
+	if c.policySnapshot.CompareAndSwap(nil, snapshot) {
+		return snapshot
+	}
+	snapshot = c.policySnapshot.Load()
+	if snapshot == nil {
+		return newCachePolicySnapshot(c.policies)
+	}
 	return snapshot
 }
 

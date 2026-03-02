@@ -41,7 +41,7 @@ if value then
 	return {1, resolvedPartitionKey, value}
 end
 
-redis.call("DEL", KEYS[1])
+redis.pcall("DEL", KEYS[1])
 return {2, resolvedPartitionKey}
 `)
 
@@ -427,11 +427,7 @@ func (r *RedisConnector) Set(ctx context.Context, partitionKey, rangeKey string,
 	}
 
 	key := fmt.Sprintf("%s:%s", partitionKey, rangeKey)
-	if len(value) < 1024 {
-		r.logger.Debug().Str("partitionKey", partitionKey).Str("rangeKey", rangeKey).Int("len", len(value)).Msg("writing value to Redis")
-	} else {
-		r.logger.Debug().Str("partitionKey", partitionKey).Str("rangeKey", rangeKey).Int("len", len(value)).Msg("writing value to Redis")
-	}
+	r.logger.Debug().Str("partitionKey", partitionKey).Str("rangeKey", rangeKey).Int("len", len(value)).Msg("writing value to Redis")
 
 	ctx, cancel := context.WithTimeout(ctx, r.setTimeout)
 	defer cancel()
@@ -502,11 +498,7 @@ func (r *RedisConnector) Get(ctx context.Context, index, partitionKey, rangeKey 
 				common.SetTraceSpanError(span, parseErr)
 			} else if reverseLookup.status == redisReverseLookupHit {
 				resolvedKey := fmt.Sprintf("%s:%s", reverseLookup.resolvedPartitionKey, rangeKey)
-				if len(reverseLookup.value) < 1024 {
-					r.logger.Debug().Str("key", resolvedKey).Int("len", len(reverseLookup.value)).Msg("received item from Redis")
-				} else {
-					r.logger.Debug().Str("key", resolvedKey).Int("len", len(reverseLookup.value)).Msg("received item from Redis")
-				}
+				r.logger.Debug().Str("key", resolvedKey).Int("len", len(reverseLookup.value)).Msg("received item from Redis")
 
 				if common.IsTracingDetailed {
 					span.SetAttributes(
@@ -515,6 +507,8 @@ func (r *RedisConnector) Get(ctx context.Context, index, partitionKey, rangeKey 
 				}
 
 				return reverseLookup.value, nil
+			} else if reverseLookup.status == redisReverseLookupMiss {
+				r.logger.Trace().Str("key", revKey).Msg("reverse index miss in Redis")
 			} else if reverseLookup.status == redisReverseLookupStale {
 				// Keep backward-compatible behavior: stale reverse index resolves to a cache miss.
 				err := common.NewErrRecordNotFound(reverseLookup.resolvedPartitionKey, rangeKey, RedisDriverName)
@@ -542,11 +536,7 @@ func (r *RedisConnector) Get(ctx context.Context, index, partitionKey, rangeKey 
 		common.SetTraceSpanError(span, err)
 		return nil, err
 	}
-	if len(value) < 1024 {
-		r.logger.Debug().Str("key", key).Int("len", len(value)).Msg("received item from Redis")
-	} else {
-		r.logger.Debug().Str("key", key).Int("len", len(value)).Msg("received item from Redis")
-	}
+	r.logger.Debug().Str("key", key).Int("len", len(value)).Msg("received item from Redis")
 
 	if common.IsTracingDetailed {
 		span.SetAttributes(

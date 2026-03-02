@@ -442,11 +442,14 @@ func (s *HttpServer) createRequestHandler() http.Handler {
 			}
 
 			processRequest := func(index int, rawReq json.RawMessage, headers http.Header, queryArgs map[string][]string) {
+				reqArchitecture := architecture
+				reqChainId := chainId
+
 				defer func() {
 					if rec := recover(); rec != nil {
 						telemetry.MetricUnexpectedPanicTotal.WithLabelValues(
 							"request-handler",
-							fmt.Sprintf("project:%s network:%s", architecture, chainId),
+							fmt.Sprintf("project:%s network:%s", reqArchitecture, reqChainId),
 							common.ErrorFingerprint(rec),
 						).Inc()
 						lg.Error().
@@ -478,8 +481,6 @@ func (s *HttpServer) createRequestHandler() http.Handler {
 				}()
 
 				nq := common.NewNormalizedRequest(rawReq)
-				// Help GC: drop reference to the rawReq slice copy in the parent slice as soon as possible
-				rawReq = nil
 				requestCtx := common.StartRequestSpan(requestSpanBaseCtx, nq)
 
 				// Resolve and set real client IP before any rate limiting/auth checks
@@ -543,24 +544,25 @@ func (s *HttpServer) createRequestHandler() http.Handler {
 						common.EndRequestSpan(requestCtx, resp, nil)
 						return
 					} else {
+						adminErr := common.NewErrAuthUnauthorized(
+							"",
+							"admin is not enabled for this project",
+						)
 						responses[index] = processErrorBody(
 							&rlg,
 							&startedAt,
 							nq,
-							common.NewErrAuthUnauthorized(
-								"",
-								"admin is not enabled for this project",
-							),
+							adminErr,
 							s.serverCfg.IncludeErrorDetails,
 						)
-						common.EndRequestSpan(requestCtx, nil, err)
+						common.EndRequestSpan(requestCtx, nil, adminErr)
 						return
 					}
 				}
 
 				var networkId string
 
-				if architecture == "" || chainId == "" {
+				if reqArchitecture == "" || reqChainId == "" {
 					networkIdFromBody, extractErr := extractNetworkIdFromRequestBody(nq.Body())
 					if extractErr != nil {
 						responses[index] = processErrorBody(&rlg, &startedAt, nq, common.NewErrInvalidRequest(extractErr), &common.TRUE)
@@ -571,20 +573,22 @@ func (s *HttpServer) createRequestHandler() http.Handler {
 						networkId = networkIdFromBody
 						parts := strings.Split(networkId, ":")
 						if len(parts) == 2 {
-							architecture = parts[0]
-							chainId = parts[1]
+							reqArchitecture = parts[0]
+							reqChainId = parts[1]
 						}
 					}
-				} else {
-					networkId = fmt.Sprintf("%s:%s", architecture, chainId)
 				}
 
-				if architecture == "" || chainId == "" {
-					responses[index] = processErrorBody(&rlg, &startedAt, nq, common.NewErrInvalidRequest(fmt.Errorf(
-						"architecture and chain must be provided in URL (for example /<project>/evm/42161) or in request body (for example \"networkId\":\"evm:42161\") or configureed via domain aliasing",
-					)), s.serverCfg.IncludeErrorDetails)
-					common.EndRequestSpan(requestCtx, nil, err)
+				if reqArchitecture == "" || reqChainId == "" {
+					missingNetworkErr := common.NewErrInvalidRequest(fmt.Errorf(
+						"architecture and chain must be provided in URL (for example /<project>/evm/42161) or in request body (for example \"networkId\":\"evm:42161\") or configured via domain aliasing",
+					))
+					responses[index] = processErrorBody(&rlg, &startedAt, nq, missingNetworkErr, s.serverCfg.IncludeErrorDetails)
+					common.EndRequestSpan(requestCtx, nil, missingNetworkErr)
 					return
+				}
+				if networkId == "" {
+					networkId = fmt.Sprintf("%s:%s", reqArchitecture, reqChainId)
 				}
 
 				nw, err := project.GetNetwork(httpCtx, networkId)
@@ -1668,7 +1672,7 @@ func extractNetworkIdFromRequestBody(rawReq json.RawMessage) (string, error) {
 
 	networkId, err := node.String()
 	if err != nil {
-		return "", nil
+		return "", fmt.Errorf("networkId field present but could not be extracted: %w", err)
 	}
 
 	return networkId, nil

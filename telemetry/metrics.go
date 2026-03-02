@@ -342,19 +342,19 @@ var (
 		Namespace: "erpc",
 		Name:      "cors_requests_total",
 		Help:      "Total number of CORS requests received.",
-	}, []string{"project", "origin"})
+	}, []string{"path", "origin"})
 
 	MetricCORSPreflightRequestsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "erpc",
 		Name:      "cors_preflight_requests_total",
 		Help:      "Total number of CORS preflight requests received.",
-	}, []string{"project", "origin"})
+	}, []string{"path", "origin"})
 
 	MetricCORSDisallowedOriginTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "erpc",
 		Name:      "cors_disallowed_origin_total",
 		Help:      "Total number of CORS requests from disallowed origins.",
-	}, []string{"project", "origin"})
+	}, []string{"path", "origin"})
 
 	MetricRistrettoCacheCurrentCost = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: "erpc",

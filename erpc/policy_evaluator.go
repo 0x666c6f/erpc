@@ -2,6 +2,7 @@ package erpc
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"runtime/debug"
 	"sync"
@@ -119,15 +120,27 @@ func (p *PolicyEvaluator) evaluateUpstreams() error {
 		}
 
 		// Evaluate each method separately
+		evalErrs := make([]error, 0)
+		methodCount := 0
 		for method := range allMetrics {
+			methodCount++
 			if err := p.evaluateMethod(method, upsList); err != nil {
 				p.logger.Error().Err(err).Str("method", method).Msg("failed to evaluate user-defined selectionPolicy for method")
+				evalErrs = append(evalErrs, fmt.Errorf("%s: %w", method, err))
 			}
+		}
+		if len(evalErrs) > 0 {
+			joined := errors.Join(evalErrs...)
+			if len(evalErrs) == methodCount {
+				return fmt.Errorf("failed to evaluate user-defined selectionPolicy for all methods (%d): %w", methodCount, joined)
+			}
+			return fmt.Errorf("failed to evaluate user-defined selectionPolicy for %d/%d methods: %w", len(evalErrs), methodCount, joined)
 		}
 	} else {
 		// Handle network-level evaluation
 		if err := p.evaluateMethod("*", upsList); err != nil {
 			p.logger.Error().Err(err).Msg("failed to evaluate user-defined selectionPolicy for network")
+			return fmt.Errorf("failed to evaluate user-defined selectionPolicy for network: %w", err)
 		}
 	}
 

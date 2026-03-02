@@ -118,7 +118,24 @@ type counterInt64 struct {
 	bgPushRequested atomic.Bool
 }
 
-const pollKeySuffix = "/poll"
+const (
+	pollKeySuffix = "/poll"
+
+	pollLockOutcomeContention       = "contention"
+	pollLockOutcomeAmbiguousTimeout = "ambiguous_timeout"
+	pollLockOutcomeUnavailable      = "unavailable"
+	pollLockOutcomeSkippedFresh     = "skipped_fresh"
+	pollLockOutcomeAcquired         = "acquired"
+
+	pollLockFallbackOutcomeLocalRefresh              = "local_refresh"
+	pollLockFallbackOutcomeContentionContextCanceled = "contention_context_cancelled"
+	pollLockFallbackOutcomeContentionTimeout         = "contention_timeout"
+	pollLockFallbackOutcomeContentionFresh           = "contention_fresh"
+
+	pollLockHoldOutcomeReleased    = "released"
+	pollLockHoldOutcomeExpired     = "expired"
+	pollLockHoldOutcomeUnlockError = "unlock_error"
+)
 
 func (c *counterInt64) GetValue() int64 {
 	return c.value.Load()
@@ -449,7 +466,7 @@ func (c *counterInt64) TryUpdateIfStale(ctx context.Context, staleness time.Dura
 		}
 		telemetry.ObserverHandle(
 			telemetry.MetricSharedStatePollLockFallbackDuration,
-			"local_refresh",
+			pollLockFallbackOutcomeLocalRefresh,
 		).Observe(time.Since(localFallbackStartedAt).Seconds())
 	}
 
@@ -464,8 +481,8 @@ func (c *counterInt64) TryUpdateIfStale(ctx context.Context, staleness time.Dura
 			// immediate retry by the next caller.
 			c.updateMu.Unlock()
 			muLocked = false
-			span.SetAttributes(attribute.String("poll_lock", "contention"))
-			telemetry.MetricSharedStatePollLockTotal.WithLabelValues("contention").Inc()
+			span.SetAttributes(attribute.String("poll_lock", pollLockOutcomeContention))
+			telemetry.MetricSharedStatePollLockTotal.WithLabelValues(pollLockOutcomeContention).Inc()
 			contentionWaitStartedAt := time.Now()
 
 			waitTimer := time.NewTimer(c.registry.updateMaxWait)
@@ -479,7 +496,7 @@ func (c *counterInt64) TryUpdateIfStale(ctx context.Context, staleness time.Dura
 					span.SetAttributes(attribute.String("contention_exit", "context_cancelled"))
 					telemetry.ObserverHandle(
 						telemetry.MetricSharedStatePollLockFallbackDuration,
-						"contention_context_cancelled",
+						pollLockFallbackOutcomeContentionContextCanceled,
 					).Observe(time.Since(contentionWaitStartedAt).Seconds())
 					return c.value.Load(), ctx.Err()
 				case <-waitTimer.C:
@@ -488,10 +505,10 @@ func (c *counterInt64) TryUpdateIfStale(ctx context.Context, staleness time.Dura
 					// advance updatedAtUnixMs. This allows the next caller to retry immediately
 					// and avoids suppressing pubsub updates that arrive slightly late.
 					span.SetAttributes(attribute.Bool("contention_got_fresh", false))
-					telemetry.MetricSharedStatePollLockTotal.WithLabelValues("contention_timeout").Inc()
+					telemetry.MetricSharedStatePollLockTotal.WithLabelValues(pollLockFallbackOutcomeContentionTimeout).Inc()
 					telemetry.ObserverHandle(
 						telemetry.MetricSharedStatePollLockFallbackDuration,
-						"contention_timeout",
+						pollLockFallbackOutcomeContentionTimeout,
 					).Observe(time.Since(contentionWaitStartedAt).Seconds())
 					c.registry.logger.Warn().
 						Str("key", c.key).
@@ -503,7 +520,7 @@ func (c *counterInt64) TryUpdateIfStale(ctx context.Context, staleness time.Dura
 						span.SetAttributes(attribute.Bool("contention_got_fresh", true))
 						telemetry.ObserverHandle(
 							telemetry.MetricSharedStatePollLockFallbackDuration,
-							"contention_fresh",
+							pollLockFallbackOutcomeContentionFresh,
 						).Observe(time.Since(contentionWaitStartedAt).Seconds())
 						return c.value.Load(), nil
 					}
@@ -511,15 +528,15 @@ func (c *counterInt64) TryUpdateIfStale(ctx context.Context, staleness time.Dura
 			}
 		}
 		// Infrastructure error — fall through to local refresh (graceful degradation).
-		span.SetAttributes(attribute.String("poll_lock", "unavailable"))
-		telemetry.MetricSharedStatePollLockTotal.WithLabelValues("unavailable").Inc()
+		span.SetAttributes(attribute.String("poll_lock", pollLockOutcomeUnavailable))
+		telemetry.MetricSharedStatePollLockTotal.WithLabelValues(pollLockOutcomeUnavailable).Inc()
 		localFallbackStartedAt = time.Now()
 	} else {
 		// Re-check staleness after acquiring distributed lock (third check: pre-mutex, post-mutex,
 		// post-lock) — pubsub update may have arrived while waiting for the lock.
 		if !c.IsStale(staleness) {
-			span.SetAttributes(attribute.String("poll_lock", "skipped_fresh"))
-			telemetry.MetricSharedStatePollLockTotal.WithLabelValues("skipped_fresh").Inc()
+			span.SetAttributes(attribute.String("poll_lock", pollLockOutcomeSkippedFresh))
+			telemetry.MetricSharedStatePollLockTotal.WithLabelValues(pollLockOutcomeSkippedFresh).Inc()
 			// Avoid synchronous remote unlock while holding updateMu.
 			c.updateMu.Unlock()
 			muLocked = false
@@ -536,8 +553,8 @@ func (c *counterInt64) TryUpdateIfStale(ctx context.Context, staleness time.Dura
 			}()
 			return c.value.Load(), nil
 		}
-		span.SetAttributes(attribute.String("poll_lock", "acquired"))
-		telemetry.MetricSharedStatePollLockTotal.WithLabelValues("acquired").Inc()
+		span.SetAttributes(attribute.String("poll_lock", pollLockOutcomeAcquired))
+		telemetry.MetricSharedStatePollLockTotal.WithLabelValues(pollLockOutcomeAcquired).Inc()
 	}
 
 	// Execute the refresh function (e.g., RPC call to get latest block) in background.
@@ -706,7 +723,7 @@ func (c *counterInt64) tryAcquirePollLock(ctx context.Context) (func(), bool) {
 		// (e.g., Redis ErrTaken, DynamoDB ConditionalCheckFailed, Memory TryLock timeout).
 		// Note: gRPC connector does not support locking.
 		if errors.Is(err, ErrLockContention) {
-			observeWait("contention")
+			observeWait(pollLockOutcomeContention)
 			c.registry.logger.Debug().Err(err).Str("key", pollKey).Msg("poll lock held by another instance, waiting for pubsub")
 			return nil, true
 		}
@@ -717,26 +734,26 @@ func (c *counterInt64) tryAcquirePollLock(ctx context.Context) (func(), bool) {
 		// Fall through to local refresh for graceful degradation — this ensures forward
 		// progress when the shared state backend is genuinely unavailable.
 		if errors.Is(err, context.DeadlineExceeded) {
-			observeWait("ambiguous_timeout")
+			observeWait(pollLockOutcomeAmbiguousTimeout)
 			c.registry.logger.Warn().Err(err).Str("key", pollKey).Msg("poll lock timed out (ambiguous), falling through to local refresh")
-			telemetry.MetricSharedStatePollLockTotal.WithLabelValues("ambiguous_timeout").Inc()
+			telemetry.MetricSharedStatePollLockTotal.WithLabelValues(pollLockOutcomeAmbiguousTimeout).Inc()
 		} else {
-			observeWait("unavailable")
+			observeWait(pollLockOutcomeUnavailable)
 			c.registry.logger.Warn().Err(err).Str("key", pollKey).Msg("poll lock unavailable (infrastructure error), falling through to local refresh")
 		}
 		return nil, false
 	}
 	if lock == nil || lock.IsNil() {
-		observeWait("unavailable")
+		observeWait(pollLockOutcomeUnavailable)
 		c.registry.logger.Warn().Str("key", pollKey).Msg("connector returned nil lock without error, falling through to local refresh")
 		return nil, false
 	}
 
-	observeWait("acquired")
+	observeWait(pollLockOutcomeAcquired)
 	c.registry.logger.Debug().Str("key", pollKey).Msg("acquired poll lock for refresh coordination")
 	holdStartedAt := time.Now()
 	return func() {
-		holdOutcome := "released"
+		holdOutcome := pollLockHoldOutcomeReleased
 		defer func() {
 			telemetry.ObserverHandle(
 				telemetry.MetricSharedStatePollLockHoldDuration,
@@ -748,10 +765,10 @@ func (c *counterInt64) tryAcquirePollLock(ctx context.Context) (func(), bool) {
 		defer cancel()
 		if err := lock.Unlock(unlockCtx); err != nil {
 			if errors.Is(err, ErrLockExpired) {
-				holdOutcome = "expired"
+				holdOutcome = pollLockHoldOutcomeExpired
 				c.registry.logger.Debug().Err(err).Str("key", pollKey).Msg("poll lock expired during refresh (expected for slow RPCs)")
 			} else {
-				holdOutcome = "unlock_error"
+				holdOutcome = pollLockHoldOutcomeUnlockError
 				c.registry.logger.Warn().Err(err).Str("key", pollKey).Msg("failed to unlock poll lock, will be held until TTL expiry")
 			}
 		}

@@ -480,6 +480,14 @@ func (c *GenericHttpJsonRpcClient) processBatchResponse(requests map[interface{}
 	searcher.CopyReturn = false
 	searcher.ConcurrentRead = false
 	searcher.ValidateJSON = false
+	bodyText := ""
+	bodyTextCopy := func() string {
+		if bodyText == "" {
+			// Copy out of pooled memory for any value that can outlive cleanup().
+			bodyText = string(bodyBytes)
+		}
+		return bodyText
+	}
 
 	if c.isLogLevelTrace {
 		if len(bodyBytes) > 20*1024 {
@@ -532,7 +540,7 @@ func (c *GenericHttpJsonRpcClient) processBatchResponse(requests map[interface{}
 				id = jrResp.ID()
 			}
 			if id == nil {
-				c.logger.Warn().Msgf("unexpected response received without ID: %s", bodyView)
+				c.logger.Warn().Msgf("unexpected response received without ID: %s", bodyTextCopy())
 			} else if req, ok := requests[id]; ok {
 				nr := common.NewNormalizedResponse().WithRequest(req.request).WithJsonRpcResponse(jrResp)
 				if err != nil {
@@ -566,7 +574,7 @@ func (c *GenericHttpJsonRpcClient) processBatchResponse(requests map[interface{}
 			anyMissingId = true
 		}
 		if anyMissingId {
-			c.logger.Error().Str("response", bodyView).Msgf("some requests did not receive a response (matching ID)")
+			c.logger.Error().Str("response", bodyTextCopy()).Msgf("some requests did not receive a response (matching ID)")
 		}
 	} else if rootNode.TypeSafe() == ast.V_OBJECT {
 		// Single object response
@@ -596,7 +604,7 @@ func (c *GenericHttpJsonRpcClient) processBatchResponse(requests map[interface{}
 	} else {
 		// Unexpected response type
 		for _, req := range requests {
-			req.err <- common.NewErrUpstreamMalformedResponse(fmt.Errorf("unexpected response type (not array nor object): %s", bodyView), c.upstream)
+			req.err <- common.NewErrUpstreamMalformedResponse(fmt.Errorf("unexpected response type (not array nor object): %s", bodyTextCopy()), c.upstream)
 		}
 	}
 }

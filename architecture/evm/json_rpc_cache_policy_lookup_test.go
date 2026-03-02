@@ -2,6 +2,7 @@ package evm
 
 import (
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -114,6 +115,48 @@ func TestFindGetPolicies_UnknownFinalityMatchesAllPolicyFinalities(t *testing.T)
 		policyRealtime,
 		policyUnknown,
 	}, policies)
+}
+
+func TestCurrentPolicySnapshot_LegacyFallbackConcurrent(t *testing.T) {
+	connector := data.NewMockConnector("connector-a")
+	policy := mustNewTestCachePolicy(t, connector, &common.CachePolicyConfig{
+		Connector: connector.Id(),
+		Network:   "evm:1",
+		Method:    "eth_chainId",
+		Finality:  common.DataFinalityStateFinalized,
+		TTL:       common.Duration(time.Minute),
+	})
+
+	logger := zerolog.Nop()
+	cache := &EvmJsonRpcCache{
+		logger:   &logger,
+		policies: []*data.CachePolicy{policy},
+	}
+
+	const workers = 32
+	snapshots := make(chan *cachePolicySnapshot, workers)
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			snapshots <- cache.currentPolicySnapshot()
+		}()
+	}
+	wg.Wait()
+	close(snapshots)
+
+	var first *cachePolicySnapshot
+	for snap := range snapshots {
+		require.NotNil(t, snap)
+		if first == nil {
+			first = snap
+			continue
+		}
+		require.Same(t, first, snap)
+	}
+	require.NotNil(t, first)
+	require.Len(t, first.policies, 1)
 }
 
 func TestFindGetPolicies_MultiMatchConnectorDedupUsesFirstMatchingPolicy(t *testing.T) {
