@@ -9,6 +9,8 @@ import (
 	"github.com/rs/zerolog"
 )
 
+const cachedHashGenericError = "error:generic"
+
 // responseGroup holds all responses that share the same hash.
 type responseGroup struct {
 	Hash    string
@@ -345,7 +347,7 @@ func errorToConsensusHash(err error) string {
 			return string(base.Code)
 		}
 	}
-	return "error:generic"
+	return cachedHashGenericError
 }
 
 // resultToJsonRpcResponse safely converts a result to a JsonRpcResponse.
@@ -373,7 +375,7 @@ func classifyAndHashResponse(r *execResult, exec failsafe.Execution[*common.Norm
 		}
 		r.CachedHash, _ = resultOrErrorToHash(r, exec, config)
 		if r.CachedHash == "" {
-			r.CachedHash = "error:generic"
+			r.CachedHash = cachedHashGenericError
 		}
 		r.CachedResponseSize = 0
 		return
@@ -383,7 +385,7 @@ func classifyAndHashResponse(r *execResult, exec failsafe.Execution[*common.Norm
 	jr := resultToJsonRpcResponse(r.Result, exec)
 	if jr == nil {
 		r.CachedResponseType = ResponseTypeInfrastructureError
-		r.CachedHash = "error:generic"
+		r.CachedHash = cachedHashGenericError
 		return
 	}
 
@@ -401,7 +403,7 @@ func classifyAndHashResponse(r *execResult, exec failsafe.Execution[*common.Norm
 	r.CachedHash, _ = resultOrErrorToHash(r, exec, config)
 	if r.CachedHash == "" {
 		r.CachedResponseType = ResponseTypeInfrastructureError
-		r.CachedHash = "error:generic"
+		r.CachedHash = cachedHashGenericError
 	}
 }
 
@@ -418,7 +420,7 @@ func responseAnalysisCached(r *execResult) bool {
 		return r.Err != nil
 	case ResponseTypeInfrastructureError:
 		// Infra classification can come from an actual error or a malformed success result.
-		return r.Err != nil || r.Result == nil || r.CachedHash == "error:generic"
+		return r.Err != nil || r.Result == nil || r.CachedHash == cachedHashGenericError
 	default:
 		return false
 	}

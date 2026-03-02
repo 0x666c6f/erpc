@@ -41,6 +41,7 @@ if value then
 	return {1, resolvedPartitionKey, value}
 end
 
+-- Best-effort stale pointer cleanup; lookup still returns miss if DEL fails.
 redis.pcall("DEL", KEYS[1])
 return {2, resolvedPartitionKey}
 `)
