@@ -541,10 +541,10 @@ func runUpstreamTest(t *testing.T, scenario TestScenario) {
 	// Initial score order snapshot
 	logCurrentScoreOrder("initial")
 
-	// Schedule a mid-run snapshot after 2s
+	// Schedule a mid-run snapshot shortly after startup
 	go func() {
-		time.Sleep(2 * time.Second)
-		logCurrentScoreOrder("t+2s")
+		time.Sleep(500 * time.Millisecond)
+		logCurrentScoreOrder("t+0.5s")
 	}()
 
 	// Helper to build request body for a given index
@@ -579,7 +579,7 @@ func runUpstreamTest(t *testing.T, scenario TestScenario) {
 		for i := batchStart; i < batchEnd; i++ {
 			idx := i
 			batchWG.Add(1)
-			time.Sleep(10 * time.Millisecond)
+			time.Sleep(1 * time.Millisecond)
 			go func() {
 				defer batchWG.Done()
 				reqBody := preparedBodies[idx-batchStart]
@@ -641,7 +641,7 @@ func runUpstreamTest(t *testing.T, scenario TestScenario) {
 		}
 		runBatchRequests(batchStart, batchEnd)
 		// Small pause between batches to ease resource pressure
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(2 * time.Millisecond)
 		// Extra score logs to ensure visibility
 		batchIdx := (batchStart / batchSize) + 1
 		if batchIdx == 1 || batchIdx%5 == 0 {

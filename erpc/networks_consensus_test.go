@@ -90,7 +90,7 @@ func TestConsensusPolicy(t *testing.T) {
 				ups[0].EvmStatePoller().SuggestLatestBlock(500)
 				ups[1].EvmStatePoller().SuggestLatestBlock(100)
 				ups[2].EvmStatePoller().SuggestLatestBlock(100)
-				time.Sleep(50 * time.Millisecond)
+				time.Sleep(10 * time.Millisecond)
 			},
 		},
 		{
@@ -381,7 +381,7 @@ func TestConsensusPolicy(t *testing.T) {
 				ups[0].EvmStatePoller().SuggestLatestBlock(300)
 				ups[1].EvmStatePoller().SuggestLatestBlock(100)
 				ups[2].EvmStatePoller().SuggestLatestBlock(100)
-				time.Sleep(50 * time.Millisecond)
+				time.Sleep(10 * time.Millisecond)
 			},
 		},
 		{
@@ -405,7 +405,7 @@ func TestConsensusPolicy(t *testing.T) {
 				ups[0].EvmStatePoller().SuggestLatestBlock(300)
 				ups[1].EvmStatePoller().SuggestLatestBlock(100)
 				ups[2].EvmStatePoller().SuggestLatestBlock(100)
-				time.Sleep(50 * time.Millisecond)
+				time.Sleep(10 * time.Millisecond)
 			},
 		},
 		{
@@ -429,7 +429,7 @@ func TestConsensusPolicy(t *testing.T) {
 				ups[0].EvmStatePoller().SuggestLatestBlock(300)
 				ups[1].EvmStatePoller().SuggestLatestBlock(100)
 				ups[2].EvmStatePoller().SuggestLatestBlock(100)
-				time.Sleep(50 * time.Millisecond)
+				time.Sleep(10 * time.Millisecond)
 			},
 		},
 		{
@@ -451,7 +451,7 @@ func TestConsensusPolicy(t *testing.T) {
 				ups := reg.GetNetworkUpstreams(ctx, util.EvmNetworkId(123))
 				ups[0].EvmStatePoller().SuggestLatestBlock(300)
 				ups[1].EvmStatePoller().SuggestLatestBlock(100)
-				time.Sleep(50 * time.Millisecond)
+				time.Sleep(10 * time.Millisecond)
 			},
 		},
 		{
@@ -473,7 +473,7 @@ func TestConsensusPolicy(t *testing.T) {
 				ups := reg.GetNetworkUpstreams(ctx, util.EvmNetworkId(123))
 				ups[0].EvmStatePoller().SuggestLatestBlock(300)
 				ups[1].EvmStatePoller().SuggestLatestBlock(100)
-				time.Sleep(50 * time.Millisecond)
+				time.Sleep(10 * time.Millisecond)
 			},
 		},
 		{
@@ -2685,7 +2685,7 @@ func runConsensusTest(t *testing.T, tc consensusTestCase) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer func() {
 		cancel()
-		time.Sleep(50 * time.Millisecond) // allow goroutines to settle
+		time.Sleep(10 * time.Millisecond) // allow goroutines to settle
 	}()
 
 	// Setup mocks BEFORE any network components initialize
@@ -2728,7 +2728,7 @@ func runConsensusTest(t *testing.T, tc consensusTestCase) {
 	}
 
 	// Allow background bootstrap to settle to avoid flakiness in tests
-	time.Sleep(200 * time.Millisecond)
+	time.Sleep(40 * time.Millisecond)
 
 	// Make request
 	method := tc.requestMethod
@@ -2834,7 +2834,7 @@ func setupNetworkForConsensusTest(t *testing.T, ctx context.Context, tc consensu
 	require.NoError(t, err)
 
 	upsReg.Bootstrap(ctx)
-	time.Sleep(100 * time.Millisecond)
+	time.Sleep(25 * time.Millisecond)
 	err = upsReg.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123))
 	require.NoError(t, err)
 	upstream.ReorderUpstreams(upsReg)

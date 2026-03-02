@@ -7,6 +7,8 @@ help:
 	@echo " build                         Build the eRPC server"
 	@echo " fmt                           Format source code"
 	@echo " test                          Run unit tests"
+	@echo " test-parallel                 Run unit tests with higher parallelism (defaults: TEST_PARALLEL=8 TEST_P=8)"
+	@echo " test-parallel-max             Run unit tests with aggressive parallelism (defaults: TEST_PARALLEL=16 TEST_P=16)"
 	@echo " agent-context                 Print repo + impact context for autonomous loops"
 	@echo " agent-refresh                 Regenerate review/repo-map.md"
 	@echo " agent-check                   Verify autonomous harness artifacts"
@@ -100,23 +102,34 @@ build:
 	@CGO_ENABLED=0 go build -ldflags="-w -s" -o ./bin/erpc-server ./cmd/erpc/main.go
 	@CGO_ENABLED=0 go build -ldflags="-w -s" -tags pprof -o ./bin/erpc-server-pprof ./cmd/erpc/*.go
 
+TEST_PARALLEL ?= 1
+TEST_P ?= $(TEST_PARALLEL)
+
 .PHONY: test
 test:
 	@go clean -testcache
-	@go test ./cmd/... -count 1 -parallel 1
-	@go test $$(ls -d */ | grep -v "cmd/" | grep -v "test/" | awk '{print "./" $$1 "..."}') -covermode=atomic -v -race -count 1 -parallel 1 -timeout 15m -failfast=false
+	@go test ./cmd/... -count 1 -parallel $(TEST_PARALLEL) -p $(TEST_P)
+	@go test $$(go list ./... | rg -v '^github\.com/erpc/erpc/cmd($$|/)' | rg -v '^github\.com/erpc/erpc/test($$|/)') -covermode=atomic -v -race -count 1 -parallel $(TEST_PARALLEL) -p $(TEST_P) -timeout 15m -failfast=false
 
 .PHONY: test-fast
 test-fast:
 	@go clean -testcache
-	@go test ./cmd/... -count 1 -parallel 1 -v
-	@go test $$(ls -d */ | grep -v "cmd/" | grep -v "test/" | awk '{print "./" $$1 "..."}') -count 1 -parallel 1 -v -timeout 10m -failfast=false
+	@go test ./cmd/... -count 1 -parallel $(TEST_PARALLEL) -p $(TEST_P) -v
+	@go test $$(go list ./... | rg -v '^github\.com/erpc/erpc/cmd($$|/)' | rg -v '^github\.com/erpc/erpc/test($$|/)') -count 1 -parallel $(TEST_PARALLEL) -p $(TEST_P) -v -timeout 10m -failfast=false
+
+.PHONY: test-parallel
+test-parallel:
+	@$(MAKE) test TEST_PARALLEL=$${TEST_PARALLEL:-12} TEST_P=$${TEST_P:-12}
+
+.PHONY: test-parallel-max
+test-parallel-max:
+	@$(MAKE) test TEST_PARALLEL=$${TEST_PARALLEL:-16} TEST_P=$${TEST_P:-16}
 
 .PHONY: test-race
 test-race:
 	@go clean -testcache
 	@go test ./cmd/... -count 5 -parallel 5 -v -race
-	@go test $$(ls -d */ | grep -v "cmd/" | grep -v "test/" | awk '{print "./" $$1 "..."}') -count 15 -parallel 15 -v -timeout 30m -race
+	@go test $$(go list ./... | rg -v '^github\.com/erpc/erpc/cmd($$|/)' | rg -v '^github\.com/erpc/erpc/test($$|/)') -count 15 -parallel 15 -p 15 -v -timeout 30m -race
 
 .PHONY: bench
 bench:
@@ -125,7 +138,7 @@ bench:
 .PHONY: coverage
 coverage:
 	@go clean -testcache
-	@go test -coverprofile=coverage.txt -covermode=atomic $$(ls -d */ | grep -v "cmd/" | grep -v "test/" | awk '{print "./" $$1 "..."}')
+	@go test -coverprofile=coverage.txt -covermode=atomic $$(go list ./... | rg -v '^github\.com/erpc/erpc/cmd($$|/)' | rg -v '^github\.com/erpc/erpc/test($$|/)')
 	@go tool cover -html=coverage.txt
 
 .PHONY: up
