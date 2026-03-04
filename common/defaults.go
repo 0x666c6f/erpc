@@ -619,22 +619,8 @@ func (m *MethodsConfig) SetDefaults() error {
 		}
 	}
 
-	for _, methodCfg := range m.Definitions {
-		if methodCfg == nil {
-			continue
-		}
-		methodCfg.Requires = NormalizeCapabilityTags(methodCfg.Requires)
-	}
-
 	if err := m.applyWorkloadProfiles(); err != nil {
 		return err
-	}
-
-	for _, methodCfg := range m.Definitions {
-		if methodCfg == nil {
-			continue
-		}
-		methodCfg.Requires = NormalizeCapabilityTags(methodCfg.Requires)
 	}
 
 	return nil
@@ -1829,8 +1815,6 @@ func (u *UpstreamConfig) SetDefaults(defaults *UpstreamConfig) error {
 			u.IgnoreMethods = []string{"*"}
 		}
 	}
-	u.Capabilities = NormalizeCapabilityTags(u.Capabilities)
-
 	return nil
 }
 
@@ -1991,10 +1975,19 @@ func (n *NetworkConfig) SetDefaults(upstreams []*UpstreamConfig, defaults *Netwo
 		return fmt.Errorf("failed to set defaults for methods: %w", err)
 	}
 	if len(n.Methods.generatedFailsafeRules) > 0 {
-		// Method-profile failsafe rules must run before inherited wildcard/default rules.
+		// Keep user-defined specific/pattern rules first, then generated profile rules,
+		// then wildcard/default rules so profiles override defaults without shadowing explicit config.
 		merged := make([]*FailsafeConfig, 0, len(n.Methods.generatedFailsafeRules)+len(n.Failsafe))
+		wildcards := make([]*FailsafeConfig, 0, len(n.Failsafe))
+		for _, fs := range n.Failsafe {
+			if fs == nil || fs.MatchMethod == "" || fs.MatchMethod == "*" {
+				wildcards = append(wildcards, fs)
+				continue
+			}
+			merged = append(merged, fs)
+		}
 		merged = append(merged, n.Methods.generatedFailsafeRules...)
-		merged = append(merged, n.Failsafe...)
+		merged = append(merged, wildcards...)
 		n.Failsafe = merged
 	}
 	var failsafeDefaults []*FailsafeConfig

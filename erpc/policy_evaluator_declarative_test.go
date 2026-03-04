@@ -2,6 +2,7 @@ package erpc
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -53,9 +54,14 @@ func TestPolicyEvaluator_DeclarativeRules(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, evaluator.Start(ctx))
 
-		time.Sleep(120 * time.Millisecond)
+		require.Eventually(t, func() bool {
+			err := evaluator.AcquirePermit(&logger, ups1, "eth_call")
+			var excluded *common.ErrUpstreamExcludedByPolicy
+			return errors.As(err, &excluded)
+		}, 2*time.Second, 20*time.Millisecond)
 
-		assert.Error(t, evaluator.AcquirePermit(&logger, ups1, "eth_call"))
+		var excluded *common.ErrUpstreamExcludedByPolicy
+		require.ErrorAs(t, evaluator.AcquirePermit(&logger, ups1, "eth_call"), &excluded)
 		assert.NoError(t, evaluator.AcquirePermit(&logger, ups2, "eth_call"))
 	})
 
@@ -101,9 +107,43 @@ func TestPolicyEvaluator_DeclarativeRules(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, evaluator.Start(ctx))
 
-		time.Sleep(120 * time.Millisecond)
+		require.Eventually(t, func() bool {
+			return evaluator.AcquirePermit(&logger, ups1, "eth_call") == nil &&
+				evaluator.AcquirePermit(&logger, ups2, "eth_call") == nil
+		}, 2*time.Second, 20*time.Millisecond)
 
 		assert.NoError(t, evaluator.AcquirePermit(&logger, ups1, "eth_call"))
 		assert.NoError(t, evaluator.AcquirePermit(&logger, ups2, "eth_call"))
 	})
+}
+
+func TestPolicyEvaluator_DeclarativeRules_InvalidRuntimePatternReturnsError(t *testing.T) {
+	evaluator := &PolicyEvaluator{
+		config: &common.SelectionPolicyConfig{
+			Rules: []*common.SelectionPolicyRuleConfig{
+				{
+					MatchUpstreamID: "(invalid",
+					Action:          common.SelectionPolicyRuleActionExclude,
+				},
+			},
+		},
+	}
+
+	_, err := evaluator.evaluateWithRules("eth_call", []metricData{
+		{
+			"id":     "rpc1",
+			"config": &common.UpstreamConfig{Group: "primary"},
+			"metrics": map[string]interface{}{
+				"errorRate":          0.0,
+				"blockHeadLag":       0.0,
+				"finalizationLag":    0.0,
+				"p90ResponseSeconds": 0.0,
+				"p95ResponseSeconds": 0.0,
+				"p99ResponseSeconds": 0.0,
+				"throttledRate":      0.0,
+			},
+		},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "matchUpstreamId")
 }

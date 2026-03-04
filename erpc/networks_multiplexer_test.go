@@ -445,8 +445,6 @@ func TestNetwork_Multiplexer_FollowersReceiveResponse(t *testing.T) {
 		assert.Equal(t, int32(1), rpc1Calls.Load(), "initial burst should multiplex to rpc1 once")
 		assert.Equal(t, int32(0), rpc2Calls.Load(), "rpc2 should not be called before directive-targeted request")
 
-		time.Sleep(networkPostCompletionCoalescingWindow / 4)
-
 		req := common.NewNormalizedRequest(requestBody)
 		req.SetDirectives(&common.RequestDirectives{UseUpstream: "rpc2"})
 		resp, err := network.Forward(ctx, req)
@@ -588,6 +586,10 @@ func TestNetwork_Multiplexer_MethodLevelDisable(t *testing.T) {
 	cfg, ok := network.cfg.Methods.Definitions["eth_getBalance"]
 	if !ok || cfg == nil {
 		cfg = &common.CacheMethodConfig{}
+		network.cfg.Methods.Definitions["eth_getBalance"] = cfg
+	} else {
+		cfgCopy := *cfg
+		cfg = &cfgCopy
 		network.cfg.Methods.Definitions["eth_getBalance"] = cfg
 	}
 	cfg.Multiplex = util.BoolPtr(false)
