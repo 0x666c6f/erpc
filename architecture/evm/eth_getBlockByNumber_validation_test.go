@@ -210,6 +210,22 @@ func TestValidateBlock_LogsBloomValidationSkipsWithoutGroundTruthLogs(t *testing
 	require.NoError(t, err)
 }
 
+func TestValidateBlock_LogsBloomValidationSkipsWhenGroundTruthLogsIncomplete(t *testing.T) {
+	ctx := context.Background()
+
+	resp := newBlockValidationResponseFromFixture(t)
+	dirs := &common.RequestDirectives{
+		ValidateLogsBloomEmptiness: true,
+		GroundTruthLogs:            []*common.GroundTruthLog{},
+		GroundTruthLogsComplete:    false,
+	}
+	req := newBlockValidationRequest(dirs)
+	resp.WithRequest(req)
+
+	err := validateBlock(ctx, nil, dirs, req, resp)
+	require.NoError(t, err)
+}
+
 func TestValidateBlock_LogsBloomValidationRejectsMissingBloom(t *testing.T) {
 	ctx := context.Background()
 
