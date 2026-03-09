@@ -508,7 +508,7 @@ func networkPostForward_eth_getLogs(ctx context.Context, n common.Network, rq *c
 					if dirs := rq.Directives(); dirs != nil {
 						skipCacheRead = dirs.SkipCacheRead
 					}
-					payloadLimit, lerr := extractGetLogsMaxDataBytes(filter)
+					payloadLimit, lerr := extractGetLogsPayloadLimitFromRequest(ctx, rq)
 					if lerr != nil {
 						return rs, common.NewErrInvalidRequest(lerr)
 					}

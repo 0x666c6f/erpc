@@ -827,6 +827,46 @@ func TestNetworkPostForward_eth_getLogs(t *testing.T) {
 			inputError:  common.NewErrEndpointRequestTimeout(time.Second, errors.New("timeout")),
 			expectSplit: true,
 		},
+		{
+			name: "single_block_fallback_uses_configured_payload_limit",
+			setup: func() (*mockNetwork, *mockEvmUpstream, *common.NormalizedRequest) {
+				n := new(mockNetwork)
+				u := new(mockEvmUpstream)
+				r := createTestRequest(map[string]interface{}{
+					"fromBlock": "0x1",
+					"toBlock":   "0x1",
+				})
+				r.SetNetwork(n)
+
+				n.On("Id").Return("evm:123").Maybe()
+				n.On("ProjectId").Return("test").Maybe()
+				n.On("Config").Return(&common.NetworkConfig{
+					Evm: &common.EvmNetworkConfig{
+						GetLogsSplitOnError: util.BoolPtr(true),
+						GetLogsMaxDataBytes: 2,
+					},
+				}).Maybe()
+				n.On("Forward", mock.Anything, mock.Anything).Return(
+					common.NewNormalizedResponse().WithJsonRpcResponse(
+						common.MustNewJsonRpcResponseFromBytes(
+							[]byte(`"0x1"`),
+							[]byte(`[{"logs":[{"data":"0x1234"},{"data":"0x1234567890"}]}]`),
+							nil,
+						),
+					),
+					nil,
+				).Times(1)
+
+				u.On("Id").Return("rpc1").Maybe()
+				u.On("NetworkId").Return("evm:123").Maybe()
+				u.On("NetworkLabel").Return("evm:123").Maybe()
+				u.On("VendorName").Return("test").Maybe()
+
+				return n, u, r
+			},
+			inputError:  common.NewErrEndpointRequestTooLarge(errors.New("too large"), common.EvmResponseTooLarge),
+			expectSplit: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -848,6 +888,17 @@ func TestNetworkPostForward_eth_getLogs(t *testing.T) {
 
 			if tt.expectSplit {
 				assert.NotNil(t, resp)
+				if tt.name == "single_block_fallback_uses_configured_payload_limit" {
+					jrr, jerr := resp.JsonRpcResponse(context.Background())
+					require.NoError(t, jerr)
+					var buf bytes.Buffer
+					_, jerr = jrr.WriteResultTo(&buf, false)
+					require.NoError(t, jerr)
+					var logs []map[string]interface{}
+					require.NoError(t, json.Unmarshal(buf.Bytes(), &logs))
+					require.Len(t, logs, 1)
+					assert.Equal(t, "0x1234", logs[0]["data"])
+				}
 			}
 
 			n.AssertExpectations(t)
