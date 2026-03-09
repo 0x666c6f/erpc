@@ -43,6 +43,9 @@ func extractGetLogsMaxDataBytes(filter map[string]interface{}) (int64, error) {
 		if math.Trunc(v) != v {
 			return 0, fmt.Errorf("%s must be an integer", getLogsMaxSizeField)
 		}
+		if v > float64(math.MaxInt64) {
+			return 0, fmt.Errorf("%s must be less than or equal to %d", getLogsMaxSizeField, int64(math.MaxInt64))
+		}
 		return int64(v), nil
 	case string:
 		if v == "" {

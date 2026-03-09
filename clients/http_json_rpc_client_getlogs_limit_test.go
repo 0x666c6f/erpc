@@ -1,6 +1,7 @@
 package clients
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net/http"
@@ -161,4 +162,23 @@ func TestHttpJsonRpcClient_EthGetLogs_ContentLengthTooLarge_FastFail(t *testing.
 	case <-time.After(2 * time.Second):
 		t.Fatalf("server handler did not observe client cancellation")
 	}
+}
+
+func TestReleaseReadBufferAfterParse_CopiesLargeParsedResultBeforeCleanup(t *testing.T) {
+	const parseNoCopyBufThreshold = 64 << 10
+	largeData := strings.Repeat("ab", parseNoCopyBufThreshold)
+	payload := []byte(fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"result":[{"data":"0x%s"}]}`, largeData))
+
+	jrr := &common.JsonRpcResponse{}
+	require.NoError(t, jrr.ParseFromBytes(context.Background(), payload))
+
+	original := append([]byte(nil), jrr.GetResultBytes()...)
+	releaseReadBufferAfterParse(jrr, payload, parseNoCopyBufThreshold, func() {
+		for i := range payload {
+			payload[i] = 'x'
+		}
+	})
+
+	require.True(t, bytes.Equal(original, jrr.GetResultBytes()))
+	require.NotContains(t, string(jrr.GetResultBytes()), strings.Repeat("x", 64))
 }

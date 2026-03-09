@@ -1950,6 +1950,21 @@ func TestNetworkPreForward_eth_getLogs(t *testing.T) {
 		assert.True(t, common.HasErrorCode(err, common.ErrCodeInvalidRequest))
 	})
 
+	t.Run("oversized_float_max_size_is_rejected_early", func(t *testing.T) {
+		n := new(mockNetwork)
+		r := createTestRequest(map[string]interface{}{
+			"fromBlock": "0x1",
+			"toBlock":   "0x2",
+			"maxSize":   float64(1e20),
+		})
+
+		handled, resp, err := projectPreForward_eth_getLogs(ctx, n, r)
+		require.Error(t, err)
+		assert.True(t, handled)
+		assert.Nil(t, resp)
+		assert.True(t, common.HasErrorCode(err, common.ErrCodeInvalidRequest))
+	})
+
 	t.Run("cache_chunking_filters_oversized_log_payloads", func(t *testing.T) {
 		chunkSize := int64(2)
 		n := new(mockNetwork)

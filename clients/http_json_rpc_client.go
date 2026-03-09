@@ -763,6 +763,7 @@ func (c *GenericHttpJsonRpcClient) sendSingleRequest(ctx context.Context, req *c
 	// which can cause OOM if we fully buffer the response. Enforce a network-level cap and
 	// convert overflow into a TooLarge error so callers can split and retry.
 	if method == "eth_getLogs" {
+		const parseNoCopyBufThreshold = 64 << 10 // keep in sync with common.JsonRpcResponse.ParseFromBytes
 		maxBytes := int64(0)
 		if n := req.Network(); n != nil && n.Config() != nil && n.Config().Evm != nil {
 			maxBytes = n.Config().Evm.GetLogsMaxResponseBytes
@@ -786,10 +787,10 @@ func (c *GenericHttpJsonRpcClient) sendSingleRequest(ctx context.Context, req *c
 		}
 
 		bodyBytes, cleanup, rerr := c.readResponseBodyMax(resp, int(resp.ContentLength), maxBytes)
-		if cleanup != nil {
-			defer cleanup()
-		}
 		if rerr != nil {
+			if cleanup != nil {
+				cleanup()
+			}
 			// Treat as TooLarge so network-level eth_getLogs hook can split.
 			if errors.Is(rerr, util.ErrReadLimitExceeded) {
 				return nil, common.NewErrEndpointRequestTooLarge(rerr, common.EvmResponseTooLarge)
@@ -803,6 +804,9 @@ func (c *GenericHttpJsonRpcClient) sendSingleRequest(ctx context.Context, req *c
 
 		jrr := &common.JsonRpcResponse{}
 		if err := jrr.ParseFromBytes(ctx, bodyBytes); err != nil {
+			if cleanup != nil {
+				cleanup()
+			}
 			// Parsing failed for a bounded-size payload; treat as upstream parse error.
 			return nil, common.NewErrJsonRpcExceptionInternal(
 				0,
@@ -815,6 +819,9 @@ func (c *GenericHttpJsonRpcClient) sendSingleRequest(ctx context.Context, req *c
 					"headers":    resp.Header,
 				},
 			)
+		}
+		if cleanup != nil {
+			releaseReadBufferAfterParse(jrr, bodyBytes, parseNoCopyBufThreshold, cleanup)
 		}
 
 		nr := common.NewNormalizedResponse().
@@ -850,6 +857,19 @@ func (c *GenericHttpJsonRpcClient) sendSingleRequest(ctx context.Context, req *c
 	}
 
 	return nr, err
+}
+
+func releaseReadBufferAfterParse(jrr *common.JsonRpcResponse, bodyBytes []byte, noCopyThreshold int, cleanup func()) {
+	if cleanup == nil {
+		return
+	}
+	if jrr != nil {
+		resultBytes := jrr.GetResultBytes()
+		if len(resultBytes) > noCopyThreshold && len(bodyBytes) > 0 {
+			jrr.SetResult(append([]byte(nil), resultBytes...))
+		}
+	}
+	cleanup()
 }
 
 func (c *GenericHttpJsonRpcClient) prepareRequest(ctx context.Context, body []byte) (*http.Request, error) {
