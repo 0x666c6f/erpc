@@ -1366,6 +1366,9 @@ func (e *EvmNetworkConfig) Validate() error {
 	if e.GetLogsMaxResponseBytes < 0 {
 		return fmt.Errorf("network.*.evm.getLogsMaxResponseBytes must be greater than or equal to 0")
 	}
+	if e.GetLogsMaxDataBytes < 0 {
+		return fmt.Errorf("network.*.evm.getLogsMaxDataBytes must be greater than or equal to 0")
+	}
 	if e.GetLogsCacheChunkSize != nil && *e.GetLogsCacheChunkSize < 0 {
 		return fmt.Errorf("network.*.evm.getLogsCacheChunkSize must be greater than or equal to 0")
 	}

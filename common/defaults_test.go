@@ -147,6 +147,22 @@ func TestSetDefaults_NetworkConfig(t *testing.T) {
 		assert.Nil(t, network.Failsafe[0].CircuitBreaker)
 		assert.Nil(t, network.Failsafe[0].Retry)
 	})
+
+	t.Run("CopiesGetLogsMaxDataBytesFromNetworkDefaults", func(t *testing.T) {
+		network := &NetworkConfig{
+			Evm: &EvmNetworkConfig{
+				ChainId: 1,
+			},
+		}
+		network.SetDefaults(nil, &NetworkDefaults{
+			Evm: &EvmNetworkConfig{
+				GetLogsMaxDataBytes: 4096,
+			},
+		})
+
+		assert.NotNil(t, network.Evm)
+		assert.EqualValues(t, 4096, network.Evm.GetLogsMaxDataBytes)
+	})
 }
 
 func TestSetDefaults_DirectiveDefaultsConfig(t *testing.T) {

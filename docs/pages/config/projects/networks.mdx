@@ -568,6 +568,7 @@ Network-level controls manage validation, proactive splitting, and error-driven 
 
 - **Validation & availability**: `integrity.enforceGetLogsBlockRange` validates range and asserts the upstream has data for `fromBlock..toBlock`.
 - **Hard limits**: `getLogsMaxAllowedRange`, `getLogsMaxAllowedAddresses`, `getLogsMaxAllowedTopics` reject oversized requests early.
+- **Per-log payload cap**: `getLogsMaxDataBytes` drops logs whose `data` payload exceeds the configured size. Request-level `params[0].maxSize` overrides it when present.
 - **Proactive splitting**: If requested range exceeds an effective threshold, the network splits the request into contiguous ranges. The effective threshold is the minimum positive `upstream.evm.getLogsAutoSplittingRangeThreshold` across selected upstreams, capped by `getLogsMaxAllowedRange`.
 - **Split on error**: If an upstream complains about large requests (including provider-specific 413-like errors), the network retries by splitting (first range, then addresses, then topics[0] OR-list) and merges results.
 - **Concurrency**: `getLogsSplitConcurrency` limits parallel sub-requests during splitting.
@@ -595,6 +596,7 @@ projects:
           getLogsMaxAllowedRange: 10000          # Max number of blocks (inclusive)
           getLogsMaxAllowedAddresses: 10000      # Max length when 'address' is an array
           getLogsMaxAllowedTopics: 10000         # Max OR-count when topics[0] is an array
+          getLogsMaxDataBytes: 4096              # Drop logs whose `data` payload exceeds 4KB
 
           # When providers return "too many results"/large-range errors, split and retry automatically.
           getLogsSplitOnError: true
@@ -634,6 +636,7 @@ export default createConfig({
             getLogsMaxAllowedRange: 10000,          // Max number of blocks (inclusive)
             getLogsMaxAllowedAddresses: 10000,      // Max length when 'address' is an array
             getLogsMaxAllowedTopics: 10000,         // Max OR-count when topics[0] is an array
+            getLogsMaxDataBytes: 4096,              // Drop logs whose `data` payload exceeds 4KB
 
             // When providers return "too many results"/large-range errors, split and retry automatically.
             getLogsSplitOnError: true,

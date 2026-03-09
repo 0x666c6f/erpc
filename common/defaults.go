@@ -1968,6 +1968,9 @@ func (n *NetworkConfig) SetDefaults(upstreams []*UpstreamConfig, defaults *Netwo
 			if n.Evm.GetLogsSplitConcurrency == 0 && defaults.Evm.GetLogsSplitConcurrency != 0 {
 				n.Evm.GetLogsSplitConcurrency = defaults.Evm.GetLogsSplitConcurrency
 			}
+			if n.Evm.GetLogsMaxDataBytes == 0 && defaults.Evm.GetLogsMaxDataBytes != 0 {
+				n.Evm.GetLogsMaxDataBytes = defaults.Evm.GetLogsMaxDataBytes
+			}
 			if n.Evm.GetLogsCacheChunkSize == nil && defaults.Evm.GetLogsCacheChunkSize != nil {
 				v := *defaults.Evm.GetLogsCacheChunkSize
 				n.Evm.GetLogsCacheChunkSize = &v

@@ -860,6 +860,11 @@ export interface EvmNetworkConfig {
    * Default is set in SetDefaults(). Set to 0 to disable (not recommended in production).
    */
   getLogsMaxResponseBytes?: number /* int64 */;
+  /**
+   * GetLogsMaxDataBytes caps the size of a single log's `data` payload in eth_getLogs responses.
+   * Logs whose payload exceeds this size are dropped before merge/cache. Set to 0 to disable.
+   */
+  getLogsMaxDataBytes?: number /* int64 */;
   getLogsSplitOnError?: boolean;
   getLogsSplitConcurrency?: number /* int */;
   getLogsCacheChunkSize?: number /* int64 */;
