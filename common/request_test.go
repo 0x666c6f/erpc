@@ -597,6 +597,19 @@ func TestNormalizedRequestForwardBody_StripsEthGetLogsMaxSizeFromUpstreamPayload
 	}
 }
 
+func TestNormalizedRequestForwardBody_EthGetLogsRawFastPathWithoutMaxSize(t *testing.T) {
+	raw := []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_getLogs","params":[{"fromBlock":"0x1","toBlock":"0x2"}]}`)
+	req := NewNormalizedRequest(raw)
+
+	forwardBody, err := req.ForwardBody()
+	if err != nil {
+		t.Fatalf("expected ForwardBody to succeed: %v", err)
+	}
+	if string(forwardBody) != string(raw) {
+		t.Fatalf("expected raw fast path for eth_getLogs without maxSize, got %s", string(forwardBody))
+	}
+}
+
 func TestMarkUpstreamCompleted_SingleUpstreamBlockUnavailable_DisablesNetworkRetry(t *testing.T) {
 	ctx := context.Background()
 	req := NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","id":1,"method":"eth_call"}`))

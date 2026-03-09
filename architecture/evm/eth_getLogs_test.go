@@ -1965,6 +1965,21 @@ func TestNetworkPreForward_eth_getLogs(t *testing.T) {
 		assert.True(t, common.HasErrorCode(err, common.ErrCodeInvalidRequest))
 	})
 
+	t.Run("empty_string_max_size_is_rejected_early", func(t *testing.T) {
+		n := new(mockNetwork)
+		r := createTestRequest(map[string]interface{}{
+			"fromBlock": "0x1",
+			"toBlock":   "0x2",
+			"maxSize":   "",
+		})
+
+		handled, resp, err := projectPreForward_eth_getLogs(ctx, n, r)
+		require.Error(t, err)
+		assert.True(t, handled)
+		assert.Nil(t, resp)
+		assert.True(t, common.HasErrorCode(err, common.ErrCodeInvalidRequest))
+	})
+
 	t.Run("cache_chunking_filters_oversized_log_payloads", func(t *testing.T) {
 		chunkSize := int64(2)
 		n := new(mockNetwork)
@@ -2103,6 +2118,41 @@ func TestUpstreamPostForward_eth_getLogs_RequestMaxSizeOverridesConfiguredDefaul
 		"toBlock":   "0x1",
 		"maxSize":   2,
 	})
+	r.SetNetwork(n)
+	rs := common.NewNormalizedResponse().WithRequest(r).WithJsonRpcResponse(
+		common.MustNewJsonRpcResponseFromBytes(
+			[]byte(`"0x1"`),
+			[]byte(`[{"data":"0x1234"},{"data":"0x1234567890"}]`),
+			nil,
+		),
+	)
+
+	out, err := upstreamPostForward_eth_getLogs(ctx, n, u, r, rs, nil)
+	require.NoError(t, err)
+
+	jrr, err := out.JsonRpcResponse(ctx)
+	require.NoError(t, err)
+
+	var logs []map[string]interface{}
+	require.NoError(t, json.Unmarshal(jrr.GetResultBytes(), &logs))
+	require.Len(t, logs, 1)
+	assert.Equal(t, "0x1234", logs[0]["data"])
+}
+
+func TestUpstreamPostForward_eth_getLogs_UsesSizeOnlyFilteringWhenRequestFilterMissing(t *testing.T) {
+	ctx := context.Background()
+	n := new(mockNetwork)
+	n.On("Id").Return("evm:123").Maybe()
+	n.On("Config").Return(&common.NetworkConfig{
+		Evm: &common.EvmNetworkConfig{
+			GetLogsMaxDataBytes: 2,
+		},
+	}).Maybe()
+	u := new(mockEvmUpstream)
+	u.On("Id").Return("u1").Maybe()
+
+	jrq := common.NewJsonRpcRequest("eth_getLogs", []interface{}{"not-a-filter"})
+	r := common.NewNormalizedRequestFromJsonRpcRequest(jrq)
 	r.SetNetwork(n)
 	rs := common.NewNormalizedResponse().WithRequest(r).WithJsonRpcResponse(
 		common.MustNewJsonRpcResponseFromBytes(

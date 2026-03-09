@@ -447,18 +447,22 @@ func upstreamPostForward_eth_getLogs(ctx context.Context, n common.Network, u co
 					reqFilter, _ = filterReq.Params[0].(map[string]interface{})
 				}
 				filterReq.RUnlock()
+				var address interface{}
+				var topics interface{}
 				if reqFilter != nil {
-					filter := newGetLogsFilter(reqFilter["address"], reqFilter["topics"], payloadLimit)
-					dropped, err := filterGetLogsResponseByDataLimit(jrr, filter)
-					if err != nil {
-						return nil, err
-					}
-					if dropped > 0 {
-						n.Logger().Debug().
-							Int("droppedLogs", dropped).
-							Int64("maxSize", payloadLimit).
-							Msg("filtered oversized eth_getLogs payloads")
-					}
+					address = reqFilter["address"]
+					topics = reqFilter["topics"]
+				}
+				filter := newGetLogsFilter(address, topics, payloadLimit)
+				dropped, err := filterGetLogsResponseByDataLimit(jrr, filter)
+				if err != nil {
+					return nil, err
+				}
+				if dropped > 0 {
+					n.Logger().Debug().
+						Int("droppedLogs", dropped).
+						Int64("maxSize", payloadLimit).
+						Msg("filtered oversized eth_getLogs payloads")
 				}
 			}
 		}

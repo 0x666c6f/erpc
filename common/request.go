@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 
 	"github.com/bytedance/sonic"
+	"github.com/erpc/erpc/util"
 	"github.com/rs/zerolog"
 )
 
@@ -976,8 +977,7 @@ func (r *NormalizedRequest) Body() []byte {
 // Fast-path: reuse original raw bytes if request was not modified.
 func (r *NormalizedRequest) ForwardBody(ctx ...context.Context) ([]byte, error) {
 	if body := r.Body(); len(body) > 0 {
-		method, _ := r.Method()
-		if !strings.EqualFold(method, "eth_getLogs") {
+		if !hasEthGetLogsMaxSizeInRawBody(body) {
 			return body, nil
 		}
 	}
@@ -1030,6 +1030,16 @@ func sanitizeForwardParams(method string, params []interface{}) []interface{} {
 	cloned[0] = sanitized
 
 	return cloned
+}
+
+func hasEthGetLogsMaxSizeInRawBody(body []byte) bool {
+	if len(body) == 0 {
+		return false
+	}
+	if !strings.Contains(util.B2Str(body), `"eth_getLogs"`) {
+		return false
+	}
+	return strings.Contains(util.B2Str(body), `"maxSize"`)
 }
 
 func (r *NormalizedRequest) MarshalZerologObject(e *zerolog.Event) {

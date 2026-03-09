@@ -49,7 +49,7 @@ func extractGetLogsMaxDataBytes(filter map[string]interface{}) (int64, error) {
 		return int64(v), nil
 	case string:
 		if v == "" {
-			return 0, nil
+			return 0, fmt.Errorf("%s must not be empty", getLogsMaxSizeField)
 		}
 		n, err := strconv.ParseInt(v, 10, 64)
 		if err != nil {
