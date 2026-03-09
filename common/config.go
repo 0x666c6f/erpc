@@ -1625,7 +1625,10 @@ type EvmNetworkConfig struct {
 	// GetLogsMaxResponseBytes caps the decompressed upstream response size for eth_getLogs.
 	// When exceeded, the request is treated as "too large" and split/retried with smaller sub-requests.
 	// Default is set in SetDefaults(). Set to 0 to disable (not recommended in production).
-	GetLogsMaxResponseBytes int64  `yaml:"getLogsMaxResponseBytes,omitempty" json:"getLogsMaxResponseBytes,omitempty"`
+	GetLogsMaxResponseBytes int64 `yaml:"getLogsMaxResponseBytes,omitempty" json:"getLogsMaxResponseBytes,omitempty"`
+	// GetLogsMaxDataBytes caps the size of a single log's `data` payload in eth_getLogs responses.
+	// Logs whose payload exceeds this size are dropped before merge/cache. Set to 0 to disable.
+	GetLogsMaxDataBytes     int64  `yaml:"getLogsMaxDataBytes,omitempty" json:"getLogsMaxDataBytes,omitempty"`
 	GetLogsSplitOnError     *bool  `yaml:"getLogsSplitOnError,omitempty" json:"getLogsSplitOnError"`
 	GetLogsSplitConcurrency int    `yaml:"getLogsSplitConcurrency,omitempty" json:"getLogsSplitConcurrency"`
 	GetLogsCacheChunkSize   *int64 `yaml:"getLogsCacheChunkSize,omitempty" json:"getLogsCacheChunkSize"`

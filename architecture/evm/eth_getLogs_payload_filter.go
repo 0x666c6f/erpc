@@ -71,14 +71,24 @@ func extractGetLogsPayloadLimitFromRequest(ctx context.Context, rq *common.Norma
 	defer jrq.RUnlock()
 
 	if len(jrq.Params) == 0 {
-		return 0, nil
+		return getLogsConfiguredPayloadLimit(rq), nil
 	}
 	filter, ok := jrq.Params[0].(map[string]interface{})
 	if !ok {
-		return 0, nil
+		return getLogsConfiguredPayloadLimit(rq), nil
+	}
+	if _, hasMaxSize := filter[getLogsMaxSizeField]; hasMaxSize {
+		return extractGetLogsMaxDataBytes(filter)
 	}
 
-	return extractGetLogsMaxDataBytes(filter)
+	return getLogsConfiguredPayloadLimit(rq), nil
+}
+
+func getLogsConfiguredPayloadLimit(rq *common.NormalizedRequest) int64 {
+	if rq == nil || rq.Network() == nil || rq.Network().Config() == nil || rq.Network().Config().Evm == nil {
+		return 0
+	}
+	return rq.Network().Config().Evm.GetLogsMaxDataBytes
 }
 
 func filterGetLogsResponseByDataLimit(jrr *common.JsonRpcResponse, filter *getLogsFilter) (int, error) {
