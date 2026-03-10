@@ -1211,6 +1211,71 @@ func TestExecuteGetLogsSubRequests_CoalescesFinalizedIdenticalSubRangesAcrossCal
 	n.AssertExpectations(t)
 }
 
+func TestExecuteGetLogsSubRequests_CoalescedWaitersRespectOwnContexts(t *testing.T) {
+	resetGetLogsSharedExecutionState()
+
+	n := new(mockNetwork)
+	n.On("Id").Return("evm:1").Maybe()
+	n.On("ProjectId").Return("prj").Maybe()
+	n.On("Config").Return(&common.NetworkConfig{Evm: &common.EvmNetworkConfig{GetLogsSplitConcurrency: 4}}).Maybe()
+	n.On("GetFinality", mock.Anything, mock.Anything, mock.Anything).Return(common.DataFinalityStateFinalized).Maybe()
+
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	n.On("Forward", mock.Anything, mock.Anything).Return(
+		func(ctx context.Context, r *common.NormalizedRequest) *common.NormalizedResponse {
+			started <- struct{}{}
+			<-release
+			return common.NewNormalizedResponse().
+				WithRequest(r).
+				WithJsonRpcResponse(common.MustNewJsonRpcResponseFromBytes([]byte(`1`), []byte(`[{"blockNumber":"0x1"}]`), nil))
+		},
+		nil,
+	).Once()
+
+	req1 := createTestRequest(map[string]interface{}{"fromBlock": "0x1", "toBlock": "0x1"})
+	req1.SetNetwork(n)
+	req2 := createTestRequest(map[string]interface{}{"fromBlock": "0x1", "toBlock": "0x1"})
+	req2.SetNetwork(n)
+
+	type result struct {
+		resp *common.JsonRpcResponse
+		err  error
+	}
+	shortCtx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancel()
+	resCh := make(chan result, 2)
+
+	go func() {
+		resp, _, err := executeGetLogsSubRequests(shortCtx, n, req1, []ethGetLogsSubRequest{{fromBlock: 1, toBlock: 1}}, false, 4)
+		resCh <- result{resp: resp, err: err}
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("leader eth_getLogs sub-request did not start")
+	}
+
+	go func() {
+		resp, _, err := executeGetLogsSubRequests(context.Background(), n, req2, []ethGetLogsSubRequest{{fromBlock: 1, toBlock: 1}}, false, 4)
+		resCh <- result{resp: resp, err: err}
+	}()
+
+	time.Sleep(75 * time.Millisecond)
+	close(release)
+
+	first := <-resCh
+	second := <-resCh
+	if first.err == nil {
+		first, second = second, first
+	}
+	require.Error(t, first.err)
+	assert.ErrorIs(t, first.err, context.DeadlineExceeded)
+	require.NoError(t, second.err)
+	require.NotNil(t, second.resp)
+	n.AssertExpectations(t)
+}
+
 func TestGetLogsFromBlockReceiptsWriter_FiltersOversizedPayloads(t *testing.T) {
 	jrr := common.MustNewJsonRpcResponseFromBytes(
 		[]byte(`"0x1"`),

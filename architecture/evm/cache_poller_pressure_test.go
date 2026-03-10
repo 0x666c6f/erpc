@@ -39,15 +39,20 @@ func TestLargeFinalizedGetLogsCacheGuards(t *testing.T) {
 
 func TestEvmStatePoller_TriggerLatestPollAsync_DedupesInFlightWork(t *testing.T) {
 	var calls atomic.Int32
-	started := make(chan struct{}, 2)
-	release := make(chan struct{})
+	started := make(chan int32, 2)
+	firstRelease := make(chan struct{})
+	secondRelease := make(chan struct{})
 
 	poller := &EvmStatePoller{
 		appCtx: context.Background(),
 		latestPollAsyncFn: func(ctx context.Context) (int64, error) {
-			calls.Add(1)
-			started <- struct{}{}
-			<-release
+			call := calls.Add(1)
+			started <- call
+			if call == 1 {
+				<-firstRelease
+			} else {
+				<-secondRelease
+			}
 			return 12, nil
 		},
 	}
@@ -56,17 +61,27 @@ func TestEvmStatePoller_TriggerLatestPollAsync_DedupesInFlightWork(t *testing.T)
 	require.False(t, poller.TriggerLatestPollAsync(time.Second))
 
 	select {
-	case <-started:
+	case call := <-started:
+		require.Equal(t, int32(1), call)
 	case <-time.After(time.Second):
 		t.Fatal("latest async poll did not start")
 	}
 
-	close(release)
+	close(firstRelease)
 	require.Eventually(t, func() bool {
 		return !poller.latestPollTriggerInFlight.Load()
 	}, time.Second, 10*time.Millisecond)
 
 	require.True(t, poller.TriggerLatestPollAsync(time.Second))
+	select {
+	case call := <-started:
+		require.Equal(t, int32(2), call)
+	case <-time.After(time.Second):
+		t.Fatal("second latest async poll did not start")
+	}
+	require.False(t, poller.TriggerLatestPollAsync(time.Second))
+	assert.True(t, poller.latestPollTriggerInFlight.Load())
+	close(secondRelease)
 	require.Eventually(t, func() bool {
 		return calls.Load() == 2
 	}, time.Second, 10*time.Millisecond)
@@ -74,15 +89,20 @@ func TestEvmStatePoller_TriggerLatestPollAsync_DedupesInFlightWork(t *testing.T)
 
 func TestEvmStatePoller_TriggerFinalizedPollAsync_DedupesInFlightWork(t *testing.T) {
 	var calls atomic.Int32
-	started := make(chan struct{}, 2)
-	release := make(chan struct{})
+	started := make(chan int32, 2)
+	firstRelease := make(chan struct{})
+	secondRelease := make(chan struct{})
 
 	poller := &EvmStatePoller{
 		appCtx: context.Background(),
 		finalizedPollAsyncFn: func(ctx context.Context) (int64, error) {
-			calls.Add(1)
-			started <- struct{}{}
-			<-release
+			call := calls.Add(1)
+			started <- call
+			if call == 1 {
+				<-firstRelease
+			} else {
+				<-secondRelease
+			}
 			return 9, nil
 		},
 	}
@@ -91,17 +111,27 @@ func TestEvmStatePoller_TriggerFinalizedPollAsync_DedupesInFlightWork(t *testing
 	require.False(t, poller.TriggerFinalizedPollAsync(time.Second))
 
 	select {
-	case <-started:
+	case call := <-started:
+		require.Equal(t, int32(1), call)
 	case <-time.After(time.Second):
 		t.Fatal("finalized async poll did not start")
 	}
 
-	close(release)
+	close(firstRelease)
 	require.Eventually(t, func() bool {
 		return !poller.finalizedPollTriggerInFlight.Load()
 	}, time.Second, 10*time.Millisecond)
 
 	require.True(t, poller.TriggerFinalizedPollAsync(time.Second))
+	select {
+	case call := <-started:
+		require.Equal(t, int32(2), call)
+	case <-time.After(time.Second):
+		t.Fatal("second finalized async poll did not start")
+	}
+	require.False(t, poller.TriggerFinalizedPollAsync(time.Second))
+	assert.True(t, poller.finalizedPollTriggerInFlight.Load())
+	close(secondRelease)
 	require.Eventually(t, func() bool {
 		return calls.Load() == 2
 	}, time.Second, 10*time.Millisecond)

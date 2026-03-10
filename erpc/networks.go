@@ -594,6 +594,23 @@ func (n *Network) Forward(ctx context.Context, req *common.NormalizedRequest) (*
 		defer n.cleanupMultiplexer(mlx)
 	}
 
+	methodClassSem := n.getMethodClassSem(method)
+	if err := acquireBoundedPermit(ctx, methodClassSem); err != nil {
+		if mlx != nil {
+			mlx.Close(ctx, nil, err)
+		}
+		return nil, err
+	}
+	releaseMethodClassPermitWithReturn := true
+	releaseMethodClassPermit := func() {
+		releaseBoundedPermit(methodClassSem)
+	}
+	defer func() {
+		if releaseMethodClassPermitWithReturn {
+			releaseMethodClassPermit()
+		}
+	}()
+
 	if n.cacheDal != nil && !req.SkipCacheRead() {
 		cacheReadSem := n.getCacheReadSem(method)
 		if err := acquireBoundedPermit(ctx, cacheReadSem); err != nil {
@@ -1125,15 +1142,6 @@ func (n *Network) Forward(ctx context.Context, req *common.NormalizedRequest) (*
 		err  error
 	}
 
-	methodClassSem := n.getMethodClassSem(method)
-	if err := acquireBoundedPermit(ctx, methodClassSem); err != nil {
-		if mlx != nil {
-			mlx.Close(ctx, nil, err)
-		}
-		return nil, err
-	}
-	defer releaseBoundedPermit(methodClassSem)
-
 	execDone := make(chan forwardExecOutcome, 1)
 	go func() {
 		r, e := executeForward()
@@ -1148,11 +1156,13 @@ func (n *Network) Forward(ctx context.Context, req *common.NormalizedRequest) (*
 	case <-ctx.Done():
 		// Forward is still running in background; drain its outcome to avoid
 		// leaking a completed response when cancellation wins this select race.
+		releaseMethodClassPermitWithReturn = false
 		go func() {
 			out := <-execDone
 			if out.resp != nil {
 				out.resp.Release()
 			}
+			releaseMethodClassPermit()
 		}()
 		cause := context.Cause(ctx)
 		if cause == nil {

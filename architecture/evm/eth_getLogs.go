@@ -1074,8 +1074,11 @@ func executeSingleGetLogsSubRequest(
 	if allowCoalesce && shouldCoalesceGetLogsSubRequest(ctx, r) {
 		flightKey, ferr := buildGetLogsSubRequestFlightKey(ctx, n, r, sbnrq, req, skipCacheRead, payloadLimit)
 		if ferr == nil {
-			flightResult, flightErr, _ := getLogsSubRequestFlights.Do(flightKey, func() (interface{}, error) {
-				exec, execErr := executeSingleGetLogsSubRequest(ctx, n, r, req, skipCacheRead, concurrency, depth, semaphore, payloadLimit, logger, false, releaseToken)
+			resultCh := getLogsSubRequestFlights.DoChan(flightKey, func() (interface{}, error) {
+				// A singleflight leader must not impose its own cancellation deadline on
+				// other concurrent waiters for the same finalized sub-range.
+				flightCtx := context.WithoutCancel(ctx)
+				exec, execErr := executeSingleGetLogsSubRequest(flightCtx, n, r, req, skipCacheRead, concurrency, depth, semaphore, payloadLimit, logger, false, releaseToken)
 				if execErr != nil {
 					return nil, execErr
 				}
@@ -1100,11 +1103,20 @@ func executeSingleGetLogsSubRequest(
 					cacheAt:    exec.cacheAt,
 				}, nil
 			})
-			if flightErr == nil {
-				shared := flightResult.(*getLogsSubRequestExecution)
+			select {
+			case <-ctx.Done():
+				cause := context.Cause(ctx)
+				if cause != nil {
+					return nil, cause
+				}
+				return nil, ctx.Err()
+			case flightResult := <-resultCh:
+				if flightResult.Err != nil {
+					return nil, flightResult.Err
+				}
+				shared := flightResult.Val.(*getLogsSubRequestExecution)
 				return deserializeGetLogsSubRequestExecution(ctx, shared.serialized, shared.fromCache, shared.cacheAt)
 			}
-			return nil, flightErr
 		}
 		logger.Debug().Err(ferr).Msg("failed to build eth_getLogs coalescing key; continuing without coalescing")
 	}
