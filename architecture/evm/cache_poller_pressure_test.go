@@ -13,6 +13,7 @@ import (
 )
 
 func TestLargeFinalizedGetLogsCacheGuards(t *testing.T) {
+	// 1 MiB avoids extra envelope copies; 4 MiB skips the heaviest finalized Postgres blob writes.
 	assert.True(t, isLargeFinalizedGetLogsPayload("eth_getLogs", common.DataFinalityStateFinalized, largeFinalizedGetLogsEnvelopeBypassBytes))
 	assert.False(t, isLargeFinalizedGetLogsPayload("eth_call", common.DataFinalityStateFinalized, largeFinalizedGetLogsEnvelopeBypassBytes))
 	assert.False(t, isLargeFinalizedGetLogsPayload("eth_getLogs", common.DataFinalityStateUnfinalized, largeFinalizedGetLogsEnvelopeBypassBytes))

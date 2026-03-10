@@ -58,9 +58,6 @@ func getLogsSharedSubRequestSemaphore(n common.Network, fallbackConcurrency int)
 			limit = cfg.Evm.GetLogsCacheChunkConcurrency
 		}
 	}
-	if limit <= 0 {
-		limit = 10
-	}
 
 	sem := make(chan struct{}, limit)
 	actual, _ := getLogsSubRequestSemaphores.LoadOrStore(key, sem)
@@ -121,11 +118,12 @@ func serializeGetLogsSubRequestExecution(exec *getLogsSubRequestExecution) error
 	if _, err := exec.jrr.WriteTo(&buf); err != nil {
 		return err
 	}
-	exec.serialized = append(exec.serialized[:0], buf.Bytes()...)
+	exec.serialized = bytes.Clone(buf.Bytes())
 	return nil
 }
 
 func deserializeGetLogsSubRequestExecution(ctx context.Context, serialized []byte, fromCache bool, cacheAt int64) (*getLogsSubRequestExecution, error) {
+	serialized = bytes.Clone(serialized)
 	jrr := &common.JsonRpcResponse{}
 	if err := jrr.ParseFromBytes(ctx, serialized); err != nil {
 		return nil, err
@@ -1056,12 +1054,12 @@ func executeSingleGetLogsSubRequest(
 	const maxSplitDepth = 16
 
 	srq, err := BuildGetLogsRequest(req.fromBlock, req.toBlock, req.address, req.topics)
-	logger.Debug().
-		Object("request", srq).
-		Msg("executing eth_getLogs sub-request")
 	if err != nil {
 		return nil, err
 	}
+	logger.Debug().
+		Object("request", srq).
+		Msg("executing eth_getLogs sub-request")
 
 	sbnrq := common.NewNormalizedRequestFromJsonRpcRequest(srq)
 	dr := r.Directives().Clone()

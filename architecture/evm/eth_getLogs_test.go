@@ -1276,6 +1276,24 @@ func TestExecuteGetLogsSubRequests_CoalescedWaitersRespectOwnContexts(t *testing
 	n.AssertExpectations(t)
 }
 
+func TestShouldCoalesceGetLogsSubRequest(t *testing.T) {
+	n := new(mockNetwork)
+	n.On("GetFinality", mock.Anything, mock.Anything, mock.Anything).Return(common.DataFinalityStateFinalized).Maybe()
+	req := createTestRequest(map[string]interface{}{"fromBlock": "0x1", "toBlock": "0x1"})
+	req.SetNetwork(n)
+
+	assert.True(t, shouldCoalesceGetLogsSubRequest(context.Background(), req))
+
+	req.SetDirectives(&common.RequestDirectives{UseUpstream: "rpc1"})
+	assert.False(t, shouldCoalesceGetLogsSubRequest(context.Background(), req))
+
+	n2 := new(mockNetwork)
+	n2.On("GetFinality", mock.Anything, mock.Anything, mock.Anything).Return(common.DataFinalityStateUnfinalized).Maybe()
+	req2 := createTestRequest(map[string]interface{}{"fromBlock": "0x1", "toBlock": "0x1"})
+	req2.SetNetwork(n2)
+	assert.False(t, shouldCoalesceGetLogsSubRequest(context.Background(), req2))
+}
+
 func TestGetLogsFromBlockReceiptsWriter_FiltersOversizedPayloads(t *testing.T) {
 	jrr := common.MustNewJsonRpcResponseFromBytes(
 		[]byte(`"0x1"`),

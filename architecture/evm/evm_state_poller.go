@@ -506,9 +506,16 @@ func (e *EvmStatePoller) TriggerLatestPollAsync(timeout time.Duration) bool {
 	}
 	go func() {
 		defer e.latestPollTriggerInFlight.Store(false)
+		defer func() {
+			if rec := recover(); rec != nil {
+				e.logger.Error().Interface("panic", rec).Str("stack", string(debug.Stack())).Msg("panic in latest async poll trigger")
+			}
+		}()
 		ctx, cancel := context.WithTimeout(e.appCtx, timeout)
 		defer cancel()
-		_, _ = e.pollLatestForAsyncTrigger(ctx)
+		if _, err := e.pollLatestForAsyncTrigger(ctx); err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+			e.logger.Debug().Err(err).Msg("latest async poll trigger failed")
+		}
 	}()
 	return true
 }
@@ -525,9 +532,16 @@ func (e *EvmStatePoller) TriggerFinalizedPollAsync(timeout time.Duration) bool {
 	}
 	go func() {
 		defer e.finalizedPollTriggerInFlight.Store(false)
+		defer func() {
+			if rec := recover(); rec != nil {
+				e.logger.Error().Interface("panic", rec).Str("stack", string(debug.Stack())).Msg("panic in finalized async poll trigger")
+			}
+		}()
 		ctx, cancel := context.WithTimeout(e.appCtx, timeout)
 		defer cancel()
-		_, _ = e.pollFinalizedForAsyncTrigger(ctx)
+		if _, err := e.pollFinalizedForAsyncTrigger(ctx); err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+			e.logger.Debug().Err(err).Msg("finalized async poll trigger failed")
+		}
 	}()
 	return true
 }

@@ -1223,9 +1223,11 @@ func (n *Network) Forward(ctx context.Context, req *common.NormalizedRequest) (*
 			case sem <- struct{}{}:
 				n.observeCacheWriteQueueDepth(sem)
 				if shouldForceCacheMaterialization(method) {
-					// Keep common/smaller methods on the current fast path; avoid doing
-					// expensive getLogs response materialization on the foreground path.
-					_, _ = resp.JsonRpcResponse(ctx)
+					// Force-materialize non-getLogs responses now so the async cache writer
+					// reads stable parsed data; skip getLogs to avoid blocking the response path.
+					if _, err := resp.JsonRpcResponse(ctx); err != nil {
+						lg.Warn().Err(err).Msg("could not materialize response before async cache-set")
+					}
 				}
 				resp.AddRef()
 
