@@ -70,6 +70,20 @@ func TestNetworkGetLogsCacheSemaphoresUseDedicatedPools(t *testing.T) {
 	assert.Equal(t, n.cacheWriteSem, n.getAsyncCacheWriteSem("eth_call"))
 }
 
+func TestDeriveGetLogsCacheWriteBudget(t *testing.T) {
+	cfg := &common.NetworkConfig{
+		Evm: &common.EvmNetworkConfig{
+			GetLogsSplitConcurrency:      7,
+			GetLogsCacheChunkConcurrency: 11,
+		},
+	}
+	assert.Equal(t, 11, deriveGetLogsCacheWriteBudget(cfg))
+
+	cfg.Evm.GetLogsSplitConcurrency = 200
+	cfg.Evm.GetLogsCacheChunkConcurrency = 300
+	assert.Equal(t, maxConcurrentNetworkCacheWrites, deriveGetLogsCacheWriteBudget(cfg))
+}
+
 func TestShouldForceCacheMaterialization(t *testing.T) {
 	assert.False(t, shouldForceCacheMaterialization("eth_getLogs"))
 	assert.True(t, shouldForceCacheMaterialization("eth_call"))

@@ -54,8 +54,10 @@ const (
 	cacheEnvelopeVersion = byte(1)
 	cacheEnvelopeHeader  = 4 + 1 + 8
 
+	// Bypass the extra envelope copy once finalized eth_getLogs payloads are already large.
 	largeFinalizedGetLogsEnvelopeBypassBytes = 1 << 20
-	largeFinalizedGetLogsPostgresSkipBytes   = 4 << 20
+	// Skip the heaviest finalized Postgres blob writes once payloads are large enough to dominate cost.
+	largeFinalizedGetLogsPostgresSkipBytes = 4 << 20
 )
 
 func isLargeFinalizedGetLogsPayload(method string, finality common.DataFinalityState, resultSize int) bool {

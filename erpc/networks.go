@@ -99,37 +99,23 @@ func classifyNetworkMethodClass(method string) networkMethodClass {
 	}
 }
 
-func networkMaxInt(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}
-
-func networkMinInt(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
 func deriveGetLogsNetworkBudget(cfg *common.NetworkConfig) int {
 	budget := 4
 	if cfg != nil && cfg.Evm != nil {
-		budget = networkMaxInt(budget, cfg.Evm.GetLogsSplitConcurrency)
-		budget = networkMaxInt(budget, cfg.Evm.GetLogsCacheChunkConcurrency)
+		budget = max(budget, cfg.Evm.GetLogsSplitConcurrency)
+		budget = max(budget, cfg.Evm.GetLogsCacheChunkConcurrency)
 	}
-	return networkMaxInt(1, budget)
+	return max(1, budget)
 }
 
 func deriveMethodClassBudgets(cfg *common.NetworkConfig) map[networkMethodClass]chan struct{} {
-	cpuBudget := networkMaxInt(1, runtime.GOMAXPROCS(0))
-	getLogsBudget := networkMaxInt(
-		networkMaxInt(16, cpuBudget*4),
+	cpuBudget := max(1, runtime.GOMAXPROCS(0))
+	getLogsBudget := max(
+		max(16, cpuBudget*4),
 		deriveGetLogsNetworkBudget(cfg)*4,
 	)
-	ethCallBudget := networkMaxInt(8, cpuBudget*4)
-	defaultBudget := networkMaxInt(16, cpuBudget*8)
+	ethCallBudget := max(8, cpuBudget*4)
+	defaultBudget := max(16, cpuBudget*8)
 
 	return map[networkMethodClass]chan struct{}{
 		networkMethodClassGetLogs: make(chan struct{}, getLogsBudget),
@@ -139,7 +125,7 @@ func deriveMethodClassBudgets(cfg *common.NetworkConfig) map[networkMethodClass]
 }
 
 func deriveGetLogsCacheWriteBudget(cfg *common.NetworkConfig) int {
-	return networkMinInt(maxConcurrentNetworkCacheWrites, networkMaxInt(2, deriveGetLogsNetworkBudget(cfg)))
+	return min(maxConcurrentNetworkCacheWrites, max(2, deriveGetLogsNetworkBudget(cfg)))
 }
 
 func (n *Network) getMethodClassSem(method string) chan struct{} {

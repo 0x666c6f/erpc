@@ -15,6 +15,7 @@ import (
 	"github.com/erpc/erpc/telemetry"
 	"github.com/erpc/erpc/util"
 	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -554,9 +555,16 @@ func TriggerLatestPollAsync(sp common.EvmStatePoller, timeout time.Duration) boo
 		return triggerable.TriggerLatestPollAsync(timeout)
 	}
 	go func() {
+		defer func() {
+			if rec := recover(); rec != nil {
+				log.Logger.Error().Interface("panic", rec).Str("stack", string(debug.Stack())).Msg("panic in latest async poll fallback")
+			}
+		}()
 		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
-		_, _ = sp.PollLatestBlockNumber(ctx)
+		if _, err := sp.PollLatestBlockNumber(ctx); err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+			log.Logger.Debug().Err(err).Msg("latest async poll fallback failed")
+		}
 	}()
 	return true
 }
@@ -569,9 +577,16 @@ func TriggerFinalizedPollAsync(sp common.EvmStatePoller, timeout time.Duration) 
 		return triggerable.TriggerFinalizedPollAsync(timeout)
 	}
 	go func() {
+		defer func() {
+			if rec := recover(); rec != nil {
+				log.Logger.Error().Interface("panic", rec).Str("stack", string(debug.Stack())).Msg("panic in finalized async poll fallback")
+			}
+		}()
 		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
-		_, _ = sp.PollFinalizedBlockNumber(ctx)
+		if _, err := sp.PollFinalizedBlockNumber(ctx); err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+			log.Logger.Debug().Err(err).Msg("finalized async poll fallback failed")
+		}
 	}()
 	return true
 }

@@ -91,18 +91,12 @@ func buildGetLogsSubRequestFlightKey(
 		return "", err
 	}
 
-	useUpstream := ""
-	if parent != nil && parent.Directives() != nil {
-		useUpstream = parent.Directives().UseUpstream
-	}
-
 	return fmt.Sprintf(
-		"%s|%s|skipCacheRead=%t|payloadLimit=%d|useUpstream=%s|range=%d-%d|hash=%s",
+		"%s|%s|skipCacheRead=%t|payloadLimit=%d|range=%d-%d|hash=%s",
 		getLogsSubRequestRegistryKey(n),
 		parent.Finality(ctx).String(),
 		skipCacheRead,
 		payloadLimit,
-		useUpstream,
 		sr.fromBlock,
 		sr.toBlock,
 		hash,
@@ -200,7 +194,8 @@ func BuildGetLogsRequest(fromBlock, toBlock int64, address interface{}, topics i
 
 // projectPreForward_eth_getLogs records requested block-range size distribution
 // at the project level before cache and upstream selection.
-// It does not modify the request or short-circuit; always returns (false, nil, nil).
+// It returns (true, nil, err) only when maxDataBytes validation fails early;
+// otherwise it does not modify the request and returns (false, nil, nil).
 func projectPreForward_eth_getLogs(ctx context.Context, n common.Network, nq *common.NormalizedRequest) (handled bool, resp *common.NormalizedResponse, err error) {
 	if nq == nil || n == nil {
 		return false, nil, nil
@@ -358,8 +353,8 @@ func networkPreForward_eth_getLogs(ctx context.Context, n common.Network, ups []
 	}
 	if requestRange > 0 && chunkSize > 0 && requestRange > chunkSize {
 		subRequests := make([]ethGetLogsSubRequest, 0)
-		// Align first chunk start to chunkSize boundary for deterministic cache keys
-		// e.g. with chunkSize=1000, fromBlock=1500 -> first chunk starts at 1500, ends at 1999
+		// Align chunk ends to chunkSize boundaries for deterministic cache keys.
+		// e.g. with chunkSize=1000, fromBlock=1500 -> first chunk is 1500..1999.
 		sb := fromBlock
 		for sb <= toBlock {
 			// Compute aligned chunk end: next boundary - 1, clamped to toBlock
@@ -1119,6 +1114,8 @@ func executeSingleGetLogsSubRequest(
 		logger.Debug().Err(ferr).Msg("failed to build eth_getLogs coalescing key; continuing without coalescing")
 	}
 
+	// Use most of the remaining parent budget when available, but keep a bounded
+	// floor/ceiling so slow sub-ranges can still split without hanging the whole request.
 	subTimeout := 10 * time.Second
 	if dl, ok := ctx.Deadline(); ok {
 		rem := time.Until(dl)
@@ -1301,16 +1298,6 @@ loop:
 					n.ProjectId(), n.Label(), r.UserId(), r.AgentName(),
 				).Inc()
 			}
-			applySubMeta := func(meta *getLogsMergeMeta) {
-				if meta != nil {
-					fromCacheFlags[i] = meta.allFromCache
-					cacheAts[i] = meta.oldestCacheAt
-				} else {
-					fromCacheFlags[i] = false
-					cacheAts[i] = 0
-				}
-			}
-
 			exec, execErr := executeSingleGetLogsSubRequest(ctx, n, r, req, skipCacheRead, concurrency, depth, semaphore, payloadLimit, logger, true, releaseToken)
 			if execErr != nil {
 				mu.Lock()
@@ -1320,10 +1307,6 @@ loop:
 				return
 			}
 
-			applySubMeta(&getLogsMergeMeta{
-				allFromCache:  exec.fromCache,
-				oldestCacheAt: exec.cacheAt,
-			})
 			incSplitSuccess()
 			responses[i] = exec.jrr
 			holders[i] = exec.holder
