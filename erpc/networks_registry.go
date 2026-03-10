@@ -160,6 +160,9 @@ func NewNetwork(
 
 		bootstrapOnce:         sync.Once{},
 		inFlightRequests:      &sync.Map{},
+		methodClassSems:       deriveMethodClassBudgets(nwCfg),
+		getLogsCacheReadSem:   make(chan struct{}, deriveGetLogsNetworkBudget(nwCfg)),
+		getLogsCacheWriteSem:  make(chan struct{}, deriveGetLogsCacheWriteBudget(nwCfg)),
 		negativeResultCache:   &sync.Map{},
 		postCompletionResults: &sync.Map{},
 		failsafeExecutors:     failsafeExecutors,

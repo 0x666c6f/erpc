@@ -1,6 +1,7 @@
 package evm
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -13,9 +14,129 @@ import (
 	"github.com/erpc/erpc/common"
 	"github.com/erpc/erpc/telemetry"
 	"github.com/erpc/erpc/util"
+	"github.com/rs/zerolog"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
+	"golang.org/x/sync/singleflight"
 )
+
+var (
+	getLogsSubRequestSemaphores sync.Map
+	getLogsSubRequestFlights    singleflight.Group
+)
+
+type getLogsSubRequestExecution struct {
+	jrr        *common.JsonRpcResponse
+	holder     *common.NormalizedResponse
+	fromCache  bool
+	cacheAt    int64
+	serialized []byte
+}
+
+func getLogsSubRequestRegistryKey(n common.Network) string {
+	if n == nil {
+		return "nil-network"
+	}
+	return fmt.Sprintf("%s/%s", n.ProjectId(), n.Id())
+}
+
+func getLogsSharedSubRequestSemaphore(n common.Network, fallbackConcurrency int) chan struct{} {
+	key := getLogsSubRequestRegistryKey(n)
+	if sem, ok := getLogsSubRequestSemaphores.Load(key); ok {
+		return sem.(chan struct{})
+	}
+
+	limit := fallbackConcurrency
+	if limit <= 0 {
+		limit = 10
+	}
+	if cfg := n.Config(); cfg != nil && cfg.Evm != nil {
+		if cfg.Evm.GetLogsSplitConcurrency > limit {
+			limit = cfg.Evm.GetLogsSplitConcurrency
+		}
+		if cfg.Evm.GetLogsCacheChunkConcurrency > limit {
+			limit = cfg.Evm.GetLogsCacheChunkConcurrency
+		}
+	}
+	if limit <= 0 {
+		limit = 10
+	}
+
+	sem := make(chan struct{}, limit)
+	actual, _ := getLogsSubRequestSemaphores.LoadOrStore(key, sem)
+	return actual.(chan struct{})
+}
+
+func shouldCoalesceGetLogsSubRequest(ctx context.Context, r *common.NormalizedRequest) bool {
+	if r == nil {
+		return false
+	}
+	if dr := r.Directives(); dr != nil && dr.UseUpstream != "" {
+		return false
+	}
+	return r.Finality(ctx) == common.DataFinalityStateFinalized
+}
+
+func buildGetLogsSubRequestFlightKey(
+	ctx context.Context,
+	n common.Network,
+	parent *common.NormalizedRequest,
+	sub *common.NormalizedRequest,
+	sr ethGetLogsSubRequest,
+	skipCacheRead bool,
+	payloadLimit int64,
+) (string, error) {
+	if sub == nil {
+		return "", fmt.Errorf("sub-request is nil")
+	}
+	hash, err := sub.CacheHash()
+	if err != nil {
+		return "", err
+	}
+
+	useUpstream := ""
+	if parent != nil && parent.Directives() != nil {
+		useUpstream = parent.Directives().UseUpstream
+	}
+
+	return fmt.Sprintf(
+		"%s|%s|skipCacheRead=%t|payloadLimit=%d|useUpstream=%s|range=%d-%d|hash=%s",
+		getLogsSubRequestRegistryKey(n),
+		parent.Finality(ctx).String(),
+		skipCacheRead,
+		payloadLimit,
+		useUpstream,
+		sr.fromBlock,
+		sr.toBlock,
+		hash,
+	), nil
+}
+
+func serializeGetLogsSubRequestExecution(exec *getLogsSubRequestExecution) error {
+	if exec == nil || exec.jrr == nil || len(exec.serialized) > 0 {
+		return nil
+	}
+
+	var buf bytes.Buffer
+	if _, err := exec.jrr.WriteTo(&buf); err != nil {
+		return err
+	}
+	exec.serialized = append(exec.serialized[:0], buf.Bytes()...)
+	return nil
+}
+
+func deserializeGetLogsSubRequestExecution(ctx context.Context, serialized []byte, fromCache bool, cacheAt int64) (*getLogsSubRequestExecution, error) {
+	jrr := &common.JsonRpcResponse{}
+	if err := jrr.ParseFromBytes(ctx, serialized); err != nil {
+		return nil, err
+	}
+	return &getLogsSubRequestExecution{
+		jrr:       jrr,
+		holder:    nil,
+		fromCache: fromCache,
+		cacheAt:   cacheAt,
+	}, nil
+}
 
 // resolveBlockTagForGetLogs attempts to resolve a block tag (like "latest", "finalized")
 // to a hex block number string and its int64 value. If the value is already a hex number,
@@ -918,6 +1039,202 @@ func executeGetLogsSubRequests(ctx context.Context, n common.Network, r *common.
 	return executeGetLogsSubRequestsInternal(ctx, n, r, subRequests, skipCacheRead, concurrency, 0, nil)
 }
 
+func executeSingleGetLogsSubRequest(
+	ctx context.Context,
+	n common.Network,
+	r *common.NormalizedRequest,
+	req ethGetLogsSubRequest,
+	skipCacheRead bool,
+	concurrency int,
+	depth int,
+	semaphore chan struct{},
+	payloadLimit int64,
+	logger zerolog.Logger,
+	allowCoalesce bool,
+	releaseToken func(),
+) (*getLogsSubRequestExecution, error) {
+	const maxSplitDepth = 16
+
+	srq, err := BuildGetLogsRequest(req.fromBlock, req.toBlock, req.address, req.topics)
+	logger.Debug().
+		Object("request", srq).
+		Msg("executing eth_getLogs sub-request")
+	if err != nil {
+		return nil, err
+	}
+
+	sbnrq := common.NewNormalizedRequestFromJsonRpcRequest(srq)
+	dr := r.Directives().Clone()
+	dr.SkipCacheRead = skipCacheRead
+	sbnrq.SetDirectives(dr)
+	sbnrq.SetNetwork(n)
+	sbnrq.SetParentRequestId(r.ID())
+	sbnrq.CopyHttpContextFrom(r)
+
+	if allowCoalesce && shouldCoalesceGetLogsSubRequest(ctx, r) {
+		flightKey, ferr := buildGetLogsSubRequestFlightKey(ctx, n, r, sbnrq, req, skipCacheRead, payloadLimit)
+		if ferr == nil {
+			flightResult, flightErr, _ := getLogsSubRequestFlights.Do(flightKey, func() (interface{}, error) {
+				exec, execErr := executeSingleGetLogsSubRequest(ctx, n, r, req, skipCacheRead, concurrency, depth, semaphore, payloadLimit, logger, false, releaseToken)
+				if execErr != nil {
+					return nil, execErr
+				}
+				if serr := serializeGetLogsSubRequestExecution(exec); serr != nil {
+					if exec.holder != nil {
+						exec.holder.Release()
+					}
+					if exec.jrr != nil {
+						exec.jrr.Free()
+					}
+					return nil, serr
+				}
+				if exec.holder != nil {
+					exec.holder.Release()
+				}
+				if exec.jrr != nil {
+					exec.jrr.Free()
+				}
+				return &getLogsSubRequestExecution{
+					serialized: exec.serialized,
+					fromCache:  exec.fromCache,
+					cacheAt:    exec.cacheAt,
+				}, nil
+			})
+			if flightErr == nil {
+				shared := flightResult.(*getLogsSubRequestExecution)
+				return deserializeGetLogsSubRequestExecution(ctx, shared.serialized, shared.fromCache, shared.cacheAt)
+			}
+			return nil, flightErr
+		}
+		logger.Debug().Err(ferr).Msg("failed to build eth_getLogs coalescing key; continuing without coalescing")
+	}
+
+	subTimeout := 10 * time.Second
+	if dl, ok := ctx.Deadline(); ok {
+		rem := time.Until(dl)
+		if rem > 0 {
+			target := time.Duration(float64(rem) * 0.75)
+			if target > subTimeout {
+				subTimeout = target
+			}
+		}
+	}
+	if subTimeout < 3*time.Second {
+		subTimeout = 3 * time.Second
+	}
+	if subTimeout > 25*time.Second {
+		subTimeout = 25 * time.Second
+	}
+
+	subCtx, cancel := context.WithTimeout(ctx, subTimeout)
+	rs, re := n.Forward(subCtx, sbnrq)
+	cancel()
+	if re != nil {
+		if depth < maxSplitDepth && shouldSplitEthGetLogsOnError(re) {
+			subSubs := splitEthGetLogsSubRequest(req)
+			if len(subSubs) > 0 {
+				if releaseToken != nil {
+					releaseToken()
+				}
+				subJrr, subMeta, subErr := executeGetLogsSubRequestsInternal(ctx, n, r, subSubs, skipCacheRead, concurrency, depth+1, semaphore)
+				if subErr == nil {
+					exec := &getLogsSubRequestExecution{jrr: subJrr}
+					if subMeta != nil {
+						exec.fromCache = subMeta.allFromCache
+						exec.cacheAt = subMeta.oldestCacheAt
+					}
+					return exec, nil
+				}
+				re = subErr
+			} else if req.fromBlock == req.toBlock && shouldFallbackEthGetLogsToBlockReceipts(re) {
+				if releaseToken != nil {
+					releaseToken()
+				}
+				fjrr, ferr := fallbackEthGetLogsSingleBlockViaBlockReceipts(ctx, n, r, req.fromBlock, req.address, req.topics, payloadLimit, skipCacheRead, util.RandomID())
+				if ferr == nil && fjrr != nil {
+					return &getLogsSubRequestExecution{jrr: fjrr}, nil
+				}
+				logger.Warn().Err(ferr).AnErr("originalError", re).Int64("block", req.fromBlock).
+					Msg("eth_getLogs blockReceipts fallback failed after forward error")
+				re = ferr
+			}
+		}
+		return nil, fmt.Errorf("sub-request [%d-%d] forward failed: %w", req.fromBlock, req.toBlock, re)
+	}
+
+	jrr, err := rs.JsonRpcResponse(ctx)
+	if err != nil {
+		rs.Release()
+		return nil, err
+	}
+	if jrr == nil {
+		rs.Release()
+		return nil, fmt.Errorf("unexpected empty json-rpc response %v", rs)
+	}
+
+	if jrr.Error != nil {
+		if depth < maxSplitDepth && shouldSplitEthGetLogsOnError(jrr.Error) {
+			subSubs := splitEthGetLogsSubRequest(req)
+			if len(subSubs) > 0 {
+				rs.Release()
+				if releaseToken != nil {
+					releaseToken()
+				}
+				subJrr, subMeta, subErr := executeGetLogsSubRequestsInternal(ctx, n, r, subSubs, skipCacheRead, concurrency, depth+1, semaphore)
+				if subErr == nil {
+					exec := &getLogsSubRequestExecution{jrr: subJrr}
+					if subMeta != nil {
+						exec.fromCache = subMeta.allFromCache
+						exec.cacheAt = subMeta.oldestCacheAt
+					}
+					return exec, nil
+				}
+				return nil, subErr
+			}
+			if req.fromBlock == req.toBlock && shouldFallbackEthGetLogsToBlockReceipts(jrr.Error) {
+				rs.Release()
+				if releaseToken != nil {
+					releaseToken()
+				}
+				fjrr, ferr := fallbackEthGetLogsSingleBlockViaBlockReceipts(ctx, n, r, req.fromBlock, req.address, req.topics, payloadLimit, skipCacheRead, util.RandomID())
+				if ferr == nil && fjrr != nil {
+					return &getLogsSubRequestExecution{jrr: fjrr}, nil
+				}
+				logger.Warn().Err(ferr).Int64("block", req.fromBlock).
+					Str("originalError", jrr.Error.Error()).
+					Msg("eth_getLogs blockReceipts fallback failed after JSON-RPC error")
+				return nil, ferr
+			}
+		}
+		rs.Release()
+		return nil, jrr.Error
+	}
+
+	if payloadLimit > 0 {
+		filter := newGetLogsFilter(req.address, req.topics, payloadLimit)
+		dropped, ferr := filterGetLogsResponseByDataLimit(jrr, filter)
+		if ferr != nil {
+			rs.Release()
+			return nil, ferr
+		}
+		if dropped > 0 {
+			logger.Debug().
+				Int("droppedLogs", dropped).
+				Int64("maxSize", payloadLimit).
+				Int64("fromBlock", req.fromBlock).
+				Int64("toBlock", req.toBlock).
+				Msg("filtered oversized eth_getLogs payloads from sub-request")
+		}
+	}
+
+	return &getLogsSubRequestExecution{
+		jrr:       jrr,
+		holder:    rs,
+		fromCache: rs.FromCache(),
+		cacheAt:   rs.CacheStoredAtUnix(),
+	}, nil
+}
+
 func executeGetLogsSubRequestsInternal(ctx context.Context, n common.Network, r *common.NormalizedRequest, subRequests []ethGetLogsSubRequest, skipCacheRead bool, concurrency int, depth int, semaphore chan struct{}) (*common.JsonRpcResponse, *getLogsMergeMeta, error) {
 	logger := n.Logger().With().Str("method", "eth_getLogs").Interface("id", r.ID()).Logger()
 	payloadLimit, err := extractGetLogsPayloadLimitFromRequest(ctx, r)
@@ -937,15 +1254,9 @@ func executeGetLogsSubRequestsInternal(ctx context.Context, n common.Network, r 
 	// Concurrency is passed by caller (cache chunking vs split-on-error differ).
 	// Use a shared semaphore across recursive splits to bound total in-flight sub-requests.
 	if semaphore == nil {
-		if concurrency <= 0 {
-			concurrency = 10
-		}
-		semaphore = make(chan struct{}, concurrency)
+		semaphore = getLogsSharedSubRequestSemaphore(n, concurrency)
 	}
 	loopCtxErr := error(nil)
-	// maxSplitDepth bounds recursive binary splitting to prevent runaway recursion.
-	// Depth 16 allows up to 2^16 sub-requests, generous for real-world block ranges.
-	const maxSplitDepth = 16
 loop:
 	for idx, sr := range subRequests {
 		wg.Add(1)
@@ -990,192 +1301,24 @@ loop:
 				}
 			}
 
-			srq, err := BuildGetLogsRequest(req.fromBlock, req.toBlock, req.address, req.topics)
-			logger.Debug().
-				Object("request", srq).
-				Msg("executing eth_getLogs sub-request")
-
-			if err != nil {
+			exec, execErr := executeSingleGetLogsSubRequest(ctx, n, r, req, skipCacheRead, concurrency, depth, semaphore, payloadLimit, logger, true, releaseToken)
+			if execErr != nil {
 				mu.Lock()
 				incSplitFailure()
-				errs = append(errs, err)
+				errs = append(errs, execErr)
 				mu.Unlock()
 				return
 			}
 
-			sbnrq := common.NewNormalizedRequestFromJsonRpcRequest(srq)
-			dr := r.Directives().Clone()
-			dr.SkipCacheRead = skipCacheRead
-			// TODO dr.UseUpstream = u.Config().Id should we force this (or opposite of it)?
-			sbnrq.SetDirectives(dr)
-			sbnrq.SetNetwork(n)
-			sbnrq.SetParentRequestId(r.ID())
-
-			// Copy HTTP context (headers, query parameters, user) for proper metrics tracking
-			sbnrq.CopyHttpContextFrom(r)
-
-			// Bound per-sub-request wall time so slow upstream getLogs calls trigger split-and-retry
-			// rather than letting the top-level client timeout.
-			subTimeout := 10 * time.Second
-			if dl, ok := ctx.Deadline(); ok {
-				rem := time.Until(dl)
-				// Prefer to use most of the remaining request budget (bounded), so slow but
-				// legitimate getLogs calls can still succeed under load.
-				if rem > 0 {
-					target := time.Duration(float64(rem) * 0.75)
-					if target > subTimeout {
-						subTimeout = target
-					}
-				}
-			}
-			if subTimeout < 3*time.Second {
-				subTimeout = 3 * time.Second
-			}
-			if subTimeout > 25*time.Second {
-				subTimeout = 25 * time.Second
-			}
-			subCtx, cancel := context.WithTimeout(ctx, subTimeout)
-			rs, re := n.Forward(subCtx, sbnrq)
-			cancel()
-			if re != nil {
-				// If a sub-request timed out or was too large, try splitting it further.
-				// This prevents a single slow/huge chunk from failing the entire merge.
-				if depth < maxSplitDepth && shouldSplitEthGetLogsOnError(re) {
-					subSubs := splitEthGetLogsSubRequest(req)
-					if len(subSubs) > 0 {
-						// Release token before recursing to avoid deadlocks with shared semaphore.
-						releaseToken()
-						subJrr, subMeta, subErr := executeGetLogsSubRequestsInternal(ctx, n, r, subSubs, skipCacheRead, concurrency, depth+1, semaphore)
-						if subErr == nil {
-							responses[i] = subJrr
-							holders[i] = nil
-							applySubMeta(subMeta)
-							return
-						}
-						re = subErr
-					} else if req.fromBlock == req.toBlock && shouldFallbackEthGetLogsToBlockReceipts(re) {
-						releaseToken()
-						fjrr, ferr := fallbackEthGetLogsSingleBlockViaBlockReceipts(ctx, n, r, req.fromBlock, req.address, req.topics, payloadLimit, skipCacheRead, util.RandomID())
-						if ferr == nil && fjrr != nil {
-							responses[i] = fjrr
-							holders[i] = nil
-							fromCacheFlags[i] = false
-							cacheAts[i] = 0
-							incSplitSuccess()
-							return
-						}
-						logger.Warn().Err(ferr).AnErr("originalError", re).Int64("block", req.fromBlock).
-							Msg("eth_getLogs blockReceipts fallback failed after forward error")
-						re = ferr
-					}
-				}
-				mu.Lock()
-				incSplitFailure()
-				errs = append(errs, fmt.Errorf("sub-request [%d-%d] forward failed: %w", req.fromBlock, req.toBlock, re))
-				mu.Unlock()
-				return
-			}
-
-			jrr, err := rs.JsonRpcResponse(ctx)
-			if err != nil {
-				mu.Lock()
-				incSplitFailure()
-				errs = append(errs, err)
-				mu.Unlock()
-				rs.Release()
-				return
-			}
-
-			if jrr == nil {
-				mu.Lock()
-				incSplitFailure()
-				errs = append(errs, fmt.Errorf("unexpected empty json-rpc response %v", rs))
-				mu.Unlock()
-				rs.Release()
-				return
-			}
-
-			if jrr.Error != nil {
-				// If the upstream returned a split-worthy JSON-RPC error, try splitting and retrying.
-				if depth < maxSplitDepth && shouldSplitEthGetLogsOnError(jrr.Error) {
-					subSubs := splitEthGetLogsSubRequest(req)
-					if len(subSubs) > 0 {
-						rs.Release() // no longer needed; we'll return a merged sub-response
-						releaseToken()
-						subJrr, subMeta, subErr := executeGetLogsSubRequestsInternal(ctx, n, r, subSubs, skipCacheRead, concurrency, depth+1, semaphore)
-						if subErr == nil {
-							responses[i] = subJrr
-							holders[i] = nil
-							applySubMeta(subMeta)
-							return
-						}
-						// If split execution failed, record the split failure and stop.
-						mu.Lock()
-						incSplitFailure()
-						errs = append(errs, subErr)
-						mu.Unlock()
-						return
-					}
-					if req.fromBlock == req.toBlock && shouldFallbackEthGetLogsToBlockReceipts(jrr.Error) {
-						// Release the failing response; we will compute logs via receipts.
-						rs.Release()
-						releaseToken()
-						fjrr, ferr := fallbackEthGetLogsSingleBlockViaBlockReceipts(ctx, n, r, req.fromBlock, req.address, req.topics, payloadLimit, skipCacheRead, util.RandomID())
-						if ferr == nil && fjrr != nil {
-							responses[i] = fjrr
-							holders[i] = nil
-							fromCacheFlags[i] = false
-							cacheAts[i] = 0
-							incSplitSuccess()
-							return
-						}
-						logger.Warn().Err(ferr).Int64("block", req.fromBlock).
-							Str("originalError", jrr.Error.Error()).
-							Msg("eth_getLogs blockReceipts fallback failed after JSON-RPC error")
-						mu.Lock()
-						incSplitFailure()
-						errs = append(errs, ferr)
-						mu.Unlock()
-						return
-					}
-				}
-				mu.Lock()
-				incSplitFailure()
-				errs = append(errs, jrr.Error)
-				mu.Unlock()
-				rs.Release()
-				return
-			}
-
-			if payloadLimit > 0 {
-				filter := newGetLogsFilter(req.address, req.topics, payloadLimit)
-				dropped, err := filterGetLogsResponseByDataLimit(jrr, filter)
-				if err != nil {
-					mu.Lock()
-					incSplitFailure()
-					errs = append(errs, err)
-					mu.Unlock()
-					rs.Release()
-					return
-				}
-				if dropped > 0 {
-					logger.Debug().
-						Int("droppedLogs", dropped).
-						Int64("maxSize", payloadLimit).
-						Int64("fromBlock", req.fromBlock).
-						Int64("toBlock", req.toBlock).
-						Msg("filtered oversized eth_getLogs payloads from sub-request")
-				}
-			}
-
+			applySubMeta(&getLogsMergeMeta{
+				allFromCache:  exec.fromCache,
+				oldestCacheAt: exec.cacheAt,
+			})
 			incSplitSuccess()
-			// Avoid deep clone amplification: JsonRpcResponse already copies parsed fields
-			// out of the pooled parse buffer. Keep the sub-response alive until the merged
-			// response is released, then free it via GetLogsMultiResponseWriter.Release.
-			responses[i] = jrr
-			holders[i] = rs
-			fromCacheFlags[i] = rs.FromCache()
-			cacheAts[i] = rs.CacheStoredAtUnix()
+			responses[i] = exec.jrr
+			holders[i] = exec.holder
+			fromCacheFlags[i] = exec.fromCache
+			cacheAts[i] = exec.cacheAt
 		}(sr, idx)
 	}
 	wg.Wait()

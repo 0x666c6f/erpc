@@ -53,7 +53,24 @@ const (
 	cacheEnvelopeMagic   = "ERPC"
 	cacheEnvelopeVersion = byte(1)
 	cacheEnvelopeHeader  = 4 + 1 + 8
+
+	largeFinalizedGetLogsEnvelopeBypassBytes = 1 << 20
+	largeFinalizedGetLogsPostgresSkipBytes   = 4 << 20
 )
+
+func isLargeFinalizedGetLogsPayload(method string, finality common.DataFinalityState, resultSize int) bool {
+	return method == "eth_getLogs" &&
+		finality == common.DataFinalityStateFinalized &&
+		resultSize >= largeFinalizedGetLogsEnvelopeBypassBytes
+}
+
+func shouldSkipOversizedFinalizedGetLogsPostgresWrite(method string, finality common.DataFinalityState, resultSize int, connector data.Connector) bool {
+	if !isLargeFinalizedGetLogsPayload(method, finality, resultSize) || resultSize < largeFinalizedGetLogsPostgresSkipBytes {
+		return false
+	}
+	_, ok := connector.(*data.PostgreSQLConnector)
+	return ok
+}
 
 func NewEvmJsonRpcCache(ctx context.Context, logger *zerolog.Logger, cfg *common.CacheConfig) (*EvmJsonRpcCache, error) {
 	logger.Info().Msg("initializing evm json rpc cache...")
@@ -619,6 +636,23 @@ func (c *EvmJsonRpcCache) Set(ctx context.Context, req *common.NormalizedRequest
 			// Compress the value before storing if compression is enabled
 			valueToStore := rpcResp.GetResultBytes()
 			cachedCategory := rpcReq.Method
+			largeFinalizedGetLogs := isLargeFinalizedGetLogsPayload(rpcReq.Method, finState, len(valueToStore))
+			if shouldSkipOversizedFinalizedGetLogsPostgresWrite(rpcReq.Method, finState, len(valueToStore), connector) {
+				lg.Debug().
+					Str("connector", connector.Id()).
+					Int("resultBytes", len(valueToStore)).
+					Msg("skipping oversized finalized eth_getLogs Postgres cache write")
+				telemetry.MetricCacheSetSkippedTotal.WithLabelValues(
+					c.projectId,
+					req.NetworkLabel(),
+					rpcReq.Method,
+					connector.Id(),
+					policy.String(),
+					ttl.String(),
+					req.UserId(),
+				).Inc()
+				return
+			}
 			telemetry.MetricCacheSetOriginalBytes.WithLabelValues(
 				c.projectId,
 				req.NetworkLabel(),
@@ -630,7 +664,7 @@ func (c *EvmJsonRpcCache) Set(ctx context.Context, req *common.NormalizedRequest
 			).Add(float64(len(valueToStore)))
 
 			storedValue := valueToStore
-			if c.envelopeEnabled {
+			if c.envelopeEnabled && !largeFinalizedGetLogs {
 				var wrapped bool
 				storedValue, wrapped = wrapCacheEnvelope(valueToStore)
 				if !wrapped {
@@ -650,6 +684,10 @@ func (c *EvmJsonRpcCache) Set(ctx context.Context, req *common.NormalizedRequest
 						req.UserId(),
 					).Inc()
 				}
+			} else if c.envelopeEnabled && largeFinalizedGetLogs {
+				lg.Debug().
+					Int("resultBytes", len(valueToStore)).
+					Msg("bypassing cache envelope for oversized finalized eth_getLogs payload")
 			}
 			if c.compressionEnabled && len(storedValue) >= c.compressionThreshold {
 				compressedValue, isCompressed := c.compressValueBytes(storedValue)

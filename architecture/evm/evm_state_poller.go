@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"runtime/debug"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/erpc/erpc/common"
@@ -85,7 +86,11 @@ type EvmStatePoller struct {
 	stateMu sync.RWMutex
 
 	// Track if updates are in progress to avoid goroutine pile-up
-	finalizedUpdateInProgress sync.Mutex
+	finalizedUpdateInProgress    sync.Mutex
+	latestPollTriggerInFlight    atomic.Bool
+	finalizedPollTriggerInFlight atomic.Bool
+	latestPollAsyncFn            func(context.Context) (int64, error)
+	finalizedPollAsyncFn         func(context.Context) (int64, error)
 
 	// Earliest per probe tracking
 	earliestByProbe              map[common.EvmAvailabilityProbeType]data.CounterInt64SharedVariable
@@ -473,6 +478,88 @@ func (e *EvmStatePoller) SuggestLatestBlock(blockNumber int64) {
 
 func (e *EvmStatePoller) LatestBlock() int64 {
 	return e.latestBlockShared.GetValue()
+}
+
+func (e *EvmStatePoller) pollLatestForAsyncTrigger(ctx context.Context) (int64, error) {
+	if e.latestPollAsyncFn != nil {
+		return e.latestPollAsyncFn(ctx)
+	}
+	return e.PollLatestBlockNumber(ctx)
+}
+
+func (e *EvmStatePoller) pollFinalizedForAsyncTrigger(ctx context.Context) (int64, error) {
+	if e.finalizedPollAsyncFn != nil {
+		return e.finalizedPollAsyncFn(ctx)
+	}
+	return e.PollFinalizedBlockNumber(ctx)
+}
+
+func (e *EvmStatePoller) TriggerLatestPollAsync(timeout time.Duration) bool {
+	if e == nil {
+		return false
+	}
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
+	if !e.latestPollTriggerInFlight.CompareAndSwap(false, true) {
+		return false
+	}
+	go func() {
+		defer e.latestPollTriggerInFlight.Store(false)
+		ctx, cancel := context.WithTimeout(e.appCtx, timeout)
+		defer cancel()
+		_, _ = e.pollLatestForAsyncTrigger(ctx)
+	}()
+	return true
+}
+
+func (e *EvmStatePoller) TriggerFinalizedPollAsync(timeout time.Duration) bool {
+	if e == nil {
+		return false
+	}
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
+	if !e.finalizedPollTriggerInFlight.CompareAndSwap(false, true) {
+		return false
+	}
+	go func() {
+		defer e.finalizedPollTriggerInFlight.Store(false)
+		ctx, cancel := context.WithTimeout(e.appCtx, timeout)
+		defer cancel()
+		_, _ = e.pollFinalizedForAsyncTrigger(ctx)
+	}()
+	return true
+}
+
+func TriggerLatestPollAsync(sp common.EvmStatePoller, timeout time.Duration) bool {
+	if sp == nil || sp.IsObjectNull() {
+		return false
+	}
+	if triggerable, ok := sp.(interface{ TriggerLatestPollAsync(time.Duration) bool }); ok {
+		return triggerable.TriggerLatestPollAsync(timeout)
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+		_, _ = sp.PollLatestBlockNumber(ctx)
+	}()
+	return true
+}
+
+func TriggerFinalizedPollAsync(sp common.EvmStatePoller, timeout time.Duration) bool {
+	if sp == nil || sp.IsObjectNull() {
+		return false
+	}
+	if triggerable, ok := sp.(interface{ TriggerFinalizedPollAsync(time.Duration) bool }); ok {
+		return triggerable.TriggerFinalizedPollAsync(timeout)
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+		_, _ = sp.PollFinalizedBlockNumber(ctx)
+	}()
+	return true
 }
 
 func (e *EvmStatePoller) PollFinalizedBlockNumber(ctx context.Context) (int64, error) {
