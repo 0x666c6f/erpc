@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -18,6 +19,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sync/singleflight"
 )
 
 func init() {
@@ -52,8 +54,13 @@ func (m *mockNetwork) Label() string {
 }
 
 func (m *mockNetwork) Id() string {
-	args := m.Called()
-	return args.Get(0).(string)
+	for _, c := range m.ExpectedCalls {
+		if c.Method == "Id" {
+			args := m.Called()
+			return args.Get(0).(string)
+		}
+	}
+	return "evm:test"
 }
 
 func (m *mockNetwork) Forward(
@@ -61,19 +68,25 @@ func (m *mockNetwork) Forward(
 	req *common.NormalizedRequest,
 ) (*common.NormalizedResponse, error) {
 	args := m.Called(ctx, req)
-	// Retrieve arguments from the mock and return them
-	respFn, eFn := args.Get(0).(func(ctx context.Context, r *common.NormalizedRequest) (*common.NormalizedResponse, error))
-	if respFn != nil {
-		resp, err := respFn(ctx, req)
+	switch fn := args.Get(0).(type) {
+	case func(context.Context, *common.NormalizedRequest) (*common.NormalizedResponse, error):
+		resp, err := fn(ctx, req)
 		if resp == nil && err == nil {
-			panic("Forward() returned nil for both resp and error eFn: " + fmt.Sprintf("%T", eFn))
+			panic("Forward() returned nil for both resp and error eFn: " + fmt.Sprintf("%T", args.Get(1)))
+		}
+		return resp, err
+	case func(context.Context, *common.NormalizedRequest) *common.NormalizedResponse:
+		resp := fn(ctx, req)
+		err, _ := args.Get(1).(error)
+		if resp == nil && err == nil {
+			panic("Forward() returned nil for both resp and error eFn: " + fmt.Sprintf("%T", args.Get(1)))
 		}
 		return resp, err
 	}
 	respRaw, eRs := args.Get(0).(*common.NormalizedResponse)
 	err, eEr := args.Get(1).(error)
 	if respRaw == nil && err == nil {
-		panic("Forward() returned nil for both resp and error eFn: " + fmt.Sprintf("%T", eFn) + " eRs: " + fmt.Sprintf("%T", eRs) + " eEr: " + fmt.Sprintf("%T", eEr))
+		panic("Forward() returned nil for both resp and error eFn: " + fmt.Sprintf("%T", args.Get(0)) + " eRs: " + fmt.Sprintf("%T", eRs) + " eEr: " + fmt.Sprintf("%T", eEr))
 	}
 	return respRaw, err
 }
@@ -90,6 +103,18 @@ func (m *mockNetwork) ProjectId() string {
 
 func (m *mockNetwork) Logger() *zerolog.Logger {
 	return &log.Logger
+}
+
+func (m *mockNetwork) GetFinality(ctx context.Context, req *common.NormalizedRequest, resp *common.NormalizedResponse) common.DataFinalityState {
+	for _, c := range m.ExpectedCalls {
+		if c.Method == "GetFinality" {
+			args := m.Called(ctx, req, resp)
+			if finality, ok := args.Get(0).(common.DataFinalityState); ok {
+				return finality
+			}
+		}
+	}
+	return common.DataFinalityStateUnknown
 }
 
 func (m *mockNetwork) EvmStatePoller() common.EvmStatePoller {
@@ -1035,6 +1060,238 @@ func TestGetLogsFromBlockReceiptsWriter_IsResultEmptyish_InvalidResultIsNotEmpty
 	w := newGetLogsFromBlockReceiptsWriter(nil, jrr, newGetLogsFilter(nil, nil, 0))
 
 	assert.False(t, w.IsResultEmptyish())
+}
+
+func resetGetLogsSharedExecutionState() {
+	getLogsSubRequestSemaphores = sync.Map{}
+	getLogsSubRequestFlights = singleflight.Group{}
+}
+
+func TestExecuteGetLogsSubRequests_GlobalSemaphoreSharedAcrossCalls(t *testing.T) {
+	resetGetLogsSharedExecutionState()
+
+	n := new(mockNetwork)
+	n.On("Id").Return("evm:1").Maybe()
+	n.On("ProjectId").Return("prj").Maybe()
+	n.On("Config").Return(&common.NetworkConfig{Evm: &common.EvmNetworkConfig{GetLogsSplitConcurrency: 1}}).Maybe()
+
+	var inFlight atomic.Int32
+	var maxInFlight atomic.Int32
+	var callCount atomic.Int32
+	entered := make(chan struct{}, 2)
+	release := make(chan struct{})
+
+	n.On("Forward", mock.Anything, mock.Anything).Return(
+		func(ctx context.Context, r *common.NormalizedRequest) *common.NormalizedResponse {
+			callCount.Add(1)
+			current := inFlight.Add(1)
+			for {
+				prev := maxInFlight.Load()
+				if current <= prev || maxInFlight.CompareAndSwap(prev, current) {
+					break
+				}
+			}
+			entered <- struct{}{}
+			<-release
+			inFlight.Add(-1)
+			return common.NewNormalizedResponse().
+				WithRequest(r).
+				WithJsonRpcResponse(common.MustNewJsonRpcResponseFromBytes([]byte(`1`), []byte(`[]`), nil))
+		},
+		nil,
+	).Twice()
+
+	req1 := createTestRequest(map[string]interface{}{"fromBlock": "0x1", "toBlock": "0x1"})
+	req1.SetNetwork(n)
+	req2 := createTestRequest(map[string]interface{}{"fromBlock": "0x1", "toBlock": "0x1"})
+	req2.SetNetwork(n)
+
+	errCh1 := make(chan error, 1)
+	errCh2 := make(chan error, 1)
+
+	go func() {
+		_, _, err := executeGetLogsSubRequests(context.Background(), n, req1, []ethGetLogsSubRequest{{fromBlock: 1, toBlock: 1}}, false, 1)
+		errCh1 <- err
+	}()
+
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("first eth_getLogs sub-request did not start")
+	}
+
+	go func() {
+		_, _, err := executeGetLogsSubRequests(context.Background(), n, req2, []ethGetLogsSubRequest{{fromBlock: 1, toBlock: 1}}, false, 1)
+		errCh2 <- err
+	}()
+
+	select {
+	case <-entered:
+		t.Fatal("second eth_getLogs sub-request bypassed shared semaphore")
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	release <- struct{}{}
+
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("second eth_getLogs sub-request never acquired shared semaphore")
+	}
+
+	release <- struct{}{}
+
+	require.NoError(t, <-errCh1)
+	require.NoError(t, <-errCh2)
+	assert.Equal(t, int32(1), maxInFlight.Load())
+	assert.Equal(t, int32(2), callCount.Load())
+	n.AssertExpectations(t)
+}
+
+func TestExecuteGetLogsSubRequests_CoalescesFinalizedIdenticalSubRangesAcrossCalls(t *testing.T) {
+	resetGetLogsSharedExecutionState()
+
+	n := new(mockNetwork)
+	n.On("Id").Return("evm:1").Maybe()
+	n.On("ProjectId").Return("prj").Maybe()
+	n.On("Config").Return(&common.NetworkConfig{Evm: &common.EvmNetworkConfig{GetLogsSplitConcurrency: 4}}).Maybe()
+	n.On("GetFinality", mock.Anything, mock.Anything, mock.Anything).Return(common.DataFinalityStateFinalized).Maybe()
+
+	var callCount atomic.Int32
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+
+	n.On("Forward", mock.Anything, mock.Anything).Return(
+		func(ctx context.Context, r *common.NormalizedRequest) *common.NormalizedResponse {
+			callCount.Add(1)
+			entered <- struct{}{}
+			<-release
+			return common.NewNormalizedResponse().
+				WithRequest(r).
+				WithJsonRpcResponse(common.MustNewJsonRpcResponseFromBytes([]byte(`1`), []byte(`[{"blockNumber":"0x1"}]`), nil))
+		},
+		nil,
+	).Once()
+
+	req1 := createTestRequest(map[string]interface{}{"fromBlock": "0x1", "toBlock": "0x1"})
+	req1.SetNetwork(n)
+	req2 := createTestRequest(map[string]interface{}{"fromBlock": "0x1", "toBlock": "0x1"})
+	req2.SetNetwork(n)
+
+	type result struct {
+		resp *common.JsonRpcResponse
+		err  error
+	}
+	results := make(chan result, 2)
+
+	run := func(req *common.NormalizedRequest) {
+		resp, _, err := executeGetLogsSubRequests(context.Background(), n, req, []ethGetLogsSubRequest{{fromBlock: 1, toBlock: 1}}, false, 4)
+		results <- result{resp: resp, err: err}
+	}
+
+	go run(req1)
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("leader eth_getLogs sub-request did not start")
+	}
+
+	go run(req2)
+	time.Sleep(100 * time.Millisecond)
+	assert.Equal(t, int32(1), callCount.Load(), "duplicate sub-range should coalesce while first request is in flight")
+
+	close(release)
+
+	for range 2 {
+		res := <-results
+		require.NoError(t, res.err)
+		require.NotNil(t, res.resp)
+	}
+	assert.Equal(t, int32(1), callCount.Load())
+	n.AssertExpectations(t)
+}
+
+func TestExecuteGetLogsSubRequests_CoalescedWaitersRespectOwnContexts(t *testing.T) {
+	resetGetLogsSharedExecutionState()
+
+	n := new(mockNetwork)
+	n.On("Id").Return("evm:1").Maybe()
+	n.On("ProjectId").Return("prj").Maybe()
+	n.On("Config").Return(&common.NetworkConfig{Evm: &common.EvmNetworkConfig{GetLogsSplitConcurrency: 4}}).Maybe()
+	n.On("GetFinality", mock.Anything, mock.Anything, mock.Anything).Return(common.DataFinalityStateFinalized).Maybe()
+
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	n.On("Forward", mock.Anything, mock.Anything).Return(
+		func(ctx context.Context, r *common.NormalizedRequest) *common.NormalizedResponse {
+			started <- struct{}{}
+			<-release
+			return common.NewNormalizedResponse().
+				WithRequest(r).
+				WithJsonRpcResponse(common.MustNewJsonRpcResponseFromBytes([]byte(`1`), []byte(`[{"blockNumber":"0x1"}]`), nil))
+		},
+		nil,
+	).Once()
+
+	req1 := createTestRequest(map[string]interface{}{"fromBlock": "0x1", "toBlock": "0x1"})
+	req1.SetNetwork(n)
+	req2 := createTestRequest(map[string]interface{}{"fromBlock": "0x1", "toBlock": "0x1"})
+	req2.SetNetwork(n)
+
+	type result struct {
+		resp *common.JsonRpcResponse
+		err  error
+	}
+	shortCtx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancel()
+	resCh := make(chan result, 2)
+
+	go func() {
+		resp, _, err := executeGetLogsSubRequests(shortCtx, n, req1, []ethGetLogsSubRequest{{fromBlock: 1, toBlock: 1}}, false, 4)
+		resCh <- result{resp: resp, err: err}
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("leader eth_getLogs sub-request did not start")
+	}
+
+	go func() {
+		resp, _, err := executeGetLogsSubRequests(context.Background(), n, req2, []ethGetLogsSubRequest{{fromBlock: 1, toBlock: 1}}, false, 4)
+		resCh <- result{resp: resp, err: err}
+	}()
+
+	time.Sleep(75 * time.Millisecond)
+	close(release)
+
+	first := <-resCh
+	second := <-resCh
+	if first.err == nil {
+		first, second = second, first
+	}
+	require.Error(t, first.err)
+	assert.ErrorIs(t, first.err, context.DeadlineExceeded)
+	require.NoError(t, second.err)
+	require.NotNil(t, second.resp)
+	n.AssertExpectations(t)
+}
+
+func TestShouldCoalesceGetLogsSubRequest(t *testing.T) {
+	n := new(mockNetwork)
+	n.On("GetFinality", mock.Anything, mock.Anything, mock.Anything).Return(common.DataFinalityStateFinalized).Maybe()
+	req := createTestRequest(map[string]interface{}{"fromBlock": "0x1", "toBlock": "0x1"})
+	req.SetNetwork(n)
+
+	assert.True(t, shouldCoalesceGetLogsSubRequest(context.Background(), req))
+
+	req.SetDirectives(&common.RequestDirectives{UseUpstream: "rpc1"})
+	assert.False(t, shouldCoalesceGetLogsSubRequest(context.Background(), req))
+
+	n2 := new(mockNetwork)
+	n2.On("GetFinality", mock.Anything, mock.Anything, mock.Anything).Return(common.DataFinalityStateUnfinalized).Maybe()
+	req2 := createTestRequest(map[string]interface{}{"fromBlock": "0x1", "toBlock": "0x1"})
+	req2.SetNetwork(n2)
+	assert.False(t, shouldCoalesceGetLogsSubRequest(context.Background(), req2))
 }
 
 func TestGetLogsFromBlockReceiptsWriter_FiltersOversizedPayloads(t *testing.T) {

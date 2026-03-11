@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"runtime"
 	"runtime/debug"
 	"slices"
 	"strings"
@@ -32,6 +33,14 @@ const (
 	networkPostCompletionCoalescingWindow = 40 * time.Millisecond
 	networkDeterministicNegativeCacheTTL  = 200 * time.Millisecond
 	networkFailsafeTimeoutSlack           = 30 * time.Millisecond
+)
+
+type networkMethodClass string
+
+const (
+	networkMethodClassDefault networkMethodClass = "default"
+	networkMethodClassEthCall networkMethodClass = "eth_call"
+	networkMethodClassGetLogs networkMethodClass = "eth_getLogs"
 )
 
 type FailsafeExecutor struct {
@@ -79,6 +88,100 @@ func (n *Network) observeCacheWriteQueueDepth(sem chan struct{}) {
 	).Set(float64(len(sem)))
 }
 
+func classifyNetworkMethodClass(method string) networkMethodClass {
+	switch method {
+	case "eth_getLogs":
+		return networkMethodClassGetLogs
+	case "eth_call":
+		return networkMethodClassEthCall
+	default:
+		return networkMethodClassDefault
+	}
+}
+
+func deriveGetLogsNetworkBudget(cfg *common.NetworkConfig) int {
+	budget := 4
+	if cfg != nil && cfg.Evm != nil {
+		budget = max(budget, cfg.Evm.GetLogsSplitConcurrency)
+		budget = max(budget, cfg.Evm.GetLogsCacheChunkConcurrency)
+	}
+	return max(1, budget)
+}
+
+func deriveMethodClassBudgets(cfg *common.NetworkConfig) map[networkMethodClass]chan struct{} {
+	cpuBudget := max(1, runtime.GOMAXPROCS(0))
+	getLogsBudget := max(
+		max(16, cpuBudget*4),
+		deriveGetLogsNetworkBudget(cfg)*4,
+	)
+	ethCallBudget := max(8, cpuBudget*4)
+	defaultBudget := max(16, cpuBudget*8)
+
+	return map[networkMethodClass]chan struct{}{
+		networkMethodClassGetLogs: make(chan struct{}, getLogsBudget),
+		networkMethodClassEthCall: make(chan struct{}, ethCallBudget),
+		networkMethodClassDefault: make(chan struct{}, defaultBudget),
+	}
+}
+
+func deriveGetLogsCacheWriteBudget(cfg *common.NetworkConfig) int {
+	return min(maxConcurrentNetworkCacheWrites, max(2, deriveGetLogsNetworkBudget(cfg)))
+}
+
+func (n *Network) getMethodClassSem(method string) chan struct{} {
+	if n == nil || n.methodClassSems == nil {
+		return nil
+	}
+	return n.methodClassSems[classifyNetworkMethodClass(method)]
+}
+
+func (n *Network) getCacheReadSem(method string) chan struct{} {
+	if n == nil || method != "eth_getLogs" {
+		return nil
+	}
+	return n.getLogsCacheReadSem
+}
+
+func (n *Network) getAsyncCacheWriteSem(method string) chan struct{} {
+	if n == nil {
+		return nil
+	}
+	if method == "eth_getLogs" && n.getLogsCacheWriteSem != nil {
+		return n.getLogsCacheWriteSem
+	}
+	return n.getCacheWriteSem()
+}
+
+func acquireBoundedPermit(ctx context.Context, sem chan struct{}) error {
+	if sem == nil {
+		return nil
+	}
+	select {
+	case sem <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		cause := context.Cause(ctx)
+		if cause != nil {
+			return cause
+		}
+		return ctx.Err()
+	}
+}
+
+func releaseBoundedPermit(sem chan struct{}) {
+	if sem == nil {
+		return
+	}
+	select {
+	case <-sem:
+	default:
+	}
+}
+
+func shouldForceCacheMaterialization(method string) bool {
+	return method != "eth_getLogs"
+}
+
 func classifyAttemptReason(consensusEnabled bool, retries, hedges int) string {
 	switch {
 	case consensusEnabled:
@@ -118,6 +221,9 @@ type Network struct {
 	getSortedUpstreamsFn     getSortedUpstreamsForNetworkFn
 	cacheWriteSem            chan struct{}
 	cacheWriteSemInit        sync.Once
+	methodClassSems          map[networkMethodClass]chan struct{}
+	getLogsCacheReadSem      chan struct{}
+	getLogsCacheWriteSem     chan struct{}
 	negativeResultCache      *sync.Map
 	postCompletionResults    *sync.Map
 }
@@ -474,9 +580,34 @@ func (n *Network) Forward(ctx context.Context, req *common.NormalizedRequest) (*
 		defer n.cleanupMultiplexer(mlx)
 	}
 
+	methodClassSem := n.getMethodClassSem(method)
+	if err := acquireBoundedPermit(ctx, methodClassSem); err != nil {
+		if mlx != nil {
+			mlx.Close(ctx, nil, err)
+		}
+		return nil, err
+	}
+	releaseMethodClassPermitWithReturn := true
+	releaseMethodClassPermit := func() {
+		releaseBoundedPermit(methodClassSem)
+	}
+	defer func() {
+		if releaseMethodClassPermitWithReturn {
+			releaseMethodClassPermit()
+		}
+	}()
+
 	if n.cacheDal != nil && !req.SkipCacheRead() {
+		cacheReadSem := n.getCacheReadSem(method)
+		if err := acquireBoundedPermit(ctx, cacheReadSem); err != nil {
+			if mlx != nil {
+				mlx.Close(ctx, nil, err)
+			}
+			return nil, err
+		}
 		lg.Debug().Msgf("checking cache for request")
 		resp, err := n.cacheDal.Get(ctx, req)
+		releaseBoundedPermit(cacheReadSem)
 		if err != nil {
 			lg.Debug().Err(err).Msgf("could not find response in cache")
 		} else if resp != nil && !resp.IsObjectNull(ctx) {
@@ -1011,11 +1142,13 @@ func (n *Network) Forward(ctx context.Context, req *common.NormalizedRequest) (*
 	case <-ctx.Done():
 		// Forward is still running in background; drain its outcome to avoid
 		// leaking a completed response when cancellation wins this select race.
+		releaseMethodClassPermitWithReturn = false
 		go func() {
 			out := <-execDone
 			if out.resp != nil {
 				out.resp.Release()
 			}
+			releaseMethodClassPermit()
 		}()
 		cause := context.Cause(ctx)
 		if cause == nil {
@@ -1071,13 +1204,17 @@ func (n *Network) Forward(ctx context.Context, req *common.NormalizedRequest) (*
 
 	if resp != nil {
 		if n.cacheDal != nil {
-			sem := n.getCacheWriteSem()
+			sem := n.getAsyncCacheWriteSem(method)
 			select {
 			case sem <- struct{}{}:
 				n.observeCacheWriteQueueDepth(sem)
-				// Force-materialize jrr so the goroutine reads only via atomic pointer (no locks needed).
-				// TODO For other architectures we might need a different approach
-				_, _ = resp.JsonRpcResponse(ctx)
+				if shouldForceCacheMaterialization(method) {
+					// Force-materialize non-getLogs responses now so the async cache writer
+					// reads stable parsed data; skip getLogs to avoid blocking the response path.
+					if _, err := resp.JsonRpcResponse(ctx); err != nil {
+						lg.Warn().Err(err).Msg("could not materialize response before async cache-set")
+					}
+				}
 				resp.AddRef()
 
 				go (func(resp *common.NormalizedResponse, forwardSpan trace.Span) {
@@ -1449,11 +1586,7 @@ func (n *Network) handleBlockSkip(
 	if isRetryable {
 		if eu, ok := u.(common.EvmUpstream); ok {
 			if sp := eu.EvmStatePoller(); sp != nil && !sp.IsObjectNull() {
-				go func() {
-					pollCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-					defer cancel()
-					_, _ = sp.PollLatestBlockNumber(pollCtx)
-				}()
+				evm.TriggerLatestPollAsync(sp, 10*time.Second)
 			}
 		}
 	}
