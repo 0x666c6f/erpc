@@ -2,6 +2,7 @@ package erpc
 
 import (
 	"context"
+	"encoding/hex"
 	"net/http"
 	"strings"
 	"sync"
@@ -9,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/erpc/erpc/architecture/evm"
 	"github.com/erpc/erpc/common"
 	"github.com/erpc/erpc/data"
 	"github.com/erpc/erpc/health"
@@ -599,6 +601,177 @@ func TestNetwork_Multiplexer_FollowersReceiveResponse(t *testing.T) {
 		// Only 1 upstream request
 		assert.Equal(t, int32(1), upstreamRequestCount.Load(),
 			"Should have exactly 1 upstream request")
+	})
+
+	t.Run("SkipMultiplexFlag_BypassesCoalescing", func(t *testing.T) {
+		util.ResetGock()
+		defer util.ResetGock()
+		util.SetupMocksForEvmStatePoller()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		var upstreamRequestCount atomic.Int32
+
+		gock.New("http://rpc1.localhost").
+			Post("").
+			Filter(func(r *http.Request) bool {
+				body := util.SafeReadBody(r)
+				if strings.Contains(body, "eth_getBalance") {
+					upstreamRequestCount.Add(1)
+					return true
+				}
+				return false
+			}).
+			Persist().
+			Reply(200).
+			Delay(50 * time.Millisecond).
+			JSON(map[string]interface{}{
+				"jsonrpc": "2.0",
+				"id":      1,
+				"result":  "0x1",
+			})
+
+		network := setupTestNetworkForMultiplexer(t, ctx)
+		requestBody := []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_getBalance","params":["0x1234567890123456789012345678901234567890","latest"]}`)
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+		results := make([]*common.NormalizedResponse, 2)
+		errs := make([]error, 2)
+		for i := 0; i < 2; i++ {
+			go func(idx int) {
+				defer wg.Done()
+				req := common.NewNormalizedRequest(requestBody)
+				req.SetSkipMultiplex(true)
+				results[idx], errs[idx] = network.Forward(ctx, req)
+			}(i)
+		}
+		wg.Wait()
+
+		for i := 0; i < 2; i++ {
+			require.NoError(t, errs[i])
+			require.NotNil(t, results[i])
+			results[i].Release()
+		}
+
+		assert.Equal(t, int32(2), upstreamRequestCount.Load(), "skipMultiplex requests must not coalesce")
+	})
+
+	t.Run("ParentedMulticall3FollowerTimeout_BailsOutFromStaleMultiplexer", func(t *testing.T) {
+		util.ResetGock()
+		defer util.ResetGock()
+		util.SetupMocksForEvmStatePoller()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		var upstreamRequestCount atomic.Int32
+
+		gock.New("http://rpc1.localhost").
+			Post("").
+			Filter(func(r *http.Request) bool {
+				body := util.SafeReadBody(r)
+				if strings.Contains(body, "eth_call") {
+					upstreamRequestCount.Add(1)
+					return true
+				}
+				return false
+			}).
+			Persist().
+			Reply(200).
+			Delay(1500 * time.Millisecond).
+			JSON(map[string]interface{}{
+				"jsonrpc": "2.0",
+				"id":      1,
+				"result":  "0xdeadbeef",
+			})
+
+		network := setupTestNetworkForMultiplexer(t, ctx)
+		requestBody := []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_call","params":[{"to":"0x1111111111111111111111111111111111111111","data":"0x01020304"},"latest"]}`)
+
+		followerReq := common.NewNormalizedRequest(requestBody)
+		followerReq.SetCompositeType(common.CompositeTypeMulticall3)
+		followerReq.SetParentRequestId("parent-2")
+		hash, err := followerReq.CacheHash()
+		require.NoError(t, err)
+		network.inFlightRequests.Store(hash, NewMultiplexer(hash))
+
+		startedAt := time.Now()
+		resp, err := network.Forward(ctx, followerReq)
+		elapsed := time.Since(startedAt)
+		require.NoError(t, err)
+		require.NotNil(t, resp)
+		resp.Release()
+
+		assert.True(t, followerReq.SkipMultiplex(), "follower should mark request to bypass stale multiplex leader")
+		assert.GreaterOrEqual(t, elapsed, parentedMulticallFollowerMaxWait)
+		assert.Less(t, elapsed, 3*time.Second)
+		assert.Equal(t, int32(1), upstreamRequestCount.Load(), "bailout should retry solo against upstream once")
+	})
+
+	t.Run("PreparedProjectUserMulticall3_IgnoresStaleSyntheticMultiplexer", func(t *testing.T) {
+		util.ResetGock()
+		defer util.ResetGock()
+		util.SetupMocksForEvmStatePoller()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		var upstreamRequestCount atomic.Int32
+
+		gock.New("http://rpc1.localhost").
+			Post("").
+			Filter(func(r *http.Request) bool {
+				body := util.SafeReadBody(r)
+				if strings.Contains(body, "eth_call") {
+					upstreamRequestCount.Add(1)
+					return true
+				}
+				return false
+			}).
+			Persist().
+			Reply(200).
+			Delay(50 * time.Millisecond).
+			JSON(func() map[string]interface{} {
+				encoded, encErr := evm.EncodeMulticall3Aggregate3Results([]evm.Multicall3Result{
+					{Success: true, ReturnData: []byte{0xaa}},
+				})
+				require.NoError(t, encErr)
+				return map[string]interface{}{
+					"jsonrpc": "2.0",
+					"id":      1,
+					"result":  "0x" + hex.EncodeToString(encoded),
+				}
+			}())
+
+		network := setupTestNetworkForMultiplexer(t, ctx)
+		project := &PreparedProject{
+			Config: &common.ProjectConfig{Id: "test"},
+		}
+
+		perCallReq := common.NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","id":1,"method":"eth_call","params":[{"to":"0x1111111111111111111111111111111111111111","data":"0x01"},"latest"]}`))
+		topReq, _, err := evm.BuildMulticall3Request([]*common.NormalizedRequest{perCallReq}, "latest")
+		require.NoError(t, err)
+		topReq.SetUser(&common.User{Id: "consumer"})
+
+		staleSyntheticReq, _, err := evm.BuildMulticall3Request([]*common.NormalizedRequest{perCallReq}, "latest")
+		require.NoError(t, err)
+		staleSyntheticReq.SetParentRequestId(topReq.ID())
+		staleSyntheticReq.SetCompositeType(common.CompositeTypeMulticall3)
+		hash, err := staleSyntheticReq.CacheHash()
+		require.NoError(t, err)
+		network.inFlightRequests.Store(hash, NewMultiplexer(hash))
+
+		startedAt := time.Now()
+		resp, err := project.doForward(ctx, network, topReq)
+		elapsed := time.Since(startedAt)
+		require.NoError(t, err)
+		require.NotNil(t, resp)
+		resp.Release()
+
+		assert.Less(t, elapsed, 500*time.Millisecond, "project pre-forward multicall path should bypass stale synthetic multiplexer")
+		assert.Equal(t, int32(1), upstreamRequestCount.Load(), "synthetic request should forward directly instead of waiting on stale multiplexer")
 	})
 }
 

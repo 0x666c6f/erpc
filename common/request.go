@@ -341,6 +341,7 @@ type NormalizedRequest struct {
 
 	compositeType   atomic.Value // Type of composite request (e.g., "logs-split")
 	parentRequestId atomic.Value // ID of the parent request (for sub-requests)
+	skipMultiplex   atomic.Bool
 
 	finality atomic.Value // Cached finality state
 
@@ -1217,6 +1218,20 @@ func (r *NormalizedRequest) SetParentRequestId(parentId interface{}) {
 		return
 	}
 	r.parentRequestId.Store(parentId)
+}
+
+func (r *NormalizedRequest) SkipMultiplex() bool {
+	if r == nil {
+		return false
+	}
+	return r.skipMultiplex.Load()
+}
+
+func (r *NormalizedRequest) SetSkipMultiplex(skip bool) {
+	if r == nil {
+		return
+	}
+	r.skipMultiplex.Store(skip)
 }
 
 func (r *NormalizedRequest) Finality(ctx context.Context) DataFinalityState {

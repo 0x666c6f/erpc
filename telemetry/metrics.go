@@ -197,6 +197,12 @@ var (
 		Help:      "Total number of multiplexed requests for a network.",
 	}, []string{"project", "network", "category", "finality", "user", "agent_name"})
 
+	MetricNetworkMultiplexFollowerBailoutTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "erpc",
+		Name:      "network_multiplex_follower_bailout_total",
+		Help:      "Total number of multiplexed follower requests that bailed out and retried solo.",
+	}, []string{"project", "network", "category", "finality", "user", "agent_name"})
+
 	MetricNetworkBurstCoalescedRequests = promauto.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "erpc",
 		Name:      "network_burst_coalesced_request_total",
