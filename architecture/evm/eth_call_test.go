@@ -442,6 +442,59 @@ func TestHandleUserMulticall3_CopiesDirectives(t *testing.T) {
 	require.NotNil(t, resp)
 }
 
+func TestHandleUserMulticall3_SetsSkipMultiplexOnSyntheticRequest(t *testing.T) {
+	target, err := common.HexToBytes("0x1111111111111111111111111111111111111111")
+	require.NoError(t, err)
+	encodedCalls, err := encodeAggregate3Calls([]Multicall3Call{
+		{Target: target, CallData: []byte{0x01}},
+	})
+	require.NoError(t, err)
+
+	jrq := common.NewJsonRpcRequest("eth_call", []interface{}{
+		map[string]interface{}{
+			"to":   multicall3Address,
+			"data": "0x" + hexEncode(encodedCalls),
+		},
+		"latest",
+	})
+	jrq.ID = "parent-request"
+	req := common.NewNormalizedRequestFromJsonRpcRequest(jrq)
+
+	results := []Multicall3Result{
+		{Success: true, ReturnData: []byte{0xaa}},
+	}
+	encodedResult, err := EncodeMulticall3Aggregate3Results(results)
+	require.NoError(t, err)
+	mcJrr, err := common.NewJsonRpcResponse(nil, "0x"+hexEncode(encodedResult), nil)
+	require.NoError(t, err)
+	mcResp := common.NewNormalizedResponse().WithJsonRpcResponse(mcJrr)
+
+	cfg := &common.NetworkConfig{
+		Evm: &common.EvmNetworkConfig{
+			Multicall3Aggregation: &common.Multicall3AggregationConfig{
+				CachePerCall: util.BoolPtr(false),
+			},
+		},
+	}
+
+	network := &mockNetworkForEthCall{
+		networkId: "evm:1",
+		projectId: "test",
+		cfg:       cfg,
+		forwardFn: func(ctx context.Context, req *common.NormalizedRequest) (*common.NormalizedResponse, error) {
+			require.True(t, req.SkipMultiplex())
+			require.Equal(t, common.CompositeTypeMulticall3, req.CompositeType())
+			require.Equal(t, "parent-request", req.ParentRequestId())
+			return mcResp, nil
+		},
+	}
+
+	handled, resp, err := handleUserMulticall3(context.Background(), network, req)
+	require.NoError(t, err)
+	require.True(t, handled)
+	require.NotNil(t, resp)
+}
+
 func TestHandleUserMulticall3_SkipsStateOverride(t *testing.T) {
 	target, err := common.HexToBytes("0x1111111111111111111111111111111111111111")
 	require.NoError(t, err)

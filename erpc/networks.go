@@ -1624,6 +1624,10 @@ func (n *Network) acquireSelectionPolicyPermit(ctx context.Context, lg *zerolog.
 
 func (n *Network) handleMultiplexing(ctx context.Context, lg *zerolog.Logger, req *common.NormalizedRequest, startTime time.Time) (*Multiplexer, *common.NormalizedResponse, error) {
 	method, _ := req.Method()
+	if req.SkipMultiplex() {
+		lg.Trace().Msg("multiplexing skipped: skipMultiplex flag set")
+		return nil, nil, nil
+	}
 	if !n.isMultiplexingEnabledForMethod(method) {
 		return nil, nil, nil
 	}
