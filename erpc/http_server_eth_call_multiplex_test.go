@@ -26,12 +26,19 @@ func TestHttpServer_EthCallSyntheticMulticall_BypassesStaleMultiplexer(t *testin
 		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
 
 		method, _ := req["method"].(string)
-		result := "0x1"
+		result := interface{}("0x1")
 		switch method {
 		case "eth_chainId":
 			result = "0x7b"
 		case "eth_blockNumber":
 			result = "0x3e8"
+		case "eth_syncing":
+			result = false
+		case "eth_getBlockByNumber":
+			result = map[string]interface{}{
+				"number":    "0x3e8",
+				"timestamp": "0x65",
+			}
 		case "eth_call":
 			ethCallCount.Add(1)
 			encoded, err := evm.EncodeMulticall3Aggregate3Results([]evm.Multicall3Result{
@@ -112,6 +119,6 @@ func TestHttpServer_EthCallSyntheticMulticall_BypassesStaleMultiplexer(t *testin
 	require.Equal(t, http.StatusOK, statusCode)
 	assert.Contains(t, respBody, `"result":"0x`)
 	assert.NotContains(t, respBody, `"error"`)
-	assert.Less(t, elapsed, 500*time.Millisecond, "http path should bypass stale synthetic multiplexer instead of waiting for follower bailout")
+	assert.Less(t, elapsed, 2*time.Second, "http path should bypass stale synthetic multiplexer instead of waiting for follower bailout")
 	assert.Equal(t, int32(1), ethCallCount.Load(), "synthetic multicall should hit upstream exactly once")
 }

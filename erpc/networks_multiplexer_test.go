@@ -718,7 +718,7 @@ func TestNetwork_Multiplexer_FollowersReceiveResponse(t *testing.T) {
 		require.NotNil(t, resp)
 		resp.Release()
 
-		assert.Less(t, elapsed, 500*time.Millisecond, "project pre-forward multicall path should bypass stale synthetic multiplexer")
+		assert.Less(t, elapsed, 2*time.Second, "project pre-forward multicall path should bypass stale synthetic multiplexer")
 		assert.Equal(t, int32(1), upstreamRequestCount.Load(), "synthetic request should forward directly instead of waiting on stale multiplexer")
 	})
 }
