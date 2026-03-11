@@ -26,14 +26,12 @@ import (
 )
 
 var networkCacheHitLogSampler = &zerolog.BasicSampler{N: 100}
-var errMultiplexFollowerBailout = errors.New("multiplex follower bailout")
 
 const (
 	maxConcurrentNetworkCacheWrites       = 100
 	networkPostCompletionCoalescingWindow = 40 * time.Millisecond
 	networkDeterministicNegativeCacheTTL  = 200 * time.Millisecond
 	networkFailsafeTimeoutSlack           = 30 * time.Millisecond
-	parentedMulticallFollowerMaxWait      = 1 * time.Second
 )
 
 type FailsafeExecutor struct {
@@ -1690,10 +1688,6 @@ func (n *Network) handleMultiplexing(ctx context.Context, lg *zerolog.Logger, re
 		lg.Trace().Str("hash", mlxHash).Object("response", resp).Err(err).Msgf("multiplexed request result")
 
 		if err != nil {
-			if errors.Is(err, errMultiplexFollowerBailout) {
-				req.SetSkipMultiplex(true)
-				return nil, nil, nil
-			}
 			return nil, nil, err
 		}
 		if resp != nil {
@@ -1713,13 +1707,6 @@ func (n *Network) waitForMultiplexResult(ctx context.Context, mlx *Multiplexer, 
 	// Caller already registered with copyWg.Add(1), ensure we signal completion
 	defer mlx.copyWg.Done()
 
-	var followerTimeout <-chan time.Time
-	if shouldBoundMultiplexFollowerWait(req) {
-		timer := time.NewTimer(parentedMulticallFollowerMaxWait)
-		defer timer.Stop()
-		followerTimeout = timer.C
-	}
-
 	// Wait for leader to complete (or check if already done)
 	select {
 	case <-mlx.done:
@@ -1734,17 +1721,6 @@ func (n *Network) waitForMultiplexResult(ctx context.Context, mlx *Multiplexer, 
 			return nil, err
 		}
 		return out, resultErr
-	case <-followerTimeout:
-		method, _ := req.Method()
-		finality := req.Finality(ctx)
-		span.SetAttributes(
-			attribute.Bool("multiplexer.bailout", true),
-			attribute.String("multiplexer.bailout_reason", "follower_wait_timeout"),
-		)
-		telemetry.CounterHandle(telemetry.MetricNetworkMultiplexFollowerBailoutTotal,
-			n.projectId, n.Label(), method, finality.String(), req.UserId(), req.AgentName(),
-		).Inc()
-		return nil, errMultiplexFollowerBailout
 	case <-ctx.Done():
 		err := ctx.Err()
 		if errors.Is(err, context.DeadlineExceeded) {
@@ -2053,13 +2029,6 @@ func (n *Network) isMultiplexingEnabledForMethod(method string) bool {
 		}
 	}
 	return n.cfg.MultiplexingEnabled()
-}
-
-func shouldBoundMultiplexFollowerWait(req *common.NormalizedRequest) bool {
-	if req == nil {
-		return false
-	}
-	return req.CompositeType() == common.CompositeTypeMulticall3 && req.ParentRequestId() != nil
 }
 
 func isNonceSensitiveReadMethod(method string) bool {

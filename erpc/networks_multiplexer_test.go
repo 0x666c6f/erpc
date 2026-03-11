@@ -658,58 +658,6 @@ func TestNetwork_Multiplexer_FollowersReceiveResponse(t *testing.T) {
 		assert.Equal(t, int32(2), upstreamRequestCount.Load(), "skipMultiplex requests must not coalesce")
 	})
 
-	t.Run("ParentedMulticall3FollowerTimeout_BailsOutFromStaleMultiplexer", func(t *testing.T) {
-		util.ResetGock()
-		defer util.ResetGock()
-		util.SetupMocksForEvmStatePoller()
-
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-
-		var upstreamRequestCount atomic.Int32
-
-		gock.New("http://rpc1.localhost").
-			Post("").
-			Filter(func(r *http.Request) bool {
-				body := util.SafeReadBody(r)
-				if strings.Contains(body, "eth_call") {
-					upstreamRequestCount.Add(1)
-					return true
-				}
-				return false
-			}).
-			Persist().
-			Reply(200).
-			Delay(1500 * time.Millisecond).
-			JSON(map[string]interface{}{
-				"jsonrpc": "2.0",
-				"id":      1,
-				"result":  "0xdeadbeef",
-			})
-
-		network := setupTestNetworkForMultiplexer(t, ctx)
-		requestBody := []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_call","params":[{"to":"0x1111111111111111111111111111111111111111","data":"0x01020304"},"latest"]}`)
-
-		followerReq := common.NewNormalizedRequest(requestBody)
-		followerReq.SetCompositeType(common.CompositeTypeMulticall3)
-		followerReq.SetParentRequestId("parent-2")
-		hash, err := followerReq.CacheHash()
-		require.NoError(t, err)
-		network.inFlightRequests.Store(hash, NewMultiplexer(hash))
-
-		startedAt := time.Now()
-		resp, err := network.Forward(ctx, followerReq)
-		elapsed := time.Since(startedAt)
-		require.NoError(t, err)
-		require.NotNil(t, resp)
-		resp.Release()
-
-		assert.True(t, followerReq.SkipMultiplex(), "follower should mark request to bypass stale multiplex leader")
-		assert.GreaterOrEqual(t, elapsed, parentedMulticallFollowerMaxWait)
-		assert.Less(t, elapsed, 3*time.Second)
-		assert.Equal(t, int32(1), upstreamRequestCount.Load(), "bailout should retry solo against upstream once")
-	})
-
 	t.Run("PreparedProjectUserMulticall3_IgnoresStaleSyntheticMultiplexer", func(t *testing.T) {
 		util.ResetGock()
 		defer util.ResetGock()
