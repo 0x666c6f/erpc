@@ -341,7 +341,7 @@ type NormalizedRequest struct {
 
 	compositeType   atomic.Value // Type of composite request (e.g., "logs-split")
 	parentRequestId atomic.Value // ID of the parent request (for sub-requests)
-	skipMultiplex   atomic.Bool
+	skipMultiplex   atomic.Bool  // When true, Network.Forward bypasses multiplexing for this request
 
 	finality atomic.Value // Cached finality state
 
@@ -1220,6 +1220,7 @@ func (r *NormalizedRequest) SetParentRequestId(parentId interface{}) {
 	r.parentRequestId.Store(parentId)
 }
 
+// SkipMultiplex reports whether Network.Forward should bypass request multiplexing.
 func (r *NormalizedRequest) SkipMultiplex() bool {
 	if r == nil {
 		return false
@@ -1227,6 +1228,7 @@ func (r *NormalizedRequest) SkipMultiplex() bool {
 	return r.skipMultiplex.Load()
 }
 
+// SetSkipMultiplex controls whether Network.Forward bypasses request multiplexing.
 func (r *NormalizedRequest) SetSkipMultiplex(skip bool) {
 	if r == nil {
 		return

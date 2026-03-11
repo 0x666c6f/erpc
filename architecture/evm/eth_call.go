@@ -508,6 +508,8 @@ func handleUserMulticall3(ctx context.Context, network common.Network, nq *commo
 	mcReq.SetNetwork(network)
 	mcReq.SetParentRequestId(nq.ID())
 	mcReq.SetCompositeType(common.CompositeTypeMulticall3)
+	// Synthetic multicall3 must bypass network multiplexing to avoid joining
+	// stale in-flight entries keyed by an equivalent user-submitted eth_call hash.
 	mcReq.SetSkipMultiplex(true)
 	mcReq.CopyHttpContextFrom(nq)
 	if dirs := nq.Directives(); dirs != nil {
