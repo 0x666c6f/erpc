@@ -221,7 +221,7 @@ func (r *RateLimitersRegistry) GetBudgets() []*common.RateLimitBudgetConfig {
 	return r.cfg.Budgets
 }
 
-func (r *RateLimitersRegistry) onRedisCacheFailure(failedCache limiter.RateLimitCache, err error) {
+func (r *RateLimitersRegistry) onCacheFailure(failedCache limiter.RateLimitCache, err error) {
 	if failedCache == nil {
 		return
 	}
@@ -234,9 +234,13 @@ func (r *RateLimitersRegistry) onRedisCacheFailure(failedCache limiter.RateLimit
 	r.envoyCache = nil
 	r.cacheMu.Unlock()
 
-	if r.initializer != nil {
+	if r.cfg != nil && r.cfg.Store != nil && r.cfg.Store.Driver == "redis" && r.initializer != nil {
+		r.logger.Warn().Err(err).Msg("cleared Redis rate limiter cache after failure, marking for reconnection")
 		r.initializer.MarkTaskAsFailed(redisRateLimiterConnectTaskName, err)
+		return
 	}
+
+	r.logger.Warn().Err(err).Msg("cleared rate limiter cache after failure")
 }
 
 // AdjustBudget updates MaxCount for all rules in a budget matching a method (supports wildcards via GetRulesByMethod).

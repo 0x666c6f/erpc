@@ -310,6 +310,15 @@ func (b *RateLimiterBudget) evaluateRule(ctx context.Context, projectId string, 
 			"timeout_fail_open",
 		).Observe(waitDuration.Seconds())
 		observeEvaluation("timeout_fail_open")
+		telemetry.MetricRateLimiterFailopenTotal.WithLabelValues(
+			projectId,
+			networkLabel,
+			userLabel,
+			"", // agentName not passed to evaluateRule
+			b.Id,
+			method,
+			"limit_timeout",
+		).Inc()
 		telemetry.IncNetworkAttemptReason(projectId, networkLabel, method, telemetry.AttemptReasonFailOpen)
 		doSpan.SetAttributes(attribute.String("result", "timeout_fail_open"))
 		doSpan.End()
@@ -328,7 +337,7 @@ func (b *RateLimiterBudget) evaluateRule(ctx context.Context, projectId string, 
 			projectId,
 			networkLabel,
 			userLabel,
-			"", // agentName not available here
+			"", // agentName not passed to evaluateRule
 			b.Id,
 			method,
 			"limit_panic",
@@ -385,8 +394,8 @@ func (b *RateLimiterBudget) doLimitSafely(
 				Str("stack", string(debug.Stack())).
 				Msg("panic recovered during rate limiter DoLimit (failing open)")
 
-			if b.registry != nil && b.registry.cfg != nil && b.registry.cfg.Store != nil && b.registry.cfg.Store.Driver == "redis" {
-				b.registry.onRedisCacheFailure(cache, panicErr)
+			if b.registry != nil {
+				b.registry.onCacheFailure(cache, panicErr)
 			}
 		}
 	}()
@@ -409,8 +418,10 @@ func (r *RateLimitRule) statsKeySuffix() string {
 	return suffix
 }
 
-// doLimitWithTimeout executes DoLimit with a timeout.
-// Returns (statuses, timedOut). On timeout, returns (nil, true) and records fail-open metric.
+// doLimitWithTimeout executes doLimitSafely with a timeout.
+// Returns (statuses, timedOut, panicErr, waitDuration).
+// On timeout, returns (nil, true, nil, elapsed).
+// On panic from DoLimit, returns (nil, false, err, elapsed).
 func (b *RateLimiterBudget) doLimitWithTimeout(
 	ctx context.Context,
 	cache limiter.RateLimitCache,
@@ -442,16 +453,6 @@ func (b *RateLimiterBudget) doLimitWithTimeout(
 			Str("method", method).
 			Dur("timeout", b.maxTimeout).
 			Msg("rate limiter timeout exceeded, failing open")
-
-		telemetry.MetricRateLimiterFailopenTotal.WithLabelValues(
-			"", // projectId not available here
-			networkLabel,
-			userLabel,
-			"", // agentName not available here
-			b.Id,
-			method,
-			"limit_timeout",
-		).Inc()
 
 		return nil, true, nil, time.Since(waitStartedAt)
 	}
