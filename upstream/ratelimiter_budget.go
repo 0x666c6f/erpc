@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"runtime/debug"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -18,6 +19,11 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 )
+
+type doLimitResult struct {
+	statuses []*pb.RateLimitResponse_DescriptorStatus
+	panicErr error
+}
 
 type RateLimiterBudget struct {
 	logger     *zerolog.Logger
@@ -285,12 +291,13 @@ func (b *RateLimiterBudget) evaluateRule(ctx context.Context, projectId string, 
 
 	var statuses []*pb.RateLimitResponse_DescriptorStatus
 	var timedOut bool
+	var panicErr error
 	var waitDuration time.Duration
 	if b.maxTimeout > 0 {
-		statuses, timedOut, waitDuration = b.doLimitWithTimeout(ctx, cache, rlReq, limits, method, userLabel, networkLabel)
+		statuses, timedOut, panicErr, waitDuration = b.doLimitWithTimeout(ctx, cache, rlReq, limits, method, userLabel, networkLabel)
 	} else {
 		waitStartedAt := time.Now()
-		statuses = cache.DoLimit(ctx, rlReq, limits)
+		statuses, panicErr = b.doLimitSafely(ctx, cache, rlReq, limits, method, userLabel, networkLabel)
 		waitDuration = time.Since(waitStartedAt)
 	}
 
@@ -305,6 +312,30 @@ func (b *RateLimiterBudget) evaluateRule(ctx context.Context, projectId string, 
 		observeEvaluation("timeout_fail_open")
 		telemetry.IncNetworkAttemptReason(projectId, networkLabel, method, telemetry.AttemptReasonFailOpen)
 		doSpan.SetAttributes(attribute.String("result", "timeout_fail_open"))
+		doSpan.End()
+		return true // fail-open
+	}
+	if panicErr != nil {
+		telemetry.ObserverHandle(
+			telemetry.MetricRateLimiterPermitWaitDuration,
+			b.Id,
+			methodPattern,
+			scope,
+			"panic_fail_open",
+		).Observe(waitDuration.Seconds())
+		observeEvaluation("panic_fail_open")
+		telemetry.MetricRateLimiterFailopenTotal.WithLabelValues(
+			"", // projectId not available here
+			networkLabel,
+			userLabel,
+			"", // agentName not available here
+			b.Id,
+			method,
+			"limit_panic",
+		).Inc()
+		telemetry.IncNetworkAttemptReason(projectId, networkLabel, method, telemetry.AttemptReasonFailOpen)
+		doSpan.RecordError(panicErr)
+		doSpan.SetAttributes(attribute.String("result", "panic_fail_open"))
 		doSpan.End()
 		return true // fail-open
 	}
@@ -330,6 +361,39 @@ func (b *RateLimiterBudget) evaluateRule(ctx context.Context, projectId string, 
 	return !isOverLimit
 }
 
+func (b *RateLimiterBudget) doLimitSafely(
+	ctx context.Context,
+	cache limiter.RateLimitCache,
+	rlReq *pb.RateLimitRequest,
+	limits []*config.RateLimit,
+	method, userLabel, networkLabel string,
+) (statuses []*pb.RateLimitResponse_DescriptorStatus, panicErr error) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			panicErr = fmt.Errorf("panic during rate limiter DoLimit: %v", rec)
+			telemetry.MetricUnexpectedPanicTotal.WithLabelValues(
+				"ratelimiter-do-limit",
+				fmt.Sprintf("budget:%s", b.Id),
+				common.ErrorFingerprint(rec),
+			).Inc()
+			b.logger.Error().
+				Str("budget", b.Id).
+				Str("method", method).
+				Str("user", userLabel).
+				Str("network", networkLabel).
+				Interface("panic", rec).
+				Str("stack", string(debug.Stack())).
+				Msg("panic recovered during rate limiter DoLimit (failing open)")
+
+			if b.registry != nil && b.registry.cfg != nil && b.registry.cfg.Store != nil && b.registry.cfg.Store.Driver == "redis" {
+				b.registry.onRedisCacheFailure(panicErr)
+			}
+		}
+	}()
+
+	return cache.DoLimit(ctx, rlReq, limits), nil
+}
+
 // statsKeySuffix returns the pre-computed suffix for stats key.
 func (r *RateLimitRule) statsKeySuffix() string {
 	suffix := ""
@@ -353,23 +417,24 @@ func (b *RateLimiterBudget) doLimitWithTimeout(
 	rlReq *pb.RateLimitRequest,
 	limits []*config.RateLimit,
 	method, userLabel, networkLabel string,
-) ([]*pb.RateLimitResponse_DescriptorStatus, bool, time.Duration) {
+) ([]*pb.RateLimitResponse_DescriptorStatus, bool, error, time.Duration) {
 	waitStartedAt := time.Now()
-	resultCh := make(chan []*pb.RateLimitResponse_DescriptorStatus, 1)
+	resultCh := make(chan doLimitResult, 1)
 	go func() {
-		resultCh <- cache.DoLimit(ctx, rlReq, limits)
+		statuses, panicErr := b.doLimitSafely(ctx, cache, rlReq, limits, method, userLabel, networkLabel)
+		resultCh <- doLimitResult{statuses: statuses, panicErr: panicErr}
 	}()
 
 	timer := time.NewTimer(b.maxTimeout)
 	select {
-	case statuses := <-resultCh:
+	case result := <-resultCh:
 		if !timer.Stop() {
 			select {
 			case <-timer.C:
 			default:
 			}
 		}
-		return statuses, false, time.Since(waitStartedAt)
+		return result.statuses, false, result.panicErr, time.Since(waitStartedAt)
 
 	case <-timer.C:
 		b.logger.Warn().
@@ -388,6 +453,6 @@ func (b *RateLimiterBudget) doLimitWithTimeout(
 			"limit_timeout",
 		).Inc()
 
-		return nil, true, time.Since(waitStartedAt)
+		return nil, true, nil, time.Since(waitStartedAt)
 	}
 }

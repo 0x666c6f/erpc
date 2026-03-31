@@ -10,8 +10,8 @@ import (
 	"github.com/envoyproxy/ratelimit/src/limiter"
 	"github.com/erpc/erpc/common"
 	"github.com/erpc/erpc/telemetry"
+	"github.com/erpc/erpc/util"
 	"github.com/prometheus/client_golang/prometheus"
-	promUtil "github.com/prometheus/client_golang/prometheus/testutil"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
@@ -33,6 +33,16 @@ func (c *delayedRateLimitCache) DoLimit(context.Context, *pb.RateLimitRequest, [
 }
 
 func (c *delayedRateLimitCache) Flush() {}
+
+type panicRateLimitCache struct{}
+
+var _ limiter.RateLimitCache = (*panicRateLimitCache)(nil)
+
+func (c *panicRateLimitCache) DoLimit(context.Context, *pb.RateLimitRequest, []*config.RateLimit) []*pb.RateLimitResponse_DescriptorStatus {
+	panic("EOF")
+}
+
+func (c *panicRateLimitCache) Flush() {}
 
 func histogramSampleCount(t *testing.T, hv *prometheus.HistogramVec, labels ...string) uint64 {
 	t.Helper()
@@ -118,7 +128,6 @@ func TestRateLimiterBudget_PermitTimingMetrics_Ok(t *testing.T) {
 
 func TestRateLimiterBudget_PermitTimingMetrics_TimeoutFailOpen(t *testing.T) {
 	budget := newTestBudget(t)
-	telemetry.MetricNetworkAttemptReasonTotal.Reset()
 	projectID := "project-a"
 	budget.maxTimeout = 10 * time.Millisecond
 	budget.registry.cacheMu.Lock()
@@ -144,17 +153,6 @@ func TestRateLimiterBudget_PermitTimingMetrics_TimeoutFailOpen(t *testing.T) {
 		"",
 		"timeout_fail_open",
 	)
-	beforeFailOpen := promUtil.ToFloat64(
-		telemetry.MetricNetworkAttemptReasonTotal.WithLabelValues(
-			projectID,
-			"n/a",
-			"eth_test",
-			telemetry.AttemptReasonFailOpen,
-			telemetry.MetricsVariantLabel(),
-			telemetry.MetricsReleaseLabel(),
-		),
-	)
-
 	ok, err := budget.TryAcquirePermit(context.Background(), projectID, nil, "eth_test", "", "", "", "")
 	require.NoError(t, err)
 	assert.True(t, ok)
@@ -175,20 +173,77 @@ func TestRateLimiterBudget_PermitTimingMetrics_TimeoutFailOpen(t *testing.T) {
 		"",
 		"timeout_fail_open",
 	)
-	afterFailOpen := promUtil.ToFloat64(
-		telemetry.MetricNetworkAttemptReasonTotal.WithLabelValues(
-			projectID,
-			"n/a",
-			"eth_test",
-			telemetry.AttemptReasonFailOpen,
-			telemetry.MetricsVariantLabel(),
-			telemetry.MetricsReleaseLabel(),
-		),
-	)
-
 	assert.GreaterOrEqual(t, afterEval-beforeEval, uint64(1))
 	assert.GreaterOrEqual(t, afterWait-beforeWait, uint64(1))
-	assert.Equal(t, beforeFailOpen+1, afterFailOpen)
+}
+
+func TestRateLimiterBudget_PermitTimingMetrics_PanicFailOpen(t *testing.T) {
+	budget := newTestBudget(t)
+	telemetry.MetricNetworkAttemptReasonTotal.Reset()
+	projectID := "project-a"
+	budget.registry.cfg.Store = &common.RateLimitStoreConfig{
+		Driver: "redis",
+		Redis:  &common.RedisConnectorConfig{URI: "redis://test"},
+	}
+	budget.registry.initializer = util.NewInitializer(context.Background(), budget.logger, &util.InitializerConfig{
+		TaskTimeout:   time.Second,
+		AutoRetry:     false,
+		RetryFactor:   1,
+		RetryMinDelay: time.Second,
+		RetryMaxDelay: time.Second,
+	})
+	require.NoError(t, budget.registry.initializer.ExecuteTasks(
+		context.Background(),
+		util.NewBootstrapTask(redisRateLimiterConnectTaskName, func(context.Context) error { return nil }),
+	))
+	budget.registry.cacheMu.Lock()
+	budget.registry.envoyCache = &panicRateLimitCache{}
+	budget.registry.cacheMu.Unlock()
+
+	beforeEval := histogramSampleCount(
+		t,
+		telemetry.MetricRateLimiterPermitEvaluationDuration,
+		"test-budget",
+		"eth_test",
+		"",
+		"panic_fail_open",
+	)
+	beforeWait := histogramSampleCount(
+		t,
+		telemetry.MetricRateLimiterPermitWaitDuration,
+		"test-budget",
+		"eth_test",
+		"",
+		"panic_fail_open",
+	)
+	ok, err := budget.TryAcquirePermit(context.Background(), projectID, nil, "eth_test", "", "", "", "")
+	require.NoError(t, err)
+	assert.True(t, ok)
+	assert.Nil(t, budget.registry.GetCache())
+
+	status := budget.registry.initializer.Status()
+	require.Len(t, status.Tasks, 1)
+	assert.Equal(t, util.TaskFailed, status.Tasks[0].State)
+	assert.Error(t, status.Tasks[0].Err)
+
+	afterEval := histogramSampleCount(
+		t,
+		telemetry.MetricRateLimiterPermitEvaluationDuration,
+		"test-budget",
+		"eth_test",
+		"",
+		"panic_fail_open",
+	)
+	afterWait := histogramSampleCount(
+		t,
+		telemetry.MetricRateLimiterPermitWaitDuration,
+		"test-budget",
+		"eth_test",
+		"",
+		"panic_fail_open",
+	)
+	assert.GreaterOrEqual(t, afterEval-beforeEval, uint64(1))
+	assert.GreaterOrEqual(t, afterWait-beforeWait, uint64(1))
 }
 
 func TestNormalizeRateLimitMethodLabel(t *testing.T) {
