@@ -2,6 +2,7 @@ package upstream
 
 import (
 	"context"
+	"net/http"
 	"testing"
 	"time"
 
@@ -97,6 +98,12 @@ func newTestBudget(t *testing.T) *RateLimiterBudget {
 	return budget
 }
 
+func newTestRequestWithAgent() *common.NormalizedRequest {
+	req := common.NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","id":1,"method":"eth_test"}`))
+	req.EnrichFromHttp(http.Header{"User-Agent": []string{"curl/8.0.1"}}, nil, common.UserAgentTrackingModeSimplified)
+	return req
+}
+
 func TestRateLimiterBudget_PermitTimingMetrics_Ok(t *testing.T) {
 	budget := newTestBudget(t)
 
@@ -145,6 +152,7 @@ func TestRateLimiterBudget_PermitTimingMetrics_Ok(t *testing.T) {
 func TestRateLimiterBudget_PermitTimingMetrics_TimeoutFailOpen(t *testing.T) {
 	budget := newTestBudget(t)
 	projectID := "project-a"
+	req := newTestRequestWithAgent()
 	budget.maxTimeout = 10 * time.Millisecond
 	budget.registry.cacheMu.Lock()
 	budget.registry.envoyCache = &delayedRateLimitCache{
@@ -172,15 +180,15 @@ func TestRateLimiterBudget_PermitTimingMetrics_TimeoutFailOpen(t *testing.T) {
 	beforeFailOpen := promUtil.ToFloat64(
 		telemetry.MetricRateLimiterFailopenTotal.WithLabelValues(
 			projectID,
-			"",
-			"",
-			"",
+			"n/a",
+			"n/a",
+			"curl",
 			"test-budget",
 			"eth_test",
 			"limit_timeout",
 		),
 	)
-	ok, err := budget.TryAcquirePermit(context.Background(), projectID, nil, "eth_test", "", "", "", "")
+	ok, err := budget.TryAcquirePermit(context.Background(), projectID, req, "eth_test", "", "", "", "")
 	require.NoError(t, err)
 	assert.True(t, ok)
 
@@ -203,9 +211,9 @@ func TestRateLimiterBudget_PermitTimingMetrics_TimeoutFailOpen(t *testing.T) {
 	afterFailOpen := promUtil.ToFloat64(
 		telemetry.MetricRateLimiterFailopenTotal.WithLabelValues(
 			projectID,
-			"",
-			"",
-			"",
+			"n/a",
+			"n/a",
+			"curl",
 			"test-budget",
 			"eth_test",
 			"limit_timeout",
@@ -219,6 +227,7 @@ func TestRateLimiterBudget_PermitTimingMetrics_TimeoutFailOpen(t *testing.T) {
 func TestRateLimiterBudget_PermitTimingMetrics_PanicFailOpen(t *testing.T) {
 	budget := newTestBudget(t)
 	projectID := "project-a"
+	req := newTestRequestWithAgent()
 	budget.registry.cfg.Store = &common.RateLimitStoreConfig{
 		Driver: "redis",
 		Redis:  &common.RedisConnectorConfig{URI: "redis://test"},
@@ -257,9 +266,9 @@ func TestRateLimiterBudget_PermitTimingMetrics_PanicFailOpen(t *testing.T) {
 	beforeFailOpen := promUtil.ToFloat64(
 		telemetry.MetricRateLimiterFailopenTotal.WithLabelValues(
 			projectID,
-			"",
-			"",
-			"",
+			"n/a",
+			"n/a",
+			"curl",
 			"test-budget",
 			"eth_test",
 			"limit_panic",
@@ -272,7 +281,7 @@ func TestRateLimiterBudget_PermitTimingMetrics_PanicFailOpen(t *testing.T) {
 			common.ErrorFingerprint("EOF"),
 		),
 	)
-	ok, err := budget.TryAcquirePermit(context.Background(), projectID, nil, "eth_test", "", "", "", "")
+	ok, err := budget.TryAcquirePermit(context.Background(), projectID, req, "eth_test", "", "", "", "")
 	require.NoError(t, err)
 	assert.True(t, ok)
 	assert.Nil(t, budget.registry.GetCache())
@@ -301,9 +310,9 @@ func TestRateLimiterBudget_PermitTimingMetrics_PanicFailOpen(t *testing.T) {
 	afterFailOpen := promUtil.ToFloat64(
 		telemetry.MetricRateLimiterFailopenTotal.WithLabelValues(
 			projectID,
-			"",
-			"",
-			"",
+			"n/a",
+			"n/a",
+			"curl",
 			"test-budget",
 			"eth_test",
 			"limit_panic",
@@ -325,6 +334,7 @@ func TestRateLimiterBudget_PermitTimingMetrics_PanicFailOpen(t *testing.T) {
 func TestRateLimiterBudget_PermitTimingMetrics_PanicBeforeTimeoutFailOpen(t *testing.T) {
 	budget := newTestBudget(t)
 	projectID := "project-a"
+	req := newTestRequestWithAgent()
 	budget.registry.cfg.Store = &common.RateLimitStoreConfig{
 		Driver: "redis",
 		Redis:  &common.RedisConnectorConfig{URI: "redis://test"},
@@ -348,16 +358,16 @@ func TestRateLimiterBudget_PermitTimingMetrics_PanicBeforeTimeoutFailOpen(t *tes
 	beforeFailOpen := promUtil.ToFloat64(
 		telemetry.MetricRateLimiterFailopenTotal.WithLabelValues(
 			projectID,
-			"",
-			"",
-			"",
+			"n/a",
+			"n/a",
+			"curl",
 			"test-budget",
 			"eth_test",
 			"limit_panic",
 		),
 	)
 
-	ok, err := budget.TryAcquirePermit(context.Background(), projectID, nil, "eth_test", "", "", "", "")
+	ok, err := budget.TryAcquirePermit(context.Background(), projectID, req, "eth_test", "", "", "", "")
 	require.NoError(t, err)
 	assert.True(t, ok)
 	assert.Nil(t, budget.registry.GetCache())
@@ -365,9 +375,9 @@ func TestRateLimiterBudget_PermitTimingMetrics_PanicBeforeTimeoutFailOpen(t *tes
 	afterFailOpen := promUtil.ToFloat64(
 		telemetry.MetricRateLimiterFailopenTotal.WithLabelValues(
 			projectID,
-			"",
-			"",
-			"",
+			"n/a",
+			"n/a",
+			"curl",
 			"test-budget",
 			"eth_test",
 			"limit_panic",

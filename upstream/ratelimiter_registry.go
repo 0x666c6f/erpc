@@ -240,7 +240,7 @@ func (r *RateLimitersRegistry) onCacheFailure(failedCache limiter.RateLimitCache
 		return
 	}
 
-	r.logger.Warn().Err(err).Msg("cleared rate limiter cache after failure")
+	r.logger.Warn().Err(err).Msg("cleared rate limiter cache after failure (rate limiting disabled until restart)")
 }
 
 // AdjustBudget updates MaxCount for all rules in a budget matching a method (supports wildcards via GetRulesByMethod).

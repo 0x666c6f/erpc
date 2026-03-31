@@ -182,7 +182,7 @@ func (b *RateLimiterBudget) TryAcquirePermit(ctx context.Context, projectId stri
 
 	// Single rule: evaluate directly without goroutine overhead
 	if len(rules) == 1 {
-		allowed := b.evaluateRule(ctx, projectId, rules[0], method, clientIP, userLabel, networkLabel)
+		allowed := b.evaluateRule(ctx, projectId, rules[0], method, clientIP, userLabel, agentName, networkLabel)
 		if !allowed {
 			telemetry.CounterHandle(
 				telemetry.MetricRateLimitsTotal,
@@ -204,7 +204,7 @@ func (b *RateLimiterBudget) TryAcquirePermit(ctx context.Context, projectId stri
 				resultCh <- ruleResult{rule: r, allowed: true}
 				return
 			}
-			allowed := b.evaluateRule(ctx, projectId, r, method, clientIP, userLabel, networkLabel)
+			allowed := b.evaluateRule(ctx, projectId, r, method, clientIP, userLabel, agentName, networkLabel)
 			if !allowed {
 				blocked.Store(true)
 			}
@@ -234,7 +234,7 @@ func (b *RateLimiterBudget) TryAcquirePermit(ctx context.Context, projectId stri
 
 // evaluateRule checks a single rate limit rule against the cache.
 // Returns true if allowed, false if over limit.
-func (b *RateLimiterBudget) evaluateRule(ctx context.Context, projectId string, rule *RateLimitRule, method, clientIP, userLabel, networkLabel string) bool {
+func (b *RateLimiterBudget) evaluateRule(ctx context.Context, projectId string, rule *RateLimitRule, method, clientIP, userLabel, agentName, networkLabel string) bool {
 	evalStartedAt := time.Now()
 	scope := rule.Config.ScopeString()
 	methodPattern := normalizeRateLimitMethodLabel(rule.Config.Method)
@@ -292,61 +292,47 @@ func (b *RateLimiterBudget) evaluateRule(ctx context.Context, projectId string, 
 	var statuses []*pb.RateLimitResponse_DescriptorStatus
 	var timedOut bool
 	var panicErr error
-	var waitDuration time.Duration
+	waitStartedAt := time.Now()
 	if b.maxTimeout > 0 {
-		statuses, timedOut, panicErr, waitDuration = b.doLimitWithTimeout(ctx, cache, rlReq, limits, method, userLabel, networkLabel)
+		statuses, timedOut, panicErr = b.doLimitWithTimeout(ctx, cache, rlReq, limits, method, userLabel, networkLabel)
 	} else {
-		waitStartedAt := time.Now()
 		statuses, panicErr = b.doLimitSafely(ctx, cache, rlReq, limits, method, userLabel, networkLabel)
-		waitDuration = time.Since(waitStartedAt)
 	}
+	waitDuration := time.Since(waitStartedAt)
 
 	if timedOut {
-		telemetry.ObserverHandle(
-			telemetry.MetricRateLimiterPermitWaitDuration,
-			b.Id,
+		return b.recordFailOpen(
+			doSpan,
+			waitDuration,
 			methodPattern,
 			scope,
-			"timeout_fail_open",
-		).Observe(waitDuration.Seconds())
-		observeEvaluation("timeout_fail_open")
-		telemetry.MetricRateLimiterFailopenTotal.WithLabelValues(
 			projectId,
 			networkLabel,
 			userLabel,
-			"", // agentName not passed to evaluateRule
-			b.Id,
+			agentName,
 			method,
+			"timeout_fail_open",
 			"limit_timeout",
-		).Inc()
-		telemetry.IncNetworkAttemptReason(projectId, networkLabel, method, telemetry.AttemptReasonFailOpen)
-		doSpan.SetAttributes(attribute.String("result", "timeout_fail_open"))
-		doSpan.End()
-		return true // fail-open
+			nil,
+			observeEvaluation,
+		)
 	}
 	if panicErr != nil {
-		telemetry.ObserverHandle(
-			telemetry.MetricRateLimiterPermitWaitDuration,
-			b.Id,
+		return b.recordFailOpen(
+			doSpan,
+			waitDuration,
 			methodPattern,
 			scope,
-			"panic_fail_open",
-		).Observe(waitDuration.Seconds())
-		observeEvaluation("panic_fail_open")
-		telemetry.MetricRateLimiterFailopenTotal.WithLabelValues(
 			projectId,
 			networkLabel,
 			userLabel,
-			"", // agentName not passed to evaluateRule
-			b.Id,
+			agentName,
 			method,
+			"panic_fail_open",
 			"limit_panic",
-		).Inc()
-		telemetry.IncNetworkAttemptReason(projectId, networkLabel, method, telemetry.AttemptReasonFailOpen)
-		doSpan.RecordError(panicErr)
-		doSpan.SetAttributes(attribute.String("result", "panic_fail_open"))
-		doSpan.End()
-		return true // fail-open
+			panicErr,
+			observeEvaluation,
+		)
 	}
 
 	outcome := "ok"
@@ -368,6 +354,39 @@ func (b *RateLimiterBudget) evaluateRule(ctx context.Context, projectId string, 
 	doSpan.End()
 
 	return !isOverLimit
+}
+
+func (b *RateLimiterBudget) recordFailOpen(
+	doSpan trace.Span,
+	waitDuration time.Duration,
+	methodPattern, scope, projectId, networkLabel, userLabel, agentName, method, outcome, reason string,
+	panicErr error,
+	observeEvaluation func(string),
+) bool {
+	telemetry.ObserverHandle(
+		telemetry.MetricRateLimiterPermitWaitDuration,
+		b.Id,
+		methodPattern,
+		scope,
+		outcome,
+	).Observe(waitDuration.Seconds())
+	observeEvaluation(outcome)
+	telemetry.MetricRateLimiterFailopenTotal.WithLabelValues(
+		projectId,
+		networkLabel,
+		userLabel,
+		agentName,
+		b.Id,
+		method,
+		reason,
+	).Inc()
+	telemetry.IncNetworkAttemptReason(projectId, networkLabel, method, telemetry.AttemptReasonFailOpen)
+	if panicErr != nil {
+		doSpan.RecordError(panicErr)
+	}
+	doSpan.SetAttributes(attribute.String("result", outcome))
+	doSpan.End()
+	return true
 }
 
 func (b *RateLimiterBudget) doLimitSafely(
@@ -419,17 +438,16 @@ func (r *RateLimitRule) statsKeySuffix() string {
 }
 
 // doLimitWithTimeout executes doLimitSafely with a timeout.
-// Returns (statuses, timedOut, panicErr, waitDuration).
-// On timeout, returns (nil, true, nil, elapsed).
-// On panic from DoLimit, returns (nil, false, err, elapsed).
+// Returns (statuses, timedOut, panicErr).
+// On timeout, returns (nil, true, nil).
+// On panic from DoLimit, returns (nil, false, err).
 func (b *RateLimiterBudget) doLimitWithTimeout(
 	ctx context.Context,
 	cache limiter.RateLimitCache,
 	rlReq *pb.RateLimitRequest,
 	limits []*config.RateLimit,
 	method, userLabel, networkLabel string,
-) ([]*pb.RateLimitResponse_DescriptorStatus, bool, error, time.Duration) {
-	waitStartedAt := time.Now()
+) ([]*pb.RateLimitResponse_DescriptorStatus, bool, error) {
 	resultCh := make(chan doLimitResult, 1)
 	go func() {
 		statuses, panicErr := b.doLimitSafely(ctx, cache, rlReq, limits, method, userLabel, networkLabel)
@@ -445,7 +463,7 @@ func (b *RateLimiterBudget) doLimitWithTimeout(
 			default:
 			}
 		}
-		return result.statuses, false, result.panicErr, time.Since(waitStartedAt)
+		return result.statuses, false, result.panicErr
 
 	case <-timer.C:
 		b.logger.Warn().
@@ -454,6 +472,9 @@ func (b *RateLimiterBudget) doLimitWithTimeout(
 			Dur("timeout", b.maxTimeout).
 			Msg("rate limiter timeout exceeded, failing open")
 
-		return nil, true, nil, time.Since(waitStartedAt)
+		// The detached DoLimit goroutine may still finish or panic after this return.
+		// That late panic is still counted via MetricUnexpectedPanicTotal and onCacheFailure,
+		// but this caller has already recorded timeout_fail_open for the permit attempt.
+		return nil, true, nil
 	}
 }
