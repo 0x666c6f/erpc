@@ -25,6 +25,17 @@ type doLimitResult struct {
 	panicErr error
 }
 
+type rateLimitEvalContext struct {
+	methodPattern string
+	scope         string
+	projectId     string
+	networkLabel  string
+	userLabel     string
+	agentName     string
+	method        string
+	observe       func(string)
+}
+
 type RateLimiterBudget struct {
 	logger     *zerolog.Logger
 	Id         string
@@ -247,6 +258,16 @@ func (b *RateLimiterBudget) evaluateRule(ctx context.Context, projectId string, 
 			outcome,
 		).Observe(time.Since(evalStartedAt).Seconds())
 	}
+	evalCtx := rateLimitEvalContext{
+		methodPattern: methodPattern,
+		scope:         scope,
+		projectId:     projectId,
+		networkLabel:  networkLabel,
+		userLabel:     userLabel,
+		agentName:     agentName,
+		method:        method,
+		observe:       observeEvaluation,
+	}
 
 	cache := b.getCache()
 	if cache == nil {
@@ -304,34 +325,20 @@ func (b *RateLimiterBudget) evaluateRule(ctx context.Context, projectId string, 
 		return b.recordFailOpen(
 			doSpan,
 			waitDuration,
-			methodPattern,
-			scope,
-			projectId,
-			networkLabel,
-			userLabel,
-			agentName,
-			method,
+			evalCtx,
 			"timeout_fail_open",
 			"limit_timeout",
 			nil,
-			observeEvaluation,
 		)
 	}
 	if panicErr != nil {
 		return b.recordFailOpen(
 			doSpan,
 			waitDuration,
-			methodPattern,
-			scope,
-			projectId,
-			networkLabel,
-			userLabel,
-			agentName,
-			method,
+			evalCtx,
 			"panic_fail_open",
 			"limit_panic",
 			panicErr,
-			observeEvaluation,
 		)
 	}
 
@@ -359,28 +366,28 @@ func (b *RateLimiterBudget) evaluateRule(ctx context.Context, projectId string, 
 func (b *RateLimiterBudget) recordFailOpen(
 	doSpan trace.Span,
 	waitDuration time.Duration,
-	methodPattern, scope, projectId, networkLabel, userLabel, agentName, method, outcome, reason string,
+	evalCtx rateLimitEvalContext,
+	outcome, reason string,
 	panicErr error,
-	observeEvaluation func(string),
 ) bool {
 	telemetry.ObserverHandle(
 		telemetry.MetricRateLimiterPermitWaitDuration,
 		b.Id,
-		methodPattern,
-		scope,
+		evalCtx.methodPattern,
+		evalCtx.scope,
 		outcome,
 	).Observe(waitDuration.Seconds())
-	observeEvaluation(outcome)
+	evalCtx.observe(outcome)
 	telemetry.MetricRateLimiterFailopenTotal.WithLabelValues(
-		projectId,
-		networkLabel,
-		userLabel,
-		agentName,
+		evalCtx.projectId,
+		evalCtx.networkLabel,
+		evalCtx.userLabel,
+		evalCtx.agentName,
 		b.Id,
-		method,
+		evalCtx.method,
 		reason,
 	).Inc()
-	telemetry.IncNetworkAttemptReason(projectId, networkLabel, method, telemetry.AttemptReasonFailOpen)
+	telemetry.IncNetworkAttemptReason(evalCtx.projectId, evalCtx.networkLabel, evalCtx.method, telemetry.AttemptReasonFailOpen)
 	if panicErr != nil {
 		doSpan.RecordError(panicErr)
 	}
