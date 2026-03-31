@@ -221,8 +221,16 @@ func (r *RateLimitersRegistry) GetBudgets() []*common.RateLimitBudgetConfig {
 	return r.cfg.Budgets
 }
 
-func (r *RateLimitersRegistry) onRedisCacheFailure(err error) {
+func (r *RateLimitersRegistry) onRedisCacheFailure(failedCache limiter.RateLimitCache, err error) {
+	if failedCache == nil {
+		return
+	}
+
 	r.cacheMu.Lock()
+	if r.envoyCache != failedCache {
+		r.cacheMu.Unlock()
+		return
+	}
 	r.envoyCache = nil
 	r.cacheMu.Unlock()
 

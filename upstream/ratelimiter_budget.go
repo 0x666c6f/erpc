@@ -325,7 +325,7 @@ func (b *RateLimiterBudget) evaluateRule(ctx context.Context, projectId string, 
 		).Observe(waitDuration.Seconds())
 		observeEvaluation("panic_fail_open")
 		telemetry.MetricRateLimiterFailopenTotal.WithLabelValues(
-			"", // projectId not available here
+			projectId,
 			networkLabel,
 			userLabel,
 			"", // agentName not available here
@@ -386,7 +386,7 @@ func (b *RateLimiterBudget) doLimitSafely(
 				Msg("panic recovered during rate limiter DoLimit (failing open)")
 
 			if b.registry != nil && b.registry.cfg != nil && b.registry.cfg.Store != nil && b.registry.cfg.Store.Driver == "redis" {
-				b.registry.onRedisCacheFailure(panicErr)
+				b.registry.onRedisCacheFailure(cache, panicErr)
 			}
 		}
 	}()

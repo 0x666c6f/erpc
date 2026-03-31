@@ -12,6 +12,7 @@ import (
 	"github.com/erpc/erpc/telemetry"
 	"github.com/erpc/erpc/util"
 	"github.com/prometheus/client_golang/prometheus"
+	promUtil "github.com/prometheus/client_golang/prometheus/testutil"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
@@ -43,6 +44,21 @@ func (c *panicRateLimitCache) DoLimit(context.Context, *pb.RateLimitRequest, []*
 }
 
 func (c *panicRateLimitCache) Flush() {}
+
+type delayedPanicRateLimitCache struct {
+	delay   time.Duration
+	paniced chan struct{}
+}
+
+var _ limiter.RateLimitCache = (*delayedPanicRateLimitCache)(nil)
+
+func (c *delayedPanicRateLimitCache) DoLimit(context.Context, *pb.RateLimitRequest, []*config.RateLimit) []*pb.RateLimitResponse_DescriptorStatus {
+	defer close(c.paniced)
+	time.Sleep(c.delay)
+	panic("EOF")
+}
+
+func (c *delayedPanicRateLimitCache) Flush() {}
 
 func histogramSampleCount(t *testing.T, hv *prometheus.HistogramVec, labels ...string) uint64 {
 	t.Helper()
@@ -216,6 +232,17 @@ func TestRateLimiterBudget_PermitTimingMetrics_PanicFailOpen(t *testing.T) {
 		"",
 		"panic_fail_open",
 	)
+	beforeFailOpen := promUtil.ToFloat64(
+		telemetry.MetricRateLimiterFailopenTotal.WithLabelValues(
+			projectID,
+			"",
+			"",
+			"",
+			"test-budget",
+			"eth_test",
+			"limit_panic",
+		),
+	)
 	ok, err := budget.TryAcquirePermit(context.Background(), projectID, nil, "eth_test", "", "", "", "")
 	require.NoError(t, err)
 	assert.True(t, ok)
@@ -242,8 +269,70 @@ func TestRateLimiterBudget_PermitTimingMetrics_PanicFailOpen(t *testing.T) {
 		"",
 		"panic_fail_open",
 	)
+	afterFailOpen := promUtil.ToFloat64(
+		telemetry.MetricRateLimiterFailopenTotal.WithLabelValues(
+			projectID,
+			"",
+			"",
+			"",
+			"test-budget",
+			"eth_test",
+			"limit_panic",
+		),
+	)
 	assert.GreaterOrEqual(t, afterEval-beforeEval, uint64(1))
 	assert.GreaterOrEqual(t, afterWait-beforeWait, uint64(1))
+	assert.Equal(t, beforeFailOpen+1, afterFailOpen)
+}
+
+func TestRateLimiterBudget_LatePanicFromStaleCacheDoesNotClearHealthyReconnect(t *testing.T) {
+	budget := newTestBudget(t)
+	budget.registry.cfg.Store = &common.RateLimitStoreConfig{
+		Driver: "redis",
+		Redis:  &common.RedisConnectorConfig{URI: "redis://test"},
+	}
+	budget.registry.initializer = util.NewInitializer(context.Background(), budget.logger, &util.InitializerConfig{
+		TaskTimeout:   time.Second,
+		AutoRetry:     false,
+		RetryFactor:   1,
+		RetryMinDelay: time.Second,
+		RetryMaxDelay: time.Second,
+	})
+	require.NoError(t, budget.registry.initializer.ExecuteTasks(
+		context.Background(),
+		util.NewBootstrapTask(redisRateLimiterConnectTaskName, func(context.Context) error { return nil }),
+	))
+
+	staleCache := &delayedPanicRateLimitCache{
+		delay:   40 * time.Millisecond,
+		paniced: make(chan struct{}),
+	}
+	healthyCache := &delayedRateLimitCache{statuses: []*pb.RateLimitResponse_DescriptorStatus{}}
+	budget.maxTimeout = 10 * time.Millisecond
+
+	budget.registry.cacheMu.Lock()
+	budget.registry.envoyCache = staleCache
+	budget.registry.cacheMu.Unlock()
+
+	ok, err := budget.TryAcquirePermit(context.Background(), "project-a", nil, "eth_test", "", "", "", "")
+	require.NoError(t, err)
+	assert.True(t, ok)
+
+	budget.registry.cacheMu.Lock()
+	budget.registry.envoyCache = healthyCache
+	budget.registry.cacheMu.Unlock()
+
+	select {
+	case <-staleCache.paniced:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("timed out waiting for stale cache panic")
+	}
+
+	assert.Same(t, healthyCache, budget.registry.GetCache())
+
+	status := budget.registry.initializer.Status()
+	require.Len(t, status.Tasks, 1)
+	assert.Equal(t, util.TaskSucceeded, status.Tasks[0].State)
 }
 
 func TestNormalizeRateLimitMethodLabel(t *testing.T) {
