@@ -1622,7 +1622,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "histogram_quantile(0.99, sum(rate(erpc_network_request_duration_seconds_bucket{\n    cluster=~\"${cluster:regex}\",\n    region=~\"${region:regex}\",\n    network=~\"${network:regex}\",\n    upstream=~\"${upstream:regex}\",\n    category=~\"${category:regex}\",\n    vendor=~\"${vendor:regex}\",\n    vendor!=\"<error>\",\n    project=~\"${project:regex}\",\n    finality=~\"${finality:regex}\",\n    user=~\"${user:regex}\"\n}[1m])) by (le, network, category, finality))",
+              "expr": "histogram_quantile(0.99, sum(rate(erpc_network_request_duration_seconds_bucket{\n    cluster=~\"${cluster:regex}\",\n    region=~\"${region:regex}\",\n    network=~\"${network:regex}\",\n    category=~\"${category:regex}\",\n    project=~\"${project:regex}\",\n    finality=~\"${finality:regex}\",\n    outcome=~\"success|cache\"\n}[1m])) by (le, network, category, finality))",
               "hide": false,
               "legendFormat": "{{network}}, {{category}}, {{finality}}",
               "range": true,
@@ -1724,7 +1724,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "histogram_quantile(0.9, sum(rate(erpc_network_request_duration_seconds_bucket{\n    cluster=~\"${cluster:regex}\",\n    region=~\"${region:regex}\",\n    network=~\"${network:regex}\",\n    upstream=~\"${upstream:regex}\",\n    category=~\"${category:regex}\",\n    vendor=~\"${vendor:regex}\",\n    vendor!=\"<error>\",\n    project=~\"${project:regex}\",\n    finality=~\"${finality:regex}\",\n    user=~\"${user:regex}\"\n}[1m])) by (le, network, category, finality))",
+              "expr": "histogram_quantile(0.9, sum(rate(erpc_network_request_duration_seconds_bucket{\n    cluster=~\"${cluster:regex}\",\n    region=~\"${region:regex}\",\n    network=~\"${network:regex}\",\n    category=~\"${category:regex}\",\n    project=~\"${project:regex}\",\n    finality=~\"${finality:regex}\",\n    outcome=~\"success|cache\"\n}[1m])) by (le, network, category, finality))",
               "legendFormat": "{{network}}, {{category}}, {{finality}}",
               "range": true,
               "refId": "A"
@@ -1829,7 +1829,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "histogram_quantile(0.5, sum(rate(erpc_network_request_duration_seconds_bucket{\n    cluster=~\"${cluster:regex}\",\n    region=~\"${region:regex}\",\n    network=~\"${network:regex}\",\n    upstream=~\"${upstream:regex}\",\n    category=~\"${category:regex}\",\n    vendor=~\"${vendor:regex}\",\n    vendor!=\"<error>\",\n    project=~\"${project:regex}\",\n    finality=~\"${finality:regex}\",\n    user=~\"${user:regex}\"\n}[1m])) by (le, network, category, finality))",
+              "expr": "histogram_quantile(0.5, sum(rate(erpc_network_request_duration_seconds_bucket{\n    cluster=~\"${cluster:regex}\",\n    region=~\"${region:regex}\",\n    network=~\"${network:regex}\",\n    category=~\"${category:regex}\",\n    project=~\"${project:regex}\",\n    finality=~\"${finality:regex}\",\n    outcome=~\"success|cache\"\n}[1m])) by (le, network, category, finality))",
               "hide": false,
               "legendFormat": "{{network}}, {{category}}, {{finality}}",
               "range": true,
@@ -1931,9 +1931,9 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "histogram_quantile(0.99, sum(rate(erpc_network_request_duration_seconds_bucket{\n    cluster=~\"${cluster:regex}\",\n    region=~\"${region:regex}\",\n    network=~\"${network:regex}\",\n    upstream=~\"${upstream:regex}\",\n    category=~\"${category:regex}\",\n    vendor=\"<error>\",\n    project=~\"${project:regex}\",\n    finality=~\"${finality:regex}\",\n    user=~\"${user:regex}\"\n}[1m])) by (le, network, category, finality, vendor))",
+              "expr": "histogram_quantile(0.99, sum(rate(erpc_network_request_duration_seconds_bucket{\n    cluster=~\"${cluster:regex}\",\n    region=~\"${region:regex}\",\n    network=~\"${network:regex}\",\n    category=~\"${category:regex}\",\n    project=~\"${project:regex}\",\n    finality=~\"${finality:regex}\",\n    outcome=\"error\"\n}[1m])) by (le, network, category, finality))",
               "hide": false,
-              "legendFormat": "{{network}}, {{category}}, {{finality}}, {{vendor}}",
+              "legendFormat": "{{network}}, {{category}}, {{finality}}, error",
               "range": true,
               "refId": "B"
             }
@@ -2033,8 +2033,8 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "histogram_quantile(0.9, sum(rate(erpc_network_request_duration_seconds_bucket{\n    cluster=~\"${cluster:regex}\",\n    region=~\"${region:regex}\",\n    network=~\"${network:regex}\",\n    upstream=~\"${upstream:regex}\",\n    category=~\"${category:regex}\",\n    vendor=\"<error>\",\n    project=~\"${project:regex}\",\n    finality=~\"${finality:regex}\",\n    user=~\"${user:regex}\"\n}[1m])) by (le, network, category, finality, vendor))",
-              "legendFormat": "{{network}}, {{category}}, {{vendor}}, {{finality}}",
+              "expr": "histogram_quantile(0.9, sum(rate(erpc_network_request_duration_seconds_bucket{\n    cluster=~\"${cluster:regex}\",\n    region=~\"${region:regex}\",\n    network=~\"${network:regex}\",\n    category=~\"${category:regex}\",\n    project=~\"${project:regex}\",\n    finality=~\"${finality:regex}\",\n    outcome=\"error\"\n}[1m])) by (le, network, category, finality))",
+              "legendFormat": "{{network}}, {{category}}, {{finality}}, error",
               "range": true,
               "refId": "A"
             }
@@ -2134,9 +2134,9 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "histogram_quantile(0.5, sum(rate(erpc_network_request_duration_seconds_bucket{\n    cluster=~\"${cluster:regex}\",\n    region=~\"${region:regex}\",\n    network=~\"${network:regex}\",\n    upstream=~\"${upstream:regex}\",\n    category=~\"${category:regex}\",\n    vendor=\"<error>\",\n    project=~\"${project:regex}\",\n    finality=~\"${finality:regex}\"\n}[1m])) by (le, network, category, finality, vendor))",
+              "expr": "histogram_quantile(0.5, sum(rate(erpc_network_request_duration_seconds_bucket{\n    cluster=~\"${cluster:regex}\",\n    region=~\"${region:regex}\",\n    network=~\"${network:regex}\",\n    category=~\"${category:regex}\",\n    project=~\"${project:regex}\",\n    finality=~\"${finality:regex}\",\n    outcome=\"error\"\n}[1m])) by (le, network, category, finality))",
               "hide": false,
-              "legendFormat": "{{network}}, {{category}}, {{vendor}}, {{finality}}",
+              "legendFormat": "{{network}}, {{category}}, {{finality}}, error",
               "range": true,
               "refId": "C"
             }
@@ -4021,7 +4021,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "histogram_quantile(0.99, sum(rate(erpc_upstream_request_duration_seconds_bucket{\n    region=~\"${region:regex}\",\n    cluster=~\"${cluster:regex}\",\n    network=~\"${network:regex}\",\n    vendor=~\"${vendor:regex}\",\n    user=~\"${user:regex}\",\n    category=~\"${category:regex}\",\n    composite=\"none\",\n    project=~\"${project:regex}\"\n}[1m])) by (le, project, vendor, category))",
+              "expr": "histogram_quantile(0.99, sum(rate(erpc_upstream_request_duration_seconds_bucket{\n    region=~\"${region:regex}\",\n    cluster=~\"${cluster:regex}\",\n    network=~\"${network:regex}\",\n    vendor=~\"${vendor:regex}\",\n    category=~\"${category:regex}\",\n    composite=\"none\",\n    project=~\"${project:regex}\"\n}[1m])) by (le, project, vendor, category))",
               "legendFormat": "{{project}}, {{vendor}}, {{category}}",
               "range": true,
               "refId": "C"
@@ -4128,7 +4128,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "histogram_quantile(0.9, sum(rate(erpc_upstream_request_duration_seconds_bucket{\n    network=~\"${network:regex}\",\n    vendor=~\"${vendor:regex}\",\n    user=~\"${user:regex}\",\n    category=~\"${category:regex}\",\n    composite=\"none\",\n    project=~\"${project:regex}\"\n}[1m])) by (le, project, vendor, category))",
+              "expr": "histogram_quantile(0.9, sum(rate(erpc_upstream_request_duration_seconds_bucket{\n    network=~\"${network:regex}\",\n    vendor=~\"${vendor:regex}\",\n    category=~\"${category:regex}\",\n    composite=\"none\",\n    project=~\"${project:regex}\"\n}[1m])) by (le, project, vendor, category))",
               "legendFormat": "{{project}}, {{vendor}}, {{category}}",
               "range": true,
               "refId": "B"
@@ -4350,7 +4350,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "histogram_quantile(0.99, sum(rate(erpc_upstream_request_duration_seconds_bucket{\n    network=~\"${network:regex}\",\n    upstream=~\"${upstream:regex}\",\n    category=~\"${category:regex}\",\n    composite=\"none\",\n    vendor=~\"${vendor:regex}\",\n    user=~\"${user:regex}\",\n    project=~\"${project:regex}\",\n    finality=~\"${finality:regex}\"\n}[1m])) by (le, project, upstream, category, finality))",
+              "expr": "histogram_quantile(0.99, sum(rate(erpc_upstream_request_duration_seconds_bucket{\n    network=~\"${network:regex}\",\n    upstream=~\"${upstream:regex}\",\n    category=~\"${category:regex}\",\n    composite=\"none\",\n    vendor=~\"${vendor:regex}\",\n    project=~\"${project:regex}\",\n    finality=~\"${finality:regex}\"\n}[1m])) by (le, project, upstream, category, finality))",
               "legendFormat": "{{project}}, {{upstream}}, {{category}}, {{finality}}",
               "range": true,
               "refId": "B"
@@ -4456,7 +4456,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "histogram_quantile(0.9, sum(rate(erpc_upstream_request_duration_seconds_bucket{\n    network=~\"${network:regex}\",\n    upstream=~\"${upstream:regex}\",\n    category=~\"${category:regex}\",\n    composite=\"none\",\n    vendor=~\"${vendor:regex}\",\n    user=~\"${user:regex}\",\n    project=~\"${project:regex}\",\n    finality=~\"${finality:regex}\"\n}[1m])) by (le, project, upstream, category, finality))",
+              "expr": "histogram_quantile(0.9, sum(rate(erpc_upstream_request_duration_seconds_bucket{\n    network=~\"${network:regex}\",\n    upstream=~\"${upstream:regex}\",\n    category=~\"${category:regex}\",\n    composite=\"none\",\n    vendor=~\"${vendor:regex}\",\n    project=~\"${project:regex}\",\n    finality=~\"${finality:regex}\"\n}[1m])) by (le, project, upstream, category, finality))",
               "legendFormat": "{{project}}, {{upstream}}, {{category}}, {{finality}}",
               "range": true,
               "refId": "B"
@@ -4563,7 +4563,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "histogram_quantile(0.50, sum(rate(erpc_upstream_request_duration_seconds_bucket{\n    network=~\"${network:regex}\",\n    upstream=~\"${upstream:regex}\",\n    category=~\"${category:regex}\",\n    composite=\"none\",\n    vendor=~\"${vendor:regex}\",\n    user=~\"${user:regex}\",\n    project=~\"${project:regex}\",\n    finality=~\"${finality:regex}\"\n}[30s])) by (le, project, upstream, category, finality))",
+              "expr": "histogram_quantile(0.50, sum(rate(erpc_upstream_request_duration_seconds_bucket{\n    network=~\"${network:regex}\",\n    upstream=~\"${upstream:regex}\",\n    category=~\"${category:regex}\",\n    composite=\"none\",\n    vendor=~\"${vendor:regex}\",\n    project=~\"${project:regex}\",\n    finality=~\"${finality:regex}\"\n}[30s])) by (le, project, upstream, category, finality))",
               "legendFormat": "{{project}}, {{upstream}}, {{category}}, {{finality}}",
               "range": true,
               "refId": "A"

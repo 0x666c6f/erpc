@@ -503,16 +503,16 @@ func SetHistogramBuckets(bucketsStr string) error {
 	MetricUpstreamRequestDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
 		Namespace: "erpc",
 		Name:      "upstream_request_duration_seconds",
-		Help:      "Duration of actual requests towards upstreams.",
+		Help:      "Duration of actual requests towards upstreams, without per-user labels to keep histogram cardinality bounded.",
 		Buckets:   buckets,
-	}, []string{"project", "vendor", "network", "upstream", "category", "composite", "finality", "user"})
+	}, []string{"project", "vendor", "network", "upstream", "category", "composite", "finality"})
 
 	MetricNetworkRequestDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
 		Namespace: "erpc",
 		Name:      "network_request_duration_seconds",
-		Help:      "Duration of requests for a network.",
+		Help:      "Duration of requests for a network, aggregated by outcome to keep histogram cardinality bounded.",
 		Buckets:   buckets,
-	}, []string{"project", "network", "vendor", "upstream", "category", "finality", "user"})
+	}, []string{"project", "network", "category", "finality", "outcome"})
 
 	MetricCacheSetSuccessDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
 		Namespace: "erpc",

@@ -197,7 +197,6 @@ type urdoKey struct {
 	category  string
 	composite string
 	finality  string
-	user      string
 }
 
 func (t *Tracker) getUpstreamRequestDurationObserver(up common.Upstream, method, composite string, finality common.DataFinalityState, userId string) prometheus.Observer {
@@ -209,13 +208,12 @@ func (t *Tracker) getUpstreamRequestDurationObserver(up common.Upstream, method,
 		category:  method,
 		composite: composite,
 		finality:  finality.String(),
-		user:      userId,
 	}
 	if v, ok := t.urdObsCache.Load(key); ok {
 		return v.(prometheus.Observer)
 	}
 	obs := telemetry.MetricUpstreamRequestDuration.WithLabelValues(
-		key.project, key.vendor, key.network, key.upstream, key.category, key.composite, key.finality, key.user,
+		key.project, key.vendor, key.network, key.upstream, key.category, key.composite, key.finality,
 	)
 	actual, _ := t.urdObsCache.LoadOrStore(key, obs)
 	return actual.(prometheus.Observer)
