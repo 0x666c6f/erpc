@@ -262,31 +262,32 @@ func (c *EvmJsonRpcCache) Get(ctx context.Context, req *common.NormalizedRequest
 		))
 		jrr, cachedAt, err = c.doGet(policyCtx, connector, policy, req, rpcReq)
 		if err != nil {
+			errorLabel := common.ErrorFingerprint(err)
 			common.SetTraceSpanError(policySpan, err)
 			policySpan.SetAttributes(
 				attribute.String("cache.get_outcome", "error"),
 				attribute.String("cache.error", common.ErrorSummary(err)),
 			)
-			telemetry.MetricCacheGetErrorTotal.WithLabelValues(
-				c.projectId,
-				req.NetworkLabel(),
-				rpcReq.Method,
-				connector.Id(),
-				policy.String(),
-				policy.GetTTL().String(),
-				common.ErrorSummary(err),
-				req.UserId(),
-			).Inc()
-			telemetry.MetricCacheGetErrorDuration.WithLabelValues(
-				c.projectId,
-				req.NetworkLabel(),
-				rpcReq.Method,
-				connector.Id(),
-				policy.String(),
-				policy.GetTTL().String(),
-				common.ErrorSummary(err),
-				req.UserId(),
-			).Observe(time.Since(start).Seconds())
+				telemetry.MetricCacheGetErrorTotal.WithLabelValues(
+					c.projectId,
+					req.NetworkLabel(),
+					rpcReq.Method,
+					connector.Id(),
+					policy.String(),
+					policy.GetTTL().String(),
+					errorLabel,
+					req.UserId(),
+				).Inc()
+				telemetry.MetricCacheGetErrorDuration.WithLabelValues(
+					c.projectId,
+					req.NetworkLabel(),
+					rpcReq.Method,
+					connector.Id(),
+					policy.String(),
+					policy.GetTTL().String(),
+					errorLabel,
+					req.UserId(),
+				).Observe(time.Since(start).Seconds())
 		} else if jrr == nil {
 			policySpan.SetAttributes(attribute.String("cache.get_outcome", "miss"))
 		} else {
@@ -579,26 +580,27 @@ func (c *EvmJsonRpcCache) Set(ctx context.Context, req *common.NormalizedRequest
 			shouldCache, err := shouldCacheResponse(lg, resp, rpcResp, policy)
 			if !shouldCache {
 				if err != nil {
-					telemetry.MetricCacheSetErrorTotal.WithLabelValues(
-						c.projectId,
-						req.NetworkLabel(),
-						rpcReq.Method,
-						connector.Id(),
-						policy.String(),
-						ttl.String(),
-						common.ErrorSummary(err),
-						req.UserId(),
-					).Inc()
-					telemetry.MetricCacheSetErrorDuration.WithLabelValues(
-						c.projectId,
-						req.NetworkLabel(),
-						rpcReq.Method,
-						connector.Id(),
-						policy.String(),
-						ttl.String(),
-						common.ErrorSummary(err),
-						req.UserId(),
-					).Observe(time.Since(start).Seconds())
+					errorLabel := common.ErrorFingerprint(err)
+						telemetry.MetricCacheSetErrorTotal.WithLabelValues(
+							c.projectId,
+							req.NetworkLabel(),
+							rpcReq.Method,
+							connector.Id(),
+							policy.String(),
+							ttl.String(),
+							errorLabel,
+							req.UserId(),
+						).Inc()
+						telemetry.MetricCacheSetErrorDuration.WithLabelValues(
+							c.projectId,
+							req.NetworkLabel(),
+							rpcReq.Method,
+							connector.Id(),
+							policy.String(),
+							ttl.String(),
+							errorLabel,
+							req.UserId(),
+						).Observe(time.Since(start).Seconds())
 					errsMu.Lock()
 					errs = append(errs, err)
 					errsMu.Unlock()
@@ -679,29 +681,30 @@ func (c *EvmJsonRpcCache) Set(ctx context.Context, req *common.NormalizedRequest
 			defer cancel()
 			err = connector.Set(ctx, pk, rk, storedValue, ttl)
 			if err != nil {
+				errorLabel := common.ErrorFingerprint(err)
 				errsMu.Lock()
 				errs = append(errs, err)
 				errsMu.Unlock()
-				telemetry.MetricCacheSetErrorTotal.WithLabelValues(
-					c.projectId,
-					req.NetworkLabel(),
-					rpcReq.Method,
-					connector.Id(),
-					policy.String(),
-					ttl.String(),
-					common.ErrorSummary(err),
-					req.UserId(),
-				).Inc()
-				telemetry.MetricCacheSetErrorDuration.WithLabelValues(
-					c.projectId,
-					req.NetworkLabel(),
-					rpcReq.Method,
-					connector.Id(),
-					policy.String(),
-					ttl.String(),
-					common.ErrorSummary(err),
-					req.UserId(),
-				).Observe(time.Since(start).Seconds())
+					telemetry.MetricCacheSetErrorTotal.WithLabelValues(
+						c.projectId,
+						req.NetworkLabel(),
+						rpcReq.Method,
+						connector.Id(),
+						policy.String(),
+						ttl.String(),
+						errorLabel,
+						req.UserId(),
+					).Inc()
+					telemetry.MetricCacheSetErrorDuration.WithLabelValues(
+						c.projectId,
+						req.NetworkLabel(),
+						rpcReq.Method,
+						connector.Id(),
+						policy.String(),
+						ttl.String(),
+						errorLabel,
+						req.UserId(),
+					).Observe(time.Since(start).Seconds())
 			} else {
 				telemetry.MetricCacheSetSuccessTotal.WithLabelValues(
 					c.projectId,

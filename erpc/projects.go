@@ -177,9 +177,11 @@ func (p *PreparedProject) Forward(ctx context.Context, networkId string, nq *com
 		upstream := resp.Upstream()
 		vendor := "n/a"
 		upstreamId := "n/a"
+		outcome := "success"
 		if resp.FromCache() {
 			vendor = "<cache>"
 			upstreamId = "<cache>"
+			outcome = "cache"
 		} else if upstream != nil {
 			vendor = upstream.VendorName()
 			upstreamId = upstream.Id()
@@ -211,11 +213,9 @@ func (p *PreparedProject) Forward(ctx context.Context, networkId string, nq *com
 		telemetry.ObserverHandle(telemetry.MetricNetworkRequestDuration,
 			p.Config.Id,
 			network.Label(),
-			vendor,
-			upstreamId,
 			method,
 			finality.String(),
-			nq.UserId(),
+			outcome,
 		).Observe(dur.Seconds())
 		return resp, err
 	} else {
@@ -242,11 +242,9 @@ func (p *PreparedProject) Forward(ctx context.Context, networkId string, nq *com
 		telemetry.ObserverHandle(telemetry.MetricNetworkRequestDuration,
 			p.Config.Id,
 			network.Label(),
-			"<error>",
-			"<error>",
 			method,
 			finality.String(),
-			nq.UserId(),
+			"error",
 		).Observe(time.Since(start).Seconds())
 	}
 
