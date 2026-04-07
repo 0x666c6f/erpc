@@ -81,7 +81,19 @@ func NewAuthorizer(appCtx context.Context, logger *zerolog.Logger, projectId str
 // the allowedMethods takes precedence over ignoreMethods, meaning that explicitly allowed methods will override ignore methods
 // for example if you want only eth_getLogs to be allowed, set ignoreMethods to ["*"] and allowMethods to ["eth_getLogs"]
 func (a *Authorizer) shouldApplyToMethod(method string) bool {
-	shouldApply := true
+	if len(a.cfg.AllowMethods) > 0 {
+		for _, allowMethod := range a.cfg.AllowMethods {
+			match, err := common.WildcardMatch(allowMethod, method)
+			if err != nil {
+				a.logger.Error().Err(err).Msgf("error matching allow method %s with method %s", allowMethod, method)
+				continue
+			}
+			if match {
+				return true
+			}
+		}
+		return false
+	}
 
 	if len(a.cfg.IgnoreMethods) > 0 {
 		for _, ignoreMethod := range a.cfg.IgnoreMethods {
@@ -91,27 +103,12 @@ func (a *Authorizer) shouldApplyToMethod(method string) bool {
 				continue
 			}
 			if match {
-				shouldApply = false
-				break
+				return false
 			}
 		}
 	}
 
-	if len(a.cfg.AllowMethods) > 0 {
-		for _, allowMethod := range a.cfg.AllowMethods {
-			match, err := common.WildcardMatch(allowMethod, method)
-			if err != nil {
-				a.logger.Error().Err(err).Msgf("error matching allow method %s with method %s", allowMethod, method)
-				continue
-			}
-			if match {
-				shouldApply = true
-				break
-			}
-		}
-	}
-
-	return shouldApply
+	return true
 }
 
 func (a *Authorizer) acquireRateLimitPermit(ctx context.Context, req *common.NormalizedRequest, method string) error {
