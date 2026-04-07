@@ -286,7 +286,6 @@ func (c *EvmJsonRpcCache) Get(ctx context.Context, req *common.NormalizedRequest
 				policy.String(),
 				policy.GetTTL().String(),
 				errorLabel,
-				req.UserId(),
 			).Observe(time.Since(start).Seconds())
 		} else if jrr == nil {
 			policySpan.SetAttributes(attribute.String("cache.get_outcome", "miss"))
@@ -370,7 +369,6 @@ func (c *EvmJsonRpcCache) Get(ctx context.Context, req *common.NormalizedRequest
 			labelConnectorId,
 			labelPolicyStr,
 			labelTTL,
-			req.UserId(),
 		).Observe(time.Since(start).Seconds())
 		span.SetAttributes(attribute.Bool("cache.hit", false))
 		return nil, nil
@@ -396,7 +394,6 @@ func (c *EvmJsonRpcCache) Get(ctx context.Context, req *common.NormalizedRequest
 				connector.Id(),
 				policy.String(),
 				policy.GetTTL().String(),
-				req.UserId(),
 			).Observe(time.Since(start).Seconds())
 			span.SetAttributes(attribute.Bool("cache.hit", false))
 			return nil, nil
@@ -430,7 +427,6 @@ func (c *EvmJsonRpcCache) Get(ctx context.Context, req *common.NormalizedRequest
 		connector.Id(),
 		policy.String(),
 		policy.GetTTL().String(),
-		req.UserId(),
 	).Observe(time.Since(start).Seconds())
 	span.SetAttributes(attribute.Bool("cache.hit", true))
 	if c.logger.GetLevel() <= zerolog.DebugLevel {
@@ -599,7 +595,6 @@ func (c *EvmJsonRpcCache) Set(ctx context.Context, req *common.NormalizedRequest
 						policy.String(),
 						ttl.String(),
 						errorLabel,
-						req.UserId(),
 					).Observe(time.Since(start).Seconds())
 					errsMu.Lock()
 					errs = append(errs, err)
@@ -703,7 +698,6 @@ func (c *EvmJsonRpcCache) Set(ctx context.Context, req *common.NormalizedRequest
 					policy.String(),
 					ttl.String(),
 					errorLabel,
-					req.UserId(),
 				).Observe(time.Since(start).Seconds())
 			} else {
 				telemetry.MetricCacheSetSuccessTotal.WithLabelValues(
@@ -722,7 +716,6 @@ func (c *EvmJsonRpcCache) Set(ctx context.Context, req *common.NormalizedRequest
 					connector.Id(),
 					policy.String(),
 					ttl.String(),
-					req.UserId(),
 				).Observe(time.Since(start).Seconds())
 			}
 		}(policy)

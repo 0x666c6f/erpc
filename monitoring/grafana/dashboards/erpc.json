@@ -10281,8 +10281,8 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "histogram_quantile(0.99, sum(rate(erpc_network_evm_get_logs_range_requested_bucket{network=~\"${network:regex}\",upstream=~\"${upstream:regex}\",category=~\"${category:regex}\",vendor=~\"${vendor:regex}\",vendor!=\"<error>\",project=~\"${project:regex}\",finality=~\"${finality:regex}\"}[1m])) by (le, project, network, user, finality))",
-              "legendFormat": "{{project}}, {{network}}, {{user}}, {{finality}}",
+              "expr": "histogram_quantile(0.99, sum(rate(erpc_network_evm_get_logs_range_requested_bucket{network=~\"${network:regex}\",category=~\"${category:regex}\",project=~\"${project:regex}\",finality=~\"${finality:regex}\"}[1m])) by (le, project, network, finality))",
+              "legendFormat": "{{project}}, {{network}}, {{finality}}",
               "range": true,
               "refId": "A"
             }
@@ -10380,8 +10380,8 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "histogram_quantile(0.5, sum(rate(erpc_network_evm_get_logs_range_requested_bucket{network=~\"${network:regex}\",upstream=~\"${upstream:regex}\",category=~\"${category:regex}\",vendor=~\"${vendor:regex}\",vendor!=\"<error>\",project=~\"${project:regex}\",finality=~\"${finality:regex}\"}[1m])) by (le, project, network, user, finality))",
-              "legendFormat": "{{project}}, {{network}}, {{user}}, {{finality}}",
+              "expr": "histogram_quantile(0.5, sum(rate(erpc_network_evm_get_logs_range_requested_bucket{network=~\"${network:regex}\",category=~\"${category:regex}\",project=~\"${project:regex}\",finality=~\"${finality:regex}\"}[1m])) by (le, project, network, finality))",
+              "legendFormat": "{{project}}, {{network}}, {{finality}}",
               "range": true,
               "refId": "A"
             }

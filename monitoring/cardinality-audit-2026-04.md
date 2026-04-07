@@ -20,13 +20,15 @@ From the 2026-04-01 Prometheus incident follow-up:
 1. `erpc_network_request_duration_seconds` carried `vendor`, `upstream`, and `user` labels even though it is a network-scoped latency histogram.
 2. `erpc_upstream_request_duration_seconds` carried `user`, multiplying every upstream/method/finality bucket by tenant cardinality.
 3. Cache error metrics used `ErrorSummary(err)` instead of the more stable `ErrorFingerprint(err)`, so message text leaked into histogram and counter label space.
-4. Prod configs can still opt into `scoreMetricsMode: detailed`, which is useful for debugging but expensive in steady-state.
-5. `erpc_network_hedge_delay_seconds_bucket` is still method-scoped and bucket-heavy enough to remain a follow-up target.
+4. Cache success/miss duration histograms and `erpc_network_evm_get_logs_range_requested` still carried `user`, multiplying otherwise stable cache-policy and finality bucket families by tenant cardinality.
+5. Prod configs can still opt into `scoreMetricsMode: detailed`, which is useful for debugging but expensive in steady-state.
+6. `erpc_network_hedge_delay_seconds_bucket` is still method-scoped and bucket-heavy enough to remain a follow-up target.
 
 ## Changes in this patch
 
 - Coarsened `erpc_network_request_duration_seconds` to `project, network, category, finality, outcome`.
 - Coarsened `erpc_upstream_request_duration_seconds` to drop the `user` label.
+- Coarsened cache duration histograms and `erpc_network_evm_get_logs_range_requested` to drop the `user` label.
 - Normalized cache get/set error labels to `ErrorFingerprint(err)`.
 - Updated bundled Grafana and Datadog dashboards to query the coarsened histograms.
 - Added regression tests to lock the new histogram label schemas.
@@ -35,9 +37,10 @@ From the 2026-04-01 Prometheus incident follow-up:
 
 - `erpc_network_request_duration_seconds_bucket` should collapse by the removed `vendor x upstream x user` dimensions while keeping success/error/cache visibility through `outcome`.
 - `erpc_upstream_request_duration_seconds_bucket` should collapse by the removed `user` dimension.
+- Cache duration histograms and `erpc_network_evm_get_logs_range_requested_bucket` should collapse by the removed `user` dimension.
 - `erpc_cache_get_error_duration_seconds_bucket` and `erpc_cache_set_error_duration_seconds_bucket` should stop churning on verbose error strings.
 
-The two duration histogram families were the largest app-side series owners in prod, so these are the highest-leverage app changes available inside eRPC itself.
+The duration histogram families are the largest app-side series owners in prod, so these remain the highest-leverage app changes available inside eRPC itself.
 
 ## Keep / coarsen / drop / relabel
 
@@ -48,6 +51,8 @@ The two duration histogram families were the largest app-side series owners in p
 - Coarsen:
   - network request latency histogram
   - upstream request latency histogram
+  - cache duration histograms
+  - `erpc_network_evm_get_logs_range_requested`
   - cache error labels
 - Follow-up:
   - `PLA-1064`: hedge delay histogram dimensions and bucket count

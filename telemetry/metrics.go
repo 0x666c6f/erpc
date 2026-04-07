@@ -558,9 +558,9 @@ var (
 	MetricNetworkEvmGetLogsRangeRequested = promauto.NewHistogramVec(prometheus.HistogramOpts{
 		Namespace: "erpc",
 		Name:      "network_evm_get_logs_range_requested",
-		Help:      "eth_getLogs requested block-range sizes.",
+		Help:      "eth_getLogs requested block-range sizes, without per-user labels to keep histogram cardinality bounded.",
 		Buckets:   EvmGetLogsRangeHistogramBuckets,
-	}, []string{"project", "network", "category", "user", "finality"})
+	}, []string{"project", "network", "category", "finality"})
 
 	// Multicall3 aggregation metrics
 	MetricMulticall3AggregationTotal = promauto.NewCounterVec(prometheus.CounterOpts{
@@ -844,37 +844,37 @@ func SetHistogramBuckets(bucketsStr string) error {
 	MetricCacheSetSuccessDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
 		Namespace: "erpc",
 		Name:      "cache_set_success_duration_seconds",
-		Help:      "Duration of cache set operations.",
+		Help:      "Duration of cache set operations, without per-user labels to keep histogram cardinality bounded.",
 		Buckets:   buckets,
-	}, []string{"project", "network", "category", "connector", "policy", "ttl", "user"})
+	}, []string{"project", "network", "category", "connector", "policy", "ttl"})
 
 	MetricCacheSetErrorDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
 		Namespace: "erpc",
 		Name:      "cache_set_error_duration_seconds",
-		Help:      "Duration of cache set errors.",
+		Help:      "Duration of cache set errors, without per-user labels to keep histogram cardinality bounded.",
 		Buckets:   buckets,
-	}, []string{"project", "network", "category", "connector", "policy", "ttl", "error", "user"})
+	}, []string{"project", "network", "category", "connector", "policy", "ttl", "error"})
 
 	MetricCacheGetSuccessHitDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
 		Namespace: "erpc",
 		Name:      "cache_get_success_hit_duration_seconds",
-		Help:      "Duration of cache get hits.",
+		Help:      "Duration of cache get hits, without per-user labels to keep histogram cardinality bounded.",
 		Buckets:   buckets,
-	}, []string{"project", "network", "category", "connector", "policy", "ttl", "user"})
+	}, []string{"project", "network", "category", "connector", "policy", "ttl"})
 
 	MetricCacheGetSuccessMissDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
 		Namespace: "erpc",
 		Name:      "cache_get_success_miss_duration_seconds",
-		Help:      "Duration of cache get misses.",
+		Help:      "Duration of cache get misses, without per-user labels to keep histogram cardinality bounded.",
 		Buckets:   buckets,
-	}, []string{"project", "network", "category", "connector", "policy", "ttl", "user"})
+	}, []string{"project", "network", "category", "connector", "policy", "ttl"})
 
 	MetricCacheGetErrorDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
 		Namespace: "erpc",
 		Name:      "cache_get_error_duration_seconds",
-		Help:      "Duration of cache get errors.",
+		Help:      "Duration of cache get errors, without per-user labels to keep histogram cardinality bounded.",
 		Buckets:   buckets,
-	}, []string{"project", "network", "category", "connector", "policy", "ttl", "error", "user"})
+	}, []string{"project", "network", "category", "connector", "policy", "ttl", "error"})
 
 	MetricConsensusDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
 		Namespace: "erpc",
