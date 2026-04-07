@@ -83,7 +83,7 @@ func prewarmPerCall(combos []labelCombo, project string) {
 
 func prewarmCached(tk *Tracker, combos []labelCombo) {
 	for _, c := range combos {
-		_ = tk.getUpstreamRequestDurationObserver(c.up, c.method, c.comp, c.final, c.user)
+		_ = tk.getUpstreamRequestDurationObserver(c.up, c.method, c.comp, c.final)
 	}
 }
 

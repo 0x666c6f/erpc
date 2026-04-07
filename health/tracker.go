@@ -214,7 +214,7 @@ type urdoKey struct {
 	finality  string
 }
 
-func (t *Tracker) getUpstreamRequestDurationObserver(up common.Upstream, method, composite string, finality common.DataFinalityState, userId string) prometheus.Observer {
+func (t *Tracker) getUpstreamRequestDurationObserver(up common.Upstream, method, composite string, finality common.DataFinalityState) prometheus.Observer {
 	key := urdoKey{
 		project:   t.projectId,
 		vendor:    up.VendorName(),
@@ -564,7 +564,7 @@ func (t *Tracker) RecordUpstreamDuration(up common.Upstream, method string, d ti
 		}
 	}
 	// Use cached observer to avoid per-request MetricVec lookups/locks.
-	if obs := t.getUpstreamRequestDurationObserver(up, method, comp, finality, userId); obs != nil {
+	if obs := t.getUpstreamRequestDurationObserver(up, method, comp, finality); obs != nil {
 		obs.Observe(sec)
 	}
 }
