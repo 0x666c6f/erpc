@@ -625,14 +625,14 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "sum(increase(erpc_network_successful_request_total{\n    \n    network=~\"${network:regex}\",\n    project=~\"${project:regex}\",\n    client_name=~\"${client_name:regex}\",\n    cluster_key=~\"${cluster_key:regex}\",\n    vendor=~\"${vendor:regex}\",\n    upstream=~\"${upstream:regex}\",\n    vendor!~\"${ignore_vendor:regex}\",\n    category=~\"${category:regex}\",\n    finality=~\"${finality:regex}\",user=~\"${user:regex}\"\n    }[1m])) by (region, agent_name) > 0",
+              "expr": "sum(increase(erpc_network_successful_request_total{\n    \n    network=~\"${network:regex}\",\n    project=~\"${project:regex}\",\n    client_name=~\"${client_name:regex}\",\n    cluster_key=~\"${cluster_key:regex}\",\n    vendor=~\"${vendor:regex}\",\n    upstream=~\"${upstream:regex}\",\n    vendor!~\"${ignore_vendor:regex}\",\n    category=~\"${category:regex}\",\n    finality=~\"${finality:regex}\",user=~\"${user:regex}\"\n    }[1m])) by (region, user) > 0",
               "interval": "",
-              "legendFormat": "{{region}} {{agent_name}}",
+              "legendFormat": "{{region}} {{user}}",
               "range": true,
               "refId": "A"
             }
           ],
-          "title": "Total Responses (by Region and User-Agent)",
+          "title": "Total Responses (by Region and User)",
           "type": "timeseries"
         }
       ],

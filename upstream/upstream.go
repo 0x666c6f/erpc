@@ -443,7 +443,6 @@ func (u *Upstream) Forward(ctx context.Context, nrq *common.NormalizedRequest, b
 				nrq.CompositeType(),
 				finality.String(),
 				nrq.UserId(),
-				nrq.AgentName(),
 			).Inc()
 			timer := u.metricsTracker.RecordUpstreamDurationStart(u, method, nrq.CompositeType(), finality, nrq.UserId())
 
@@ -528,7 +527,6 @@ func (u *Upstream) Forward(ctx context.Context, nrq *common.NormalizedRequest, b
 						nrq.CompositeType(),
 						finality.String(),
 						nrq.UserId(),
-						nrq.AgentName(),
 					).Inc()
 				}
 

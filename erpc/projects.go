@@ -201,7 +201,6 @@ func (p *PreparedProject) Forward(ctx context.Context, networkId string, nq *com
 			finality.String(),
 			strconv.FormatBool(resp.IsResultEmptyish(ctx)),
 			nq.UserId(),
-			nq.AgentName(),
 		).Inc()
 		dur := time.Since(start)
 		resp.SetDuration(dur)
@@ -237,7 +236,6 @@ func (p *PreparedProject) Forward(ctx context.Context, networkId string, nq *com
 			string(common.ClassifySeverity(err)),
 			finality.String(),
 			nq.UserId(),
-			nq.AgentName(),
 		).Inc()
 		telemetry.ObserverHandle(telemetry.MetricNetworkRequestDuration,
 			p.Config.Id,

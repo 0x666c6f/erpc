@@ -239,34 +239,32 @@ func (t *Tracker) getUpstreamRequestDurationObserver(up common.Upstream, method,
 
 // Reuse the same shape previously used for upstream rate limit counters to keep cache keys stable for remote.
 type rrltKey struct {
-	project   string
-	vendor    string
-	network   string
-	upstream  string
-	category  string
-	user      string
-	agentName string
-	finality  string
+	project  string
+	vendor   string
+	network  string
+	upstream string
+	category string
+	user     string
+	finality string
 }
 
-func (t *Tracker) getRemoteRateLimitedCounter(up common.Upstream, method, userId, agentName, finality string) prometheus.Counter {
-	key := rrltKey{t.projectId, up.VendorName(), up.NetworkLabel(), up.Id(), method, userId, agentName, finality}
+func (t *Tracker) getRemoteRateLimitedCounter(up common.Upstream, method, userId, finality string) prometheus.Counter {
+	key := rrltKey{t.projectId, up.VendorName(), up.NetworkLabel(), up.Id(), method, userId, finality}
 	if v, ok := t.remoteRateLimitedCounterCache.Load(key); ok {
 		return v.(prometheus.Counter)
 	}
 	c := telemetry.MetricRateLimitsTotal.WithLabelValues(
-		key.project,   // project
-		key.network,   // network
-		key.vendor,    // vendor
-		key.upstream,  // upstream
-		key.category,  // category
-		key.finality,  // finality
-		key.user,      // user
-		key.agentName, // agent_name
-		"<remote>",    // budget
-		"remote",      // scope (remote upstream)
-		"",            // auth
-		"upstream",    // origin
+		key.project,  // project
+		key.network,  // network
+		key.vendor,   // vendor
+		key.upstream, // upstream
+		key.category, // category
+		key.finality, // finality
+		key.user,     // user
+		"<remote>",   // budget
+		"remote",     // scope (remote upstream)
+		"",           // auth
+		"upstream",   // origin
 	)
 	actual, _ := t.remoteRateLimitedCounterCache.LoadOrStore(key, c)
 	return actual.(prometheus.Counter)
@@ -617,17 +615,15 @@ func (t *Tracker) RecordUpstreamRemoteRateLimited(ctx context.Context, up common
 		t.getNtwMetrics(nk).RemoteRateLimitedTotal.Add(1)
 	}
 
-	var userId, agentName, finality string
+	var userId, finality string
 	if req != nil {
 		userId = req.UserId()
-		agentName = req.AgentName()
 		finality = req.Finality(ctx).String()
 	} else {
 		userId = "n/a"
-		agentName = "unknown"
 	}
 
-	t.getRemoteRateLimitedCounter(up, method, userId, agentName, finality).Inc()
+	t.getRemoteRateLimitedCounter(up, method, userId, finality).Inc()
 }
 
 // --------------------------------------------

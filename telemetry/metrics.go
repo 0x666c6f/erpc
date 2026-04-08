@@ -21,13 +21,13 @@ var (
 		Namespace: "erpc",
 		Name:      "upstream_request_total",
 		Help:      "Total number of actual requests to upstreams.",
-	}, []string{"project", "vendor", "network", "upstream", "category", "attempt", "composite", "finality", "user", "agent_name"})
+	}, []string{"project", "vendor", "network", "upstream", "category", "attempt", "composite", "finality", "user"})
 
 	MetricUpstreamErrorTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "erpc",
 		Name:      "upstream_request_errors_total",
 		Help:      "Total number of errors for actual requests towards upstreams.",
-	}, []string{"project", "vendor", "network", "upstream", "category", "error", "severity", "composite", "finality", "user", "agent_name"})
+	}, []string{"project", "vendor", "network", "upstream", "category", "error", "severity", "composite", "finality", "user"})
 
 	MetricUpstreamSkippedTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "erpc",
@@ -249,20 +249,20 @@ var (
 		Namespace: "erpc",
 		Name:      "network_hedge_delay_seconds",
 		Help:      "Hedge delay used for requests (seconds).",
-		Buckets:   []float64{0.01, 0.03, 0.05, 0.2, 0.3, 0.5, 0.7, 1, 3},
+		Buckets:   []float64{0.01, 0.05, 0.2, 0.7, 3},
 	}, []string{"project", "network", "category", "finality"})
 
 	MetricNetworkFailedRequests = promauto.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "erpc",
 		Name:      "network_failed_request_total",
 		Help:      "Total number of failed requests for a network.",
-	}, []string{"project", "network", "category", "attempt", "error", "severity", "finality", "user", "agent_name"})
+	}, []string{"project", "network", "category", "attempt", "error", "severity", "finality", "user"})
 
 	MetricNetworkSuccessfulRequests = promauto.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "erpc",
 		Name:      "network_successful_request_total",
 		Help:      "Total number of successful requests for a network.",
-	}, []string{"project", "network", "vendor", "upstream", "category", "attempt", "finality", "emptyish", "user", "agent_name"})
+	}, []string{"project", "network", "vendor", "upstream", "category", "attempt", "finality", "emptyish", "user"})
 
 	MetricNetworkUpstreamCallsPerRequest = promauto.NewHistogramVec(prometheus.HistogramOpts{
 		Namespace: "erpc",
@@ -294,7 +294,7 @@ var (
 		Namespace: "erpc",
 		Name:      "rate_limits_total",
 		Help:      "Unified rate limiting events (remote limits and budget decisions).",
-	}, []string{"project", "network", "vendor", "upstream", "category", "finality", "user", "agent_name", "budget", "scope", "auth", "origin"})
+	}, []string{"project", "network", "vendor", "upstream", "category", "finality", "user", "budget", "scope", "auth", "origin"})
 
 	MetricRateLimiterPermitEvaluationDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
 		Namespace: "erpc",
