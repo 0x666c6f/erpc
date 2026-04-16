@@ -143,7 +143,7 @@ func BenchmarkMetricUpstreamRequestDuration_Cached(b *testing.B) {
 		for pb.Next() {
 			c := combos[idx]
 			// isSuccess=false to avoid quantile updates and isolate the histogram path cost
-			tk.RecordUpstreamDuration(c.up, c.method, 3*time.Millisecond, false, c.comp, c.final, c.user)
+			tk.RecordUpstreamDuration(c.up, c.method, 3*time.Millisecond, false, c.comp, c.final)
 			idx++
 			if idx >= len(combos) {
 				idx = 0

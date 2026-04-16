@@ -20,7 +20,7 @@ metrics:
   listenV6: false
   hostV6: "[::]"
   port: 4001
-  errorLabelMode: "compact" # Optional: "compact" (default) or "verbose"
+  errorLabelMode: "compact" # Optional: "verbose" (default) or "compact"
   histogramBuckets: "0.05,0.5,5,30" # Optional: custom histogram buckets
 ```
 </Tabs.Tab>
@@ -37,7 +37,7 @@ export default createConfig({
     listenV6: false,
     hostV6: "[::]",
     port: 4001,
-    errorLabelMode: "compact", // Optional: "compact" (default) or "verbose"
+    errorLabelMode: "compact", // Optional: "verbose" (default) or "compact"
     histogramBuckets: "0.05,0.5,5,30", // Optional: custom histogram buckets
   }
 });
@@ -60,13 +60,13 @@ The `errorLabelMode` setting controls how detailed error information is included
   <Tabs.Tab>
 ```yaml filename="erpc.yaml"
 metrics:
-  errorLabelMode: "compact" # "verbose" or "compact"
+  errorLabelMode: "compact" # "verbose" (default) or "compact"
 ```
   </Tabs.Tab>
   <Tabs.Tab>
 ```ts filename="erpc.ts"
 metrics: {
-  errorLabelMode: "compact", // "verbose" or "compact"
+  errorLabelMode: "compact", // "verbose" (default) or "compact"
 }
 ```
   </Tabs.Tab>

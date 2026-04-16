@@ -47,12 +47,12 @@ func TestAuthorizerShouldApplyToMethod(t *testing.T) {
 			want:   true,
 		},
 		{
-			name: "allow miss blocks method",
+			name: "allow miss still allows method without ignore match",
 			cfg: &common.AuthStrategyConfig{
 				AllowMethods: []string{"eth_call", "eth_chainId"},
 			},
 			method: "debug_traceBlockByNumber",
-			want:   false,
+			want:   true,
 		},
 		{
 			name: "allow overrides ignore",
