@@ -103,14 +103,14 @@ For canary/control experiment tracking, eRPC emits two low-cardinality labels on
 
 Set these as deployment-level env vars (same values for all pods in a rollout) to avoid label explosion.
 
-#### Built-in Latency Guardrails
-
-The highest-cost latency histograms are intentionally coarsened:
+#### Built-in Cardinality Guardrails
 
 - `erpc_upstream_request_duration_seconds` omits the `user` label.
 - `erpc_network_request_duration_seconds` uses `outcome=success|cache|error` instead of `vendor`, `upstream`, and `user`.
 - `erpc_cache_set_*_duration_seconds`, `erpc_cache_get_*_duration_seconds`, and `erpc_network_evm_get_logs_range_requested` also omit `user`.
 - `erpc_network_hedge_delay_seconds` uses a 5-bucket budget (`0.01, 0.05, 0.2, 0.7, 3`) to keep hedge telemetry cheap.
+- `erpc_network_upstream_calls_per_request` uses a compact 5-bucket budget (`1, 2, 3, 5, 13`) because the metric is mainly used to spot retry/hedge amplification, not exact long-tail call counts.
+- `erpc_network_evm_block_range_requested_total` is network-scoped on purpose; use it for access-pattern heatmaps, and use upstream request counters for upstream-specific drill-downs.
 
 Hot request counters keep `user` for drill-downs but drop `agent_name` on the largest families (`erpc_upstream_request_total`, `erpc_upstream_request_errors_total`, `erpc_network_successful_request_total`, `erpc_network_failed_request_total`, `erpc_rate_limits_total`). Keep `scoreMetricsMode: compact` unless you explicitly need per-method routing telemetry.
 
