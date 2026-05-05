@@ -5,6 +5,10 @@ root=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
 cd "$root"
 
 repo_name=$(basename "$root")
+remote_url=$(git config --get remote.fork.url || git config --get remote.origin.url || true)
+if [[ -n "$remote_url" ]]; then
+  repo_name=$(basename "${remote_url%.git}")
+fi
 in_git=0
 if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   in_git=1
