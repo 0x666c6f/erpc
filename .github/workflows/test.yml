@@ -34,8 +34,12 @@ jobs:
         run: make setup
       - name: Build
         run: make build
-      - name: Test with the Go CLI
+      - name: Test packages with the Go CLI
         run: make test-fast PKG_EXCLUDE_REGEX='^github\.com/erpc/erpc/(cmd|test|erpc)($$|/)'
+      - name: Test erpc critical paths
+        run: |
+          go test ./erpc -run '^(TestConsensusPolicy|TestConsensusPolicy_DSLScenarios)$' -count=1 -parallel 1 -timeout 3m -v
+          make test-fallback-config
 
   security:
     runs-on: ubuntu-24.04

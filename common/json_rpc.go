@@ -309,11 +309,6 @@ func (r *JsonRpcResponse) ParseFromStream(ctx []context.Context, reader io.Reade
 		Error  json.RawMessage `json:"error"`
 	}
 
-	// Return buffer after we're done parsing and copying what we need
-	if returnBuf != nil {
-		defer returnBuf()
-	}
-
 	// Use Sonic's Unmarshal which works directly with bytes
 	if err := SonicCfg.Unmarshal(data, &temp); err != nil {
 		// If the underlying buffer won't be pooled (large), avoid an extra full copy and

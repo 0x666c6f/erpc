@@ -2770,7 +2770,6 @@ func startConsensusMockServers(t *testing.T, tc consensusTestCase) {
 			params, _ := req["params"].([]interface{})
 
 			w.Header().Set("Content-Type", "application/json")
-
 			// Determine whether this is the test method call or a state-poller call.
 			// For methods that double as state-poller methods (e.g. eth_getBlockByNumber),
 			// distinguish by checking whether the first param is a block tag.
@@ -2786,6 +2785,7 @@ func startConsensusMockServers(t *testing.T, tc consensusTestCase) {
 			}
 
 			if isTestCall {
+				callCounts[idx].Add(1)
 				if !hasMockResp {
 					w.WriteHeader(http.StatusInternalServerError)
 					json.NewEncoder(w).Encode(map[string]interface{}{ //nolint:errcheck
@@ -2794,7 +2794,6 @@ func startConsensusMockServers(t *testing.T, tc consensusTestCase) {
 					})
 					return
 				}
-				callCounts[idx].Add(1)
 				if mockResp.delay > 0 {
 					time.Sleep(mockResp.delay)
 				}
@@ -2909,16 +2908,14 @@ func consensusMockResponseKey(resp mockResponse) string {
 func runConsensusTest(t *testing.T, tc consensusTestCase) {
 	util.ResetGock()
 	defer util.ResetGock()
-	util.SetupMocksForEvmStatePoller()
-	if tc.expectedPendingMocks >= 0 {
-		defer util.AssertNoPendingMocks(t, tc.expectedPendingMocks)
-	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer func() {
 		cancel()
 		time.Sleep(10 * time.Millisecond) // allow goroutines to settle
 	}()
+
+	startConsensusMockServers(t, tc)
 
 	// Setup Network AFTER mocks to avoid races during background initialization
 	ntw, upsReg := setupNetworkForConsensusTest(t, ctx, tc)

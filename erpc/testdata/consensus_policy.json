@@ -63,7 +63,7 @@
     },
     {
       "nl": "below_threshold_acceptmostcommon_with_tie_between_different_non_empty_results_expect_dispute",
-      "dsl": "MXP:3 ATSH:3 LPAMC U1:RS100A U2:RS100B U3:RSNE =\u003e DISPUTE"
+      "dsl": "MXP:3 ATSH:3 LPAMC U1:RS100A U2:RS100B U3:RS100C =\u003e DISPUTE"
     }
   ]
 }
