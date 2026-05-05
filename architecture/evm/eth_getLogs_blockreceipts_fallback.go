@@ -331,7 +331,7 @@ func (w *getLogsFromBlockReceiptsWriter) WriteTo(out io.Writer, trimSides bool) 
 	return n, nil
 }
 
-func fallbackEthGetLogsSingleBlockViaBlockReceipts(ctx context.Context, n common.Network, parent *common.NormalizedRequest, blockNumber int64, address interface{}, topics interface{}, maxDataBytes int64, skipCacheRead bool, responseID interface{}) (*common.JsonRpcResponse, error) {
+func fallbackEthGetLogsSingleBlockViaBlockReceipts(ctx context.Context, n common.Network, parent *common.NormalizedRequest, blockNumber int64, address interface{}, topics interface{}, maxDataBytes int64, skipCacheRead string, responseID interface{}) (*common.JsonRpcResponse, error) {
 	bh, err := common.NormalizeHex(blockNumber)
 	if err != nil {
 		return nil, err

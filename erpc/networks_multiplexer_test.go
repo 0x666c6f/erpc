@@ -511,7 +511,7 @@ func TestNetwork_Multiplexer_FollowersReceiveResponse(t *testing.T) {
 		time.Sleep(networkPostCompletionCoalescingWindow / 4)
 
 		req2 := common.NewNormalizedRequest(requestBody)
-		req2.SetDirectives(&common.RequestDirectives{SkipCacheRead: true})
+		req2.SetDirectives(&common.RequestDirectives{SkipCacheRead: "true"})
 		resp2, err := network.Forward(ctx, req2)
 		require.NoError(t, err)
 		require.NotNil(t, resp2)

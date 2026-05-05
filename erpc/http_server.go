@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -28,6 +29,8 @@ import (
 	"github.com/rs/zerolog"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
+	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/h2c"
 )
 
 // Only compress responses larger than 1KB to save CPU on small responses
@@ -44,6 +47,7 @@ type HttpServer struct {
 	adminCfg                *common.AdminConfig
 	serverV4                *http.Server
 	serverV6                *http.Server
+	sharedGrpcServer        *GrpcServer
 	erpc                    *ERPC
 	logger                  *zerolog.Logger
 	healthCheckAuthRegistry *auth.AuthRegistry
@@ -197,17 +201,38 @@ func NewHttpServer(
 	}
 
 	h := srv.createRequestHandler()
+
 	if cfg.EnableGzip != nil && *cfg.EnableGzip {
 		h = gzipHandler(h)
 	}
 
 	// Create handler with timeout
-	handlerWithTimeout := TimeoutHandler(logger, h, reqMaxTimeout)
+	httpHandler := TimeoutHandler(logger, h, reqMaxTimeout)
+	handlerV4 := httpHandler
+	handlerV6 := httpHandler
+
+	if grpcSharesHttpV4(cfg) {
+		sharedGrpcServer, err := NewGrpcServer(ctx, logger, cfg, erpc)
+		if err != nil {
+			return nil, err
+		}
+		srv.sharedGrpcServer = sharedGrpcServer
+		handlerV4 = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.ProtoMajor == 2 && strings.HasPrefix(strings.ToLower(r.Header.Get("Content-Type")), "application/grpc") {
+				sharedGrpcServer.server.ServeHTTP(w, r)
+				return
+			}
+			httpHandler.ServeHTTP(w, r)
+		})
+		if cfg.TLS == nil || !cfg.TLS.Enabled {
+			handlerV4 = h2c.NewHandler(handlerV4, &http2.Server{})
+		}
+	}
 
 	// Create IPv4 server if configured
 	if cfg.ListenV4 != nil && *cfg.ListenV4 {
 		srv.serverV4 = &http.Server{
-			Handler:        handlerWithTimeout,
+			Handler:        handlerV4,
 			ReadTimeout:    readTimeout,
 			WriteTimeout:   writeTimeout,
 			IdleTimeout:    300 * time.Second,
@@ -218,9 +243,11 @@ func NewHttpServer(
 	// Create IPv6 server if configured
 	if cfg.ListenV6 != nil && *cfg.ListenV6 {
 		srv.serverV6 = &http.Server{
-			Handler:      handlerWithTimeout,
-			ReadTimeout:  readTimeout,
-			WriteTimeout: writeTimeout,
+			Handler:        handlerV6,
+			ReadTimeout:    readTimeout,
+			WriteTimeout:   writeTimeout,
+			IdleTimeout:    300 * time.Second,
+			MaxHeaderBytes: 1 << 20, // 1MB
 		}
 	}
 
@@ -542,8 +569,78 @@ func (s *HttpServer) createRequestHandler() http.Handler {
 					return
 				}
 
+				if project != nil {
+					for _, matchKey := range project.Config.ForwardHeaders {
+						for key, values := range headers {
+							matches, err := common.WildcardMatch(matchKey, key)
+							if err != nil {
+								responses[index] = processErrorBody(&lg, &startedAt, nq, err, &common.TRUE)
+								common.EndRequestSpan(requestCtx, nil, responses[index])
+								return
+							}
+							if matches {
+								for _, value := range values {
+									nq.ForwardHeaders.Add(matchKey, value)
+								}
+							}
+						}
+					}
+				}
+
 				method, _ := nq.Method()
 				rlg := lg.With().Str("method", method).Logger()
+
+				shouldHandleMethod := true
+
+				if project != nil && project.Config.IgnoreMethods != nil {
+					for _, m := range project.Config.IgnoreMethods {
+						match, err := common.WildcardMatch(m, method)
+						if err != nil {
+							responses[index] = processErrorBody(&rlg, &startedAt, nq, err, &common.TRUE)
+							common.EndRequestSpan(requestCtx, nil, err)
+							return
+						}
+						if match {
+							shouldHandleMethod = false
+							break
+						}
+					}
+				}
+
+				if project != nil && project.Config.AllowMethods != nil {
+					for _, m := range project.Config.AllowMethods {
+						match, err := common.WildcardMatch(m, method)
+						if err != nil {
+							responses[index] = processErrorBody(&rlg, &startedAt, nq, err, &common.TRUE)
+							common.EndRequestSpan(requestCtx, nil, err)
+							return
+						}
+						if match {
+							shouldHandleMethod = true
+							break
+						}
+					}
+				}
+
+				if !shouldHandleMethod {
+					jsonrpcVersion := "2.0"
+					var reqId interface{}
+					if jrr, err := nq.JsonRpcRequest(); err != nil {
+						jsonrpcVersion = jrr.JSONRPC
+						reqId = jrr.ID
+					}
+					responses[index] = &HttpJsonRpcErrorResponse{
+						Jsonrpc: jsonrpcVersion,
+						Id:      reqId,
+						Error: map[string]interface{}{
+							"code":    int(common.JsonRpcErrorUnsupportedException),
+							"message": fmt.Sprintf("method not supported: %s", method),
+						},
+						Cause: nil,
+					}
+					common.EndRequestSpan(requestCtx, nil, nil)
+					return
+				}
 
 				var ap *auth.AuthPayload
 				var err error
@@ -559,6 +656,18 @@ func (s *HttpServer) createRequestHandler() http.Handler {
 					return
 				}
 
+				// Set the full request URL for x402 402 response resource field.
+				// Only computed when an x402 payload is present.
+				if ap != nil && ap.Type == common.AuthTypeX402 && ap.X402 != nil {
+					scheme := "https"
+					if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
+						scheme = proto
+					} else if r.TLS == nil {
+						scheme = "http"
+					}
+					ap.X402.RequestURL = scheme + "://" + r.Host + r.URL.String()
+				}
+
 				if isAdmin {
 					_, err := s.erpc.AdminAuthenticate(requestCtx, nq, method, ap)
 					if err != nil {
@@ -569,7 +678,19 @@ func (s *HttpServer) createRequestHandler() http.Handler {
 				} else {
 					user, err := project.AuthenticateConsumer(requestCtx, nq, method, ap)
 					if err != nil {
-						responses[index] = processErrorBody(&rlg, &startedAt, nq, err, s.serverCfg.IncludeErrorDetails)
+						var payErr *common.ErrPaymentRequired
+						if errors.As(err, &payErr) {
+							var reqId interface{}
+							if jrr, jrrErr := nq.JsonRpcRequest(); jrrErr == nil && jrr != nil {
+								reqId = jrr.ID
+							}
+							responses[index] = &HttpX402PaymentRequiredResponse{
+								PaymentRequirements: payErr.PaymentRequirements,
+								RequestId:           reqId,
+							}
+						} else {
+							responses[index] = processErrorBody(&rlg, &startedAt, nq, err, s.serverCfg.IncludeErrorDetails)
+						}
 						common.EndRequestSpan(requestCtx, nil, err)
 						return
 					}
@@ -736,7 +857,23 @@ func (s *HttpServer) createRequestHandler() http.Handler {
 		common.InjectHTTPResponseTraceContext(httpCtx, w)
 
 		if isBatch {
-			// JSON-RPC 2.0 over HTTP should always return 200 OK at transport level
+			// JSON-RPC batches always return HTTP 200; x402 payment-required responses
+			// cannot use their native 402 format here, so convert them to JSON-RPC errors.
+			for i, resp := range responses {
+				if x402Resp, ok := resp.(*HttpX402PaymentRequiredResponse); ok {
+					responses[i] = &HttpJsonRpcErrorResponse{
+						Jsonrpc: "2.0",
+						Id:      x402Resp.RequestId,
+						Error: map[string]interface{}{
+							"code":    -32000,
+							"message": "payment required for this resource (x402)",
+							"data":    x402Resp.PaymentRequirements,
+						},
+						Cause: common.NewErrPaymentRequired(nil),
+					}
+				}
+			}
+
 			w.WriteHeader(http.StatusOK)
 
 			bw := NewBatchResponseWriter(responses)
@@ -757,6 +894,23 @@ func (s *HttpServer) createRequestHandler() http.Handler {
 		} else {
 			res := responses[0]
 			setResponseHeaders(httpCtx, res, w)
+
+			// x402 Payment Required: set headers before WriteHeader, then write raw x402 JSON.
+			// Both body and PAYMENT-REQUIRED header carry the requirements for v1/v2 client compatibility.
+			if v, ok := res.(*HttpX402PaymentRequiredResponse); ok {
+				reqJSON, _ := common.SonicCfg.Marshal(v.PaymentRequirements)
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("PAYMENT-REQUIRED", base64.StdEncoding.EncodeToString(reqJSON))
+				w.WriteHeader(http.StatusPaymentRequired)
+				_, err = w.Write(reqJSON)
+				if err != nil {
+					writeFatalError(httpCtx, http.StatusInternalServerError, err)
+					return
+				}
+				common.EnrichHTTPServerSpan(httpCtx, http.StatusPaymentRequired, nil)
+				return
+			}
+
 			// Determine HTTP status code - defaults to 200 for JSON-RPC responses,
 			// but transport-level errors (auth, rate limit, etc.) get appropriate status codes
 			statusCode := determineResponseStatusCode(res)
@@ -1204,9 +1358,6 @@ func determineResponseStatusCode(res interface{}) int {
 	// 404 Not Found - resource not found
 	case common.HasErrorCode(err, common.ErrCodeProjectNotFound, common.ErrCodeNetworkNotFound, common.ErrCodeNetworkNotSupported):
 		return http.StatusNotFound
-	// 413 Request Entity Too Large
-	case common.HasErrorCode(err, common.ErrCodeEndpointRequestTooLarge):
-		return http.StatusRequestEntityTooLarge
 	// 429 Too Many Requests - rate limiting
 	case common.HasErrorCode(err,
 		common.ErrCodeAuthRateLimitRuleExceeded,
@@ -1225,6 +1376,13 @@ type HttpJsonRpcErrorResponse struct {
 	Id      interface{} `json:"id"`
 	Error   interface{} `json:"error"`
 	Cause   error       `json:"-"`
+}
+
+// HttpX402PaymentRequiredResponse carries the raw x402 PaymentRequirementsResponse
+// to be written directly as HTTP 402 without JSON-RPC wrapping.
+type HttpX402PaymentRequiredResponse struct {
+	PaymentRequirements interface{}
+	RequestId           interface{}
 }
 
 func (r *HttpJsonRpcErrorResponse) MarshalZerologObject(e *zerolog.Event) {
@@ -1365,6 +1523,20 @@ func handleErrorResponse(
 	writeFatalError func(ctx context.Context, statusCode int, body error),
 	includeErrorDetails *bool,
 ) {
+	// x402 Payment Required: write the raw x402 response directly, not JSON-RPC wrapped
+	var payErr *common.ErrPaymentRequired
+	if errors.As(err, &payErr) {
+		reqJSON, _ := common.SonicCfg.Marshal(payErr.PaymentRequirements)
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("PAYMENT-REQUIRED", base64.StdEncoding.EncodeToString(reqJSON))
+		w.WriteHeader(http.StatusPaymentRequired)
+		if _, encErr := w.Write(reqJSON); encErr != nil {
+			logger.Error().Err(encErr).Msg("failed to write x402 payment requirements response")
+			writeFatalError(httpCtx, http.StatusInternalServerError, encErr)
+		}
+		return
+	}
+
 	resp := processErrorBody(logger, startedAt, nq, err, includeErrorDetails)
 	// Transport defaults to 200 for JSON-RPC, with limited exceptions.
 	// Non-200 codes are reserved for transport/infrastructure level issues,
@@ -1380,9 +1552,6 @@ func handleErrorResponse(
 	// 404 Not Found - resource not found at HTTP level
 	case common.HasErrorCode(err, common.ErrCodeProjectNotFound, common.ErrCodeNetworkNotFound, common.ErrCodeNetworkNotSupported):
 		statusCode = http.StatusNotFound
-	// 413 Request Entity Too Large
-	case common.HasErrorCode(err, common.ErrCodeEndpointRequestTooLarge):
-		statusCode = http.StatusRequestEntityTooLarge
 	// 429 Too Many Requests - rate limiting (critical for client retry logic)
 	case common.HasErrorCode(err,
 		common.ErrCodeAuthRateLimitRuleExceeded,

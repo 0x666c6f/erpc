@@ -321,7 +321,10 @@ var DefaultWithBlockCacheMethods = map[string]*CacheMethodConfig{
 	"eth_getBlockByNumber": {
 		ReqRefs:  FirstParam,
 		RespRefs: NumberOrHashParam,
-		// evm/eth_getBlockByNumber.go hook already enforces lower/upper-bound against per-upstream latest/finality, so we don't need to enforce it here.
+		// The post-forward hook in evm/eth_getBlockByNumber.go only enforces "latest"/"finalized"
+		// tag handling; it does not gate numeric block requests against per-upstream bounds.
+		// Numeric blocks beyond an upstream's known head will be forwarded and may return
+		// missing-data, which the failsafe retry policy can space out via emptyResultDelay.
 		EnforceBlockAvailability: util.BoolPtr(false),
 		// Don't interpolate "latest"/"finalized" tags for this method - it should fetch actual
 		// current state from upstream. This method is the source of truth for block tags,
@@ -837,6 +840,31 @@ func (s *ServerConfig) SetDefaults() error {
 	if s.HttpPortV6 == nil {
 		s.HttpPortV6 = util.IntPtr(5000) // Default: avoid 4001 (metrics)
 	}
+	if s.GrpcEnabled == nil {
+		s.GrpcEnabled = util.BoolPtr(false)
+	}
+	if s.GrpcHostV4 == nil && s.HttpHostV4 != nil {
+		v := *s.HttpHostV4
+		s.GrpcHostV4 = &v
+	}
+	if s.GrpcPortV4 == nil && s.HttpPortV4 != nil {
+		v := *s.HttpPortV4
+		s.GrpcPortV4 = &v
+	}
+	if s.GrpcHostV6 == nil && s.HttpHostV6 != nil {
+		v := *s.HttpHostV6
+		s.GrpcHostV6 = &v
+	}
+	if s.GrpcPortV6 == nil && s.HttpPortV6 != nil {
+		v := *s.HttpPortV6
+		s.GrpcPortV6 = &v
+	}
+	if s.GrpcMaxRecvMsgSize == nil {
+		s.GrpcMaxRecvMsgSize = util.IntPtr(100 * 1024 * 1024)
+	}
+	if s.GrpcMaxSendMsgSize == nil {
+		s.GrpcMaxSendMsgSize = util.IntPtr(100 * 1024 * 1024)
+	}
 	if s.MaxTimeout == nil {
 		d := Duration(150 * time.Second)
 		s.MaxTimeout = &d
@@ -991,6 +1019,32 @@ func (d *DatabaseConfig) SetDefaults(defClusterKey string) error {
 func (c *ConnectorConfig) SetDefaults(scope connectorScope) error {
 	if c.Id == "" {
 		c.Id = string(scope) + "-" + string(c.Driver)
+	}
+	if c.FailsafeForGets != nil {
+		for idx, f := range c.FailsafeForGets {
+			if f == nil {
+				continue
+			}
+			if f.MatchMethod == "" {
+				f.MatchMethod = "*"
+			}
+			if err := f.SetDefaults(nil); err != nil {
+				return fmt.Errorf("failed to set defaults for policy #%d in failsafeForGets: %w", idx, err)
+			}
+		}
+	}
+	if c.FailsafeForSets != nil {
+		for idx, f := range c.FailsafeForSets {
+			if f == nil {
+				continue
+			}
+			if f.MatchMethod == "" {
+				f.MatchMethod = "*"
+			}
+			if err := f.SetDefaults(nil); err != nil {
+				return fmt.Errorf("failed to set defaults for policy #%d in failsafeForSets: %w", idx, err)
+			}
+		}
 	}
 	if c.Memory != nil {
 		c.Driver = DriverMemory
@@ -1688,6 +1742,9 @@ func (u *UpstreamConfig) ApplyDefaults(defaults *UpstreamConfig) error {
 		if u.Evm.GetLogsAutoSplittingRangeThreshold == 0 && defaults.Evm.GetLogsAutoSplittingRangeThreshold != 0 {
 			u.Evm.GetLogsAutoSplittingRangeThreshold = defaults.Evm.GetLogsAutoSplittingRangeThreshold
 		}
+		if u.Evm.TraceFilterAutoSplittingRangeThreshold == 0 && defaults.Evm.TraceFilterAutoSplittingRangeThreshold != 0 {
+			u.Evm.TraceFilterAutoSplittingRangeThreshold = defaults.Evm.TraceFilterAutoSplittingRangeThreshold
+		}
 	}
 	if u.JsonRpc == nil && defaults.JsonRpc != nil {
 		u.JsonRpc = &JsonRpcUpstreamConfig{
@@ -1856,12 +1913,8 @@ func (e *EvmUpstreamConfig) SetDefaults(defaults *EvmUpstreamConfig) error {
 			e.StatePollerInterval = Duration(30 * time.Second)
 		}
 	}
-	if e.StatePollerDebounce == 0 {
-		if defaults != nil && defaults.StatePollerDebounce != 0 {
-			e.StatePollerDebounce = defaults.StatePollerDebounce
-		} else {
-			e.StatePollerDebounce = Duration(5 * time.Second)
-		}
+	if e.StatePollerDebounce == 0 && defaults != nil && defaults.StatePollerDebounce != 0 {
+		e.StatePollerDebounce = defaults.StatePollerDebounce
 	}
 	if e.NodeType == "" {
 		if defaults != nil && defaults.NodeType != "" {
@@ -1949,6 +2002,12 @@ func (n *NetworkConfig) SetDefaults(upstreams []*UpstreamConfig, defaults *Netwo
 			}
 			if n.Evm.FallbackStatePollerDebounce == 0 && defaults.Evm.FallbackStatePollerDebounce != 0 {
 				n.Evm.FallbackStatePollerDebounce = defaults.Evm.FallbackStatePollerDebounce
+			}
+			if n.Evm.DynamicBlockTimeDebounceMultiplier == nil && defaults.Evm.DynamicBlockTimeDebounceMultiplier != nil {
+				n.Evm.DynamicBlockTimeDebounceMultiplier = defaults.Evm.DynamicBlockTimeDebounceMultiplier
+			}
+			if n.Evm.BlockUnavailableDelayMultiplier == nil && defaults.Evm.BlockUnavailableDelayMultiplier != nil {
+				n.Evm.BlockUnavailableDelayMultiplier = defaults.Evm.BlockUnavailableDelayMultiplier
 			}
 			if n.Evm.FallbackFinalityDepth == 0 && defaults.Evm.FallbackFinalityDepth != 0 {
 				n.Evm.FallbackFinalityDepth = defaults.Evm.FallbackFinalityDepth
@@ -2082,6 +2141,8 @@ func (n *NetworkConfig) SetDefaults(upstreams []*UpstreamConfig, defaults *Netwo
 
 const DefaultEvmFinalityDepth = 1024
 const DefaultEvmStatePollerDebounce = Duration(5 * time.Second)
+const DefaultDynamicBlockTimeDebounceMultiplier = 0.7
+const DefaultBlockUnavailableDelayMultiplier = 0.8
 
 // DefaultEmptyResultAccept returns a fresh copy of the methods for which an
 // empty/null result is considered valid (e.g. eth_getLogs, eth_call). A new
@@ -2123,6 +2184,14 @@ func (e *EvmNetworkConfig) SetDefaults() error {
 	if e.FallbackStatePollerDebounce == 0 {
 		e.FallbackStatePollerDebounce = DefaultEvmStatePollerDebounce
 	}
+	if e.DynamicBlockTimeDebounceMultiplier == nil {
+		d := DefaultDynamicBlockTimeDebounceMultiplier
+		e.DynamicBlockTimeDebounceMultiplier = &d
+	}
+	if e.BlockUnavailableDelayMultiplier == nil {
+		d := DefaultBlockUnavailableDelayMultiplier
+		e.BlockUnavailableDelayMultiplier = &d
+	}
 	if e.Integrity == nil {
 		e.Integrity = &EvmIntegrityConfig{}
 	}
@@ -2151,6 +2220,13 @@ func (e *EvmNetworkConfig) SetDefaults() error {
 	}
 	if e.GetLogsCacheChunkConcurrency == 0 {
 		e.GetLogsCacheChunkConcurrency = 10
+	}
+
+	// Defaults for network-level trace_filter controls.
+	// TraceFilterSplitOnError intentionally defaults to nil (off) — this is a
+	// new feature and preserving existing behavior requires operator opt-in.
+	if e.TraceFilterSplitConcurrency == 0 {
+		e.TraceFilterSplitConcurrency = 10
 	}
 
 	// Default methods for marking empty results as errors

@@ -19,6 +19,7 @@ import (
 	"github.com/erpc/erpc/upstream"
 	"github.com/erpc/erpc/util"
 	"github.com/failsafe-go/failsafe-go"
+	"github.com/failsafe-go/failsafe-go/retrypolicy"
 	"github.com/rs/zerolog"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -39,7 +40,7 @@ type FailsafeExecutor struct {
 	finalities             []common.DataFinalityState
 	upstreamGroup          string
 	executor               failsafe.Executor[*common.NormalizedResponse]
-	timeout                *time.Duration
+	timeout                upstream.TimeoutFunc
 	consensusPolicyEnabled bool
 	// emptyResultAccept lists methods for which the first emptyish result
 	// short-circuits the upstream loop. Without this the loop tries every
@@ -454,6 +455,16 @@ func (n *Network) Forward(ctx context.Context, req *common.NormalizedRequest) (*
 		lg.Debug().Msgf("forwarding request for network")
 	}
 
+	// Static response short-circuit. Checked after method extraction and before
+	// the multiplexer/cache/upstream-selection path so matching requests never
+	// touch any upstream. See StaticResponseConfig for match semantics.
+	if len(n.cfg.StaticResponses) > 0 {
+		if resp, ok := n.tryServeStaticResponse(ctx, &lg, req, method); ok {
+			forwardSpan.SetAttributes(attribute.Bool("static_response.hit", true))
+			return resp, nil
+		}
+	}
+
 	mlx, resp, err := n.handleMultiplexing(ctx, &lg, req, startTime)
 	if err != nil || resp != nil {
 		// When the original request is already fulfilled by multiplexer (follower path)
@@ -474,7 +485,7 @@ func (n *Network) Forward(ctx context.Context, req *common.NormalizedRequest) (*
 		defer n.cleanupMultiplexer(mlx)
 	}
 
-	if n.cacheDal != nil && !req.SkipCacheRead() {
+	if n.cacheDal != nil && !req.ShouldSkipCacheRead("") {
 		lg.Debug().Msgf("checking cache for request")
 		resp, err := n.cacheDal.Get(ctx, req)
 		if err != nil {
@@ -712,6 +723,19 @@ func (n *Network) Forward(ctx context.Context, req *common.NormalizedRequest) (*
 		attribute.String("failsafe.matched_upstream_group", failsafeExecutor.upstreamGroup),
 	)
 
+	// Network-level timeout is lifecycle-scoped: it wraps the entire failsafe
+	// execution including retries and hedges. Applying it here (outside the
+	// executor) matches the documented semantics — a network timeout of 5s with
+	// 3 retries still bounds total wall-clock to 5s. Upstream-level timeout,
+	// applied per-attempt inside Upstream.Forward, is independent.
+	if failsafeExecutor.timeout != nil {
+		if td := failsafeExecutor.timeout(ectx, req); td != nil {
+			var cancelFn context.CancelFunc
+			ectx, cancelFn = context.WithTimeoutCause(ectx, *td, common.ErrDynamicTimeoutExceeded)
+			defer cancelFn()
+		}
+	}
+
 	// Track time from failsafe executor start to first callback invocation
 	failsafeStartTime := time.Now()
 
@@ -768,17 +792,14 @@ func (n *Network) Forward(ctx context.Context, req *common.NormalizedRequest) (*
 					}
 				}
 				if failsafeExecutor.timeout != nil {
-					var cancelFn context.CancelFunc
-					execSpanCtx, cancelFn = context.WithTimeout(
-						execSpanCtx,
-						// TODO Carrying the timeout helps setting correct timeout on actual http request to upstream (during batch mode).
-						//      Is there a way to do this cleanly? e.g. if failsafe lib works via context rather than Ticker?
-						//      A small slack ensures context carries timeout deadline (used when calling upstreams),
-						//      but allow the failsafe execution to fail with timeout first for proper error handling.
-						*failsafeExecutor.timeout+networkFailsafeTimeoutSlack,
-					)
-
-					defer cancelFn()
+					if td := failsafeExecutor.timeout(execSpanCtx, effectiveReq); td != nil {
+						var cancelFn context.CancelFunc
+						execSpanCtx, cancelFn = context.WithTimeout(
+							execSpanCtx,
+							*td+networkFailsafeTimeoutSlack,
+						)
+						defer cancelFn()
+					}
 				}
 
 				// Try all upstreams in a single execution before returning to failsafe.
@@ -923,6 +944,8 @@ func (n *Network) Forward(ctx context.Context, req *common.NormalizedRequest) (*
 							loopSpan.End()
 							return r, nil
 						}
+						loopSpan.End()
+						return r, nil
 					}
 
 					// Deterministic errors: client faults and execution reverts are the
@@ -1031,7 +1054,40 @@ func (n *Network) Forward(ctx context.Context, req *common.NormalizedRequest) (*
 	defer req.RUnlock()
 
 	if execErr != nil {
-		translatedErr := upstream.TranslateFailsafeError(common.ScopeNetwork, "", method, execErr, &startTime)
+		// When the lifecycle ctx fires, failsafe may return plain context.DeadlineExceeded
+		// with no sentinel in the Unwrap chain. Substitute only when the ctx cause
+		// is OUR sentinel — accepting any non-DeadlineExceeded cause would leak
+		// parent-scope causes (e.g. http_timeout.go's ErrHandlerTimeout) through
+		// TranslateFailsafeError unclassified.
+		if _, ok := execErr.(common.StandardError); !ok && errors.Is(execErr, context.DeadlineExceeded) {
+			if cause := context.Cause(ectx); errors.Is(cause, common.ErrDynamicTimeoutExceeded) {
+				execErr = cause
+			}
+		}
+		// Three guards stacked, each closing a distinct misattribution:
+		//   - failsafeExecutor.timeout != nil: parent-scope sentinel inherited
+		//     via ctx propagation must not credit a scope that didn't own a policy.
+		//   - !errors.As(retryExceededErr): mirror TranslateFailsafeError's
+		//     retry-exhausted-wins ordering so retry-tail timeouts are reported
+		//     as retry exhaustion (matching the user-visible classification).
+		//   - !HasErrorCode(ErrCodeFailsafeTimeoutExceeded): an upstream-scope
+		//     timeout already incremented at scope=upstream — don't double-count
+		//     when it bubbles up here.
+		var retryExceededErr retrypolicy.ExceededError
+		if failsafeExecutor.timeout != nil &&
+			!errors.As(execErr, &retryExceededErr) &&
+			errors.Is(execErr, common.ErrDynamicTimeoutExceeded) &&
+			!common.HasErrorCode(execErr, common.ErrCodeFailsafeTimeoutExceeded) {
+			finality := req.Finality(ctx)
+			telemetry.MetricNetworkTimeoutFiredTotal.WithLabelValues(
+				n.projectId,
+				req.NetworkLabel(),
+				method,
+				finality.String(),
+				string(common.ScopeNetwork),
+			).Inc()
+		}
+		translatedErr := upstream.TranslateFailsafeError(common.ScopeNetwork, "", method, execErr, &startTime, failsafeExecutor.timeout != nil)
 		// Don't override consensus results with last valid response from individual upstreams
 		// For example if 1 upstream gives empty response another 3 give "reverted" error,
 		// we should still return reverted error, even though there was an empty response before.
@@ -1386,26 +1442,78 @@ func (n *Network) doForward(execSpanCtx context.Context, u common.Upstream, req 
 	return evm.HandleUpstreamPostForward(execSpanCtx, n, u, req, resp, err, skipCacheRead)
 }
 
-// resolveEnforceBlockAvailability resolves the effective enforcement flag for block availability
-// using strict precedence: method-level > network-level > default method config > fallback (true).
-func (n *Network) resolveEnforceBlockAvailability(method string) bool {
-	// Highest precedence: method-level override from network config
+// upstreamHasBlockAvailabilityBounds reports whether the upstream has any
+// BlockAvailability bounds (lower or upper) configured. Presence of explicit
+// bounds is treated as the user's intent to enforce them when no higher-priority
+// explicit override has been set.
+func upstreamHasBlockAvailabilityBounds(u common.Upstream) bool {
+	if u == nil {
+		return false
+	}
+	cfg := u.Config()
+	if cfg == nil || cfg.Evm == nil || cfg.Evm.BlockAvailability == nil {
+		return false
+	}
+	ba := cfg.Evm.BlockAvailability
+	return ba.Lower != nil || ba.Upper != nil
+}
+
+// systemDefaultEnforceBlockAvailability returns the global system default for
+// EnforceBlockAvailability for a given method, or nil if no default is set.
+func systemDefaultEnforceBlockAvailability(method string) *bool {
+	if common.DefaultWithBlockCacheMethods == nil {
+		return nil
+	}
+	if dmc, ok := common.DefaultWithBlockCacheMethods[method]; ok && dmc != nil {
+		return dmc.EnforceBlockAvailability
+	}
+	return nil
+}
+
+// resolveEnforceBlockAvailability resolves the effective enforcement flag for block availability.
+// Precedence (highest to lowest):
+//  1. Explicit method-level user override that differs from the system default
+//     (system defaults get merged into n.cfg.Methods.Definitions during config
+//     loading, so a method-level value that matches the system default is
+//     treated as not-an-override).
+//  2. Explicit network-level user override (network.cfg.Evm.EnforceBlockAvailability).
+//  3. Per-upstream BlockAvailability bounds — configured bounds are themselves
+//     an opt-in signal that overrides the method common default.
+//  4. System default for this method (DefaultWithBlockCacheMethods).
+//  5. Fallback: enabled.
+func (n *Network) resolveEnforceBlockAvailability(method string, u common.Upstream) bool {
+	sysDefault := systemDefaultEnforceBlockAvailability(method)
+
+	// 1. Method-level user override (only when it differs from the system default).
+	//    The defaults loader merges DefaultWithBlockCacheMethods into Methods.Definitions,
+	//    so we cannot tell apart a user's explicit value from a merged-in default by
+	//    presence alone. Comparing values is the cleanest way to distinguish — and is
+	//    semantically harmless because a user explicitly setting the same value as the
+	//    default has the same intent as not setting it.
 	if n.cfg != nil && n.cfg.Methods != nil && n.cfg.Methods.Definitions != nil {
 		if mc, ok := n.cfg.Methods.Definitions[method]; ok && mc != nil && mc.EnforceBlockAvailability != nil {
-			return *mc.EnforceBlockAvailability
+			if sysDefault == nil || *mc.EnforceBlockAvailability != *sysDefault {
+				return *mc.EnforceBlockAvailability
+			}
+			// Matches the system default — treat as not-an-override and fall through.
 		}
 	}
-	// Next: network-level default
+	// 2. Explicit network-level user override
 	if n.cfg != nil && n.cfg.Evm != nil && n.cfg.Evm.EnforceBlockAvailability != nil {
 		return *n.cfg.Evm.EnforceBlockAvailability
 	}
-	// Lowest: common default method config
-	if common.DefaultWithBlockCacheMethods != nil {
-		if dmc, ok := common.DefaultWithBlockCacheMethods[method]; ok && dmc != nil && dmc.EnforceBlockAvailability != nil {
-			return *dmc.EnforceBlockAvailability
-		}
+	// 3. Configured per-upstream bounds opt-in to enforcement, regardless of
+	//    method common defaults. This ensures that users who configure
+	//    BlockAvailability on an upstream actually get their bounds enforced
+	//    even for methods whose system default has it off (e.g. eth_getBlockByNumber).
+	if upstreamHasBlockAvailabilityBounds(u) {
+		return true
 	}
-	// Fallback default: enabled
+	// 4. System default for this method
+	if sysDefault != nil {
+		return *sysDefault
+	}
+	// 5. Fallback: enabled
 	return true
 }
 
@@ -1531,22 +1639,32 @@ func (n *Network) recordHedgeDiscard(
 //   - isRetryable=true: block is just slightly ahead (within MaxRetryableBlockDistance), upstream may catch up
 //   - isRetryable=false: block is too far ahead or below lower bound, not worth retrying this upstream
 //
+// This is the single point of block-availability enforcement. It runs whenever
+// EnforceBlockAvailability resolves to true OR the upstream has explicit
+// BlockAvailability bounds configured (the user's signal that they want bounds
+// enforced regardless of per-method defaults).
+//
 // FAIL-OPEN BEHAVIOR: If we cannot determine block availability (e.g., state poller issues),
 // we allow the request to proceed rather than blocking traffic.
 func (n *Network) checkUpstreamBlockAvailability(ctx context.Context, u common.Upstream, req *common.NormalizedRequest, method string) (error, bool) {
 	if n.cfg.Architecture != common.ArchitectureEvm {
 		return nil, false
 	}
-	// Resolve enforcement using strict precedence
-	enforce := n.resolveEnforceBlockAvailability(method)
-	if !enforce {
+	if !n.resolveEnforceBlockAvailability(method, u) {
 		return nil, false
 	}
-	// Use cached block number from normalization to avoid re-extracting from mutated params
+	// Prefer the cached block number from normalization. Fall back to extracting
+	// from the request (defensive: handles paths that bypass json_rpc.go's
+	// normalization, and methods whose params haven't been pre-cached yet).
 	var bn int64
 	if v := req.EvmBlockNumber(); v != nil {
 		if n64, ok := v.(int64); ok {
 			bn = n64
+		}
+	}
+	if bn <= 0 {
+		if _, x, ebn := evm.ExtractBlockReferenceFromRequest(ctx, req); ebn == nil && x > 0 {
+			bn = x
 		}
 	}
 	if bn <= 0 {
@@ -2162,19 +2280,29 @@ func (n *Network) normalizeResponse(ctx context.Context, req *common.NormalizedR
 	ctx, span := common.StartDetailSpan(ctx, "Network.NormalizeResponse")
 	defer span.End()
 
-	switch n.Architecture() {
-	case common.ArchitectureEvm:
-		if resp != nil {
-			// This ensures that even if upstream gives us wrong/missing ID we'll
-			// use correct one from original incoming request.
-			if jrr, err := resp.JsonRpcResponse(ctx); err == nil && jrr != nil {
-				jrq, err := req.JsonRpcRequest(ctx)
-				if err != nil {
+	// For any JSON-RPC architecture: ensure the response ID always reflects the
+	// client's original request ID, regardless of what the upstream echoed back.
+	// This is especially important for proxies that normalize or multiplex IDs
+	// toward upstreams, and must apply to every JSON-RPC architecture — not just
+	// EVM — so non-EVM clients (Solana and future architectures) aren't left with
+	// mismatched response IDs.
+	if resp != nil {
+		if jrr, err := resp.JsonRpcResponse(ctx); err == nil && jrr != nil {
+			jrq, err := req.JsonRpcRequest(ctx)
+			if err != nil {
+				return err
+			}
+			// Prefer the verbatim request id bytes when available so that
+			// large integers (>2^53), fractional ids, and other exotic
+			// numeric formats round-trip without precision loss. Falls
+			// back to the typed id for programmatically-constructed
+			// requests where idRaw is unset.
+			if rawID := jrq.IDRawBytes(); len(rawID) > 0 {
+				if err := jrr.SetIDBytes(rawID); err != nil {
 					return err
 				}
-				if err := jrr.SetID(jrq.ID); err != nil {
-					return err
-				}
+			} else if err := jrr.SetID(jrq.ID); err != nil {
+				return err
 			}
 		}
 	}

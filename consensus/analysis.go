@@ -140,6 +140,18 @@ func newConsensusAnalysis(lg *zerolog.Logger, exec failsafe.Execution[*common.No
 		}
 	}
 
+	// Pre-populate all cached accessors so the struct is effectively
+	// immutable after construction. This is critical: after the analyzer
+	// goroutine sends the outcome to the caller via outcomeCh (see
+	// executor.go runAnalyzer), both goroutines may read the analysis
+	// concurrently. Lazy-init under concurrent reads would be a data race.
+	analysis.getValidGroups()
+	analysis.getBestNonEmpty()
+	analysis.getBestEmpty()
+	analysis.getBestError()
+	analysis.getBestByCount()
+	analysis.getBestBySize()
+
 	return analysis
 }
 
@@ -366,6 +378,18 @@ func classifyAndHashResponse(r *execResult, exec failsafe.Execution[*common.Norm
 	}
 
 	if r.Err != nil {
+		// ErrUpstreamsExhausted means no upstream was reachable — always infrastructure.
+		// Its Cause wraps the shared ErrorsByUpstream map which may contain errors from
+		// other consensus participants (e.g. execution reverts). Without this guard,
+		// HasErrorCode traversal would find those foreign errors and misclassify this
+		// as a consensus-valid response, creating phantom voting groups.
+		if common.HasErrorCode(r.Err, common.ErrCodeUpstreamsExhausted) {
+			r.CachedResponseType = ResponseTypeInfrastructureError
+			r.CachedHash = "error:exhausted"
+			r.CachedResponseSize = 0
+			return
+		}
+
 		// Classify agreed-upon JSON-RPC errors and execution exceptions as consensus-valid errors.
 		// Only true infrastructure issues (like timeouts, network/server failures) are infrastructure errors.
 		if isConsensusValidError(r.Err) || isAgreedUponError(r.Err) {

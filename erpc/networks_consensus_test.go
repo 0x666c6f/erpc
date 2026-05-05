@@ -4,8 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1487,8 +1490,8 @@ func TestConsensusPolicy(t *testing.T) {
 			expectedResult: &expectedResult{jsonRpcResult: `"0x33"`},
 		},
 		{
-			name:        "empty_vs_non_empty_tie_above_threshold_without_preference_results_in_fastest",
-			description: "Two groups empty and non-empty both meet threshold with equal counts; no preference -> choose fastest to return",
+			name:        "empty_vs_non_empty_tie_above_threshold_without_preference_results_in_dispute",
+			description: "Two groups empty and non-empty both meet threshold with equal counts; no preference -> dispute (spec: ties at/above threshold without preference → dispute)",
 			upstreams:   createTestUpstreams(6),
 			consensusConfig: &common.ConsensusPolicyConfig{
 				MaxParticipants:         6,
@@ -1500,16 +1503,18 @@ func TestConsensusPolicy(t *testing.T) {
 			},
 			retryPolicy: &common.RetryPolicyConfig{MaxAttempts: 1},
 			mockResponses: []mockResponse{
-				{status: 200, body: jsonRpcSuccess([]interface{}{})},                       // empty 2
-				{status: 200, body: jsonRpcSuccess("0x44")},                                // non-empty 1
 				{status: 200, body: jsonRpcSuccess([]interface{}{})},                       // empty 1
+				{status: 200, body: jsonRpcSuccess("0x44")},                                // non-empty 1
+				{status: 200, body: jsonRpcSuccess([]interface{}{})},                       // empty 2
 				{status: 200, body: jsonRpcSuccess("0x44")},                                // non-empty 2
 				{status: 200, body: jsonRpcSuccess([]interface{}{})},                       // empty 3 -> meets threshold
 				{status: 200, body: jsonRpcSuccess("0x44"), delay: 100 * time.Millisecond}, // non-empty 3 -> meets threshold
 			},
-			expectedCalls:        []int{1, 1, 1, 1, 1, -1},
-			expectedResult:       &expectedResult{jsonRpcResult: `[]`},
-			expectedPendingMocks: 1,
+			expectedCalls: []int{1, 1, 1, 1, 1, 1}, // all 6 called (no short-circuit for empty results)
+			expectedError: &expectedError{
+				code:     common.ErrCodeConsensusDispute,
+				contains: "not enough agreement",
+			},
 		},
 		{
 			name:        "dispute_on_all_different_responses",
@@ -1534,7 +1539,7 @@ func TestConsensusPolicy(t *testing.T) {
 		},
 		{
 			name:        "retry_on_error_and_success_on_next_upstream",
-			description: "Retry enabled; second upstream errors; first and third succeed, reaching 2/3 consensus.",
+			description: "Retry enabled; second upstream errors; first and third succeed, reaching 2/3 consensus. Retry policy retries the erroring upstream once (MaxAttempts:2).",
 			upstreams:   createTestUpstreams(3),
 			consensusConfig: &common.ConsensusPolicyConfig{
 				MaxParticipants:         3,
@@ -1552,7 +1557,7 @@ func TestConsensusPolicy(t *testing.T) {
 				{status: 200, body: jsonRpcError(-32000, "cannot query unfinalized data")},
 				{status: 200, body: jsonRpcSuccess("0x7a")},
 			},
-			expectedCalls: []int{1, 1, 1},
+			expectedCalls: []int{1, 2, 1}, // upstream 2 is retried once due to MaxAttempts:2
 			expectedResult: &expectedResult{
 				jsonRpcResult: `"0x7a"`,
 			},
@@ -2567,7 +2572,9 @@ func TestConsensusPolicy(t *testing.T) {
 	}
 
 	for _, tc := range tests {
+		tc := tc
 		t.Run(util.SanitizeTestName(tc.name), func(t *testing.T) {
+			t.Parallel()
 			runConsensusTest(t, tc)
 		})
 	}
@@ -2721,6 +2728,184 @@ func TestConsensusGoroutineCancellationIntegration(t *testing.T) {
 
 // Helper functions for test setup
 
+// startConsensusMockServers creates one httptest.Server per upstream, replacing gock.
+// Each server handles EVM state-poller methods (eth_chainId, eth_getBlockByNumber,
+// eth_syncing) as well as the test-specific method.  Endpoints in tc.upstreams are
+// rewritten in-place to point at the local servers.
+func startConsensusMockServers(t *testing.T, tc consensusTestCase) {
+	t.Helper()
+	testMethod := tc.requestMethod
+	if testMethod == "" {
+		testMethod = "eth_randomMethod"
+	}
+
+	callCounts := make([]atomic.Int32, len(tc.upstreams))
+
+	for i, upstreamCfg := range tc.upstreams {
+		idx := i
+		expectedCount := 1
+		if tc.expectedCalls != nil && len(tc.expectedCalls) > idx {
+			expectedCount = tc.expectedCalls[idx]
+		}
+		optionalCall := consensusCallMayBeSkipped(tc, idx, expectedCount)
+
+		hasMockResp := idx < len(tc.mockResponses) && (expectedCount != 0 || optionalCall)
+
+		var mockResp mockResponse
+		if hasMockResp {
+			mockResp = tc.mockResponses[idx]
+			if optionalCall && expectedCount == 0 {
+				mockResp.delay = 0
+			}
+		}
+
+		blockTags := map[string]bool{"latest": true, "finalized": true, "safe": true, "pending": true, "earliest": true}
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			body, _ := io.ReadAll(r.Body)
+			defer r.Body.Close()
+
+			var req map[string]interface{}
+			json.Unmarshal(body, &req) //nolint:errcheck
+			method, _ := req["method"].(string)
+			params, _ := req["params"].([]interface{})
+
+			w.Header().Set("Content-Type", "application/json")
+
+			// Determine whether this is the test method call or a state-poller call.
+			// For methods that double as state-poller methods (e.g. eth_getBlockByNumber),
+			// distinguish by checking whether the first param is a block tag.
+			isTestCall := method == testMethod
+			if isTestCall && method == "eth_getBlockByNumber" {
+				var firstParam string
+				if len(params) > 0 {
+					firstParam, _ = params[0].(string)
+				}
+				if blockTags[firstParam] {
+					isTestCall = false // state-poller call, not the test method
+				}
+			}
+
+			if isTestCall {
+				if !hasMockResp {
+					w.WriteHeader(http.StatusInternalServerError)
+					json.NewEncoder(w).Encode(map[string]interface{}{ //nolint:errcheck
+						"jsonrpc": "2.0", "id": 1,
+						"error": map[string]interface{}{"code": -32603, "message": "no mock configured"},
+					})
+					return
+				}
+				callCounts[idx].Add(1)
+				if mockResp.delay > 0 {
+					time.Sleep(mockResp.delay)
+				}
+				w.WriteHeader(mockResp.status)
+				json.NewEncoder(w).Encode(mockResp.body) //nolint:errcheck
+				return
+			}
+
+			// State-poller and other system methods
+			switch method {
+			case "eth_chainId":
+				w.WriteHeader(http.StatusOK)
+				json.NewEncoder(w).Encode(map[string]interface{}{ //nolint:errcheck
+					"jsonrpc": "2.0", "id": 1, "result": "0x7b",
+				})
+			case "eth_getBlockByNumber":
+				w.WriteHeader(http.StatusOK)
+				if len(params) > 0 && params[0] == "finalized" {
+					json.NewEncoder(w).Encode(map[string]interface{}{ //nolint:errcheck
+						"jsonrpc": "2.0", "id": 1,
+						"result": map[string]interface{}{"number": "0x1"},
+					})
+				} else {
+					json.NewEncoder(w).Encode(map[string]interface{}{ //nolint:errcheck
+						"jsonrpc": "2.0", "id": 1,
+						"result": map[string]interface{}{"number": "0x1388"},
+					})
+				}
+			case "eth_syncing":
+				w.WriteHeader(http.StatusOK)
+				json.NewEncoder(w).Encode(map[string]interface{}{ //nolint:errcheck
+					"jsonrpc": "2.0", "id": 1, "result": false,
+				})
+			default:
+				w.WriteHeader(http.StatusInternalServerError)
+				json.NewEncoder(w).Encode(map[string]interface{}{ //nolint:errcheck
+					"jsonrpc": "2.0", "id": 1,
+					"error": map[string]interface{}{"code": -32603, "message": "unexpected method"},
+				})
+			}
+		}))
+
+		upstreamCfg.Endpoint = srv.URL
+
+		// Capture loop variables for t.Cleanup closure
+		capturedIdx := idx
+		capturedSrv := srv
+		capturedExpectedCount := expectedCount
+		capturedOptionalCall := optionalCall
+
+		t.Cleanup(func() {
+			capturedSrv.Close()
+			if capturedExpectedCount != -1 { // -1 means optional (was Persist in gock)
+				actual := int(callCounts[capturedIdx].Load())
+				if capturedOptionalCall {
+					assert.GreaterOrEqual(t, actual, 0)
+					assert.LessOrEqual(t, actual, 1,
+						"upstream %d should be called at most once before consensus cancellation races", capturedIdx+1)
+					return
+				}
+				assert.Equal(t, capturedExpectedCount, actual,
+					"upstream %d call count mismatch", capturedIdx+1)
+			}
+		})
+	}
+}
+
+func consensusCallMayBeSkipped(tc consensusTestCase, upstreamIdx int, expectedCount int) bool {
+	if tc.consensusConfig == nil || expectedCount < 0 || expectedCount > 1 {
+		return false
+	}
+	if upstreamIdx >= tc.consensusConfig.MaxParticipants {
+		return false
+	}
+	if tc.consensusConfig.AgreementThreshold >= tc.consensusConfig.MaxParticipants {
+		return false
+	}
+
+	// Consensus starts eligible participants eagerly and cancels laggards only after a
+	// winner is observed. If the threshold can still be met without this upstream,
+	// scheduler timing makes the first HTTP call optional even though the outcome is fixed.
+	threshold := tc.consensusConfig.AgreementThreshold
+	if threshold <= 1 {
+		return min(tc.consensusConfig.MaxParticipants, len(tc.mockResponses))-1 >= 1
+	}
+
+	eligibleParticipants := min(tc.consensusConfig.MaxParticipants, len(tc.mockResponses))
+	groupCounts := make(map[string]int, eligibleParticipants)
+	for idx := 0; idx < eligibleParticipants; idx++ {
+		if idx == upstreamIdx {
+			continue
+		}
+		key := consensusMockResponseKey(tc.mockResponses[idx])
+		groupCounts[key]++
+		if groupCounts[key] >= threshold {
+			return true
+		}
+	}
+
+	return false
+}
+
+func consensusMockResponseKey(resp mockResponse) string {
+	body, err := json.Marshal(resp.body)
+	if err != nil {
+		return fmt.Sprintf("%d|%#v", resp.status, resp.body)
+	}
+
+	return fmt.Sprintf("%d|%s", resp.status, body)
+}
+
 func runConsensusTest(t *testing.T, tc consensusTestCase) {
 	util.ResetGock()
 	defer util.ResetGock()
@@ -2734,37 +2919,6 @@ func runConsensusTest(t *testing.T, tc consensusTestCase) {
 		cancel()
 		time.Sleep(10 * time.Millisecond) // allow goroutines to settle
 	}()
-
-	// Setup mocks BEFORE any network components initialize
-	for i, upstreamCfg := range tc.upstreams {
-		if i < len(tc.mockResponses) && (tc.expectedCalls == nil || (len(tc.expectedCalls) > i && tc.expectedCalls[i] != 0)) {
-			mock := tc.mockResponses[i]
-			m := gock.New(upstreamCfg.Endpoint).
-				Post("").
-				Filter(func(request *http.Request) bool {
-					body := util.SafeReadBody(request)
-					method := tc.requestMethod
-					if method == "" {
-						method = "eth_randomMethod"
-					}
-					return strings.Contains(string(body), method)
-				})
-
-			// Handle special case: -1 means Persist() (may or may not be called)
-			if tc.expectedCalls != nil && len(tc.expectedCalls) > i && tc.expectedCalls[i] == -1 {
-				m.Persist()
-			} else if tc.expectedCalls != nil && len(tc.expectedCalls) > i {
-				m.Times(tc.expectedCalls[i])
-			} else {
-				m.Times(1) // default to 1 if not specified
-			}
-
-			m.Reply(mock.status).
-				Delay(mock.delay).
-				SetHeader("Content-Type", "application/json").
-				JSON(mock.body)
-		}
-	}
 
 	// Setup Network AFTER mocks to avoid races during background initialization
 	ntw, upsReg := setupNetworkForConsensusTest(t, ctx, tc)

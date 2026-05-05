@@ -222,7 +222,7 @@ func networkPreForward_eth_getLogs(ctx context.Context, n common.Network, ups []
 		return true, nil, common.NewErrGetLogsExceededMaxAllowedTopics(topicCount, maxTopics)
 	}
 
-	skipCacheRead := false
+	skipCacheRead := ""
 	if dirs := nrq.Directives(); dirs != nil {
 		skipCacheRead = dirs.SkipCacheRead
 	}
@@ -631,7 +631,7 @@ func networkPostForward_eth_getLogs(ctx context.Context, n common.Network, rq *c
 			if filter != nil {
 				fb, tb, berr := extractBlockRange(filter)
 				if berr == nil && fb == tb && shouldFallbackEthGetLogsToBlockReceipts(re) {
-					skipCacheRead := false
+					skipCacheRead := ""
 					if dirs := rq.Directives(); dirs != nil {
 						skipCacheRead = dirs.SkipCacheRead
 					}
@@ -658,7 +658,7 @@ func networkPostForward_eth_getLogs(ctx context.Context, n common.Network, rq *c
 	}
 
 	rq.SetCompositeType(common.CompositeTypeLogsSplitOnError)
-	skipCacheRead := false
+	skipCacheRead := ""
 	if dirs := rq.Directives(); dirs != nil {
 		skipCacheRead = dirs.SkipCacheRead
 	}
@@ -1037,11 +1037,11 @@ func pickGetLogsSubRequestError(errs []error) error {
 	return fmt.Errorf("unknown getLogs sub-request error")
 }
 
-func executeGetLogsSubRequests(ctx context.Context, n common.Network, r *common.NormalizedRequest, subRequests []ethGetLogsSubRequest, skipCacheRead bool, concurrency int) (*common.JsonRpcResponse, *getLogsMergeMeta, error) {
+func executeGetLogsSubRequests(ctx context.Context, n common.Network, r *common.NormalizedRequest, subRequests []ethGetLogsSubRequest, skipCacheRead string, concurrency int) (*common.JsonRpcResponse, *getLogsMergeMeta, error) {
 	return executeGetLogsSubRequestsInternal(ctx, n, r, subRequests, skipCacheRead, concurrency, 0, nil)
 }
 
-func executeGetLogsSubRequestsInternal(ctx context.Context, n common.Network, r *common.NormalizedRequest, subRequests []ethGetLogsSubRequest, skipCacheRead bool, concurrency int, depth int, semaphore chan struct{}) (*common.JsonRpcResponse, *getLogsMergeMeta, error) {
+func executeGetLogsSubRequestsInternal(ctx context.Context, n common.Network, r *common.NormalizedRequest, subRequests []ethGetLogsSubRequest, skipCacheRead string, concurrency int, depth int, semaphore chan struct{}) (*common.JsonRpcResponse, *getLogsMergeMeta, error) {
 	logger := n.Logger().With().Str("method", "eth_getLogs").Interface("id", r.ID()).Logger()
 	payloadLimit, err := extractGetLogsPayloadLimitFromRequest(ctx, r)
 	if err != nil {

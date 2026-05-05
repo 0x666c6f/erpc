@@ -972,7 +972,7 @@ func DeriveDirectivesKey(dirs *common.RequestDirectives) string {
 	if dirs.RetryPending {
 		parts = append(parts, "retry-pending=true")
 	}
-	if dirs.SkipCacheRead {
+	if dirs.SkipCacheRead != "" && !strings.EqualFold(dirs.SkipCacheRead, "false") {
 		parts = append(parts, "skip-cache-read=true")
 	}
 	if dirs.CacheMaxAgeSeconds != nil {

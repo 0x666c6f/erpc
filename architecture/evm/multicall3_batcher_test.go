@@ -44,7 +44,7 @@ func TestBatchingKey(t *testing.T) {
 func TestDirectivesKeyDerivation(t *testing.T) {
 	dirs := &common.RequestDirectives{}
 	dirs.UseUpstream = "alchemy"
-	dirs.SkipCacheRead = true
+	dirs.SkipCacheRead = "true"
 	dirs.RetryEmpty = true
 
 	key := DeriveDirectivesKey(dirs)

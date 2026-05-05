@@ -16,11 +16,18 @@ import (
 )
 
 const (
-	CompositeTypeNone               = "none"
-	CompositeTypeLogsSplitOnError   = "logs-split-on-error"
-	CompositeTypeLogsSplitProactive = "logs-split-proactive"
-	CompositeTypeLogsCacheChunk     = "logs-cache-chunk"
-	CompositeTypeMulticall3         = "multicall3"
+	CompositeTypeNone                      = "none"
+	CompositeTypeLogsSplitOnError          = "logs-split-on-error"
+	CompositeTypeLogsSplitProactive        = "logs-split-proactive"
+	CompositeTypeLogsCacheChunk            = "logs-cache-chunk"
+	CompositeTypeMulticall3                = "multicall3"
+	CompositeTypeTraceFilterSplitOnError   = "trace-filter-split-on-error"
+	CompositeTypeTraceFilterSplitProactive = "trace-filter-split-proactive"
+	CompositeTypeQueryBlocksShim           = "query-blocks-shim"
+	CompositeTypeQueryTransactionsShim     = "query-transactions-shim"
+	CompositeTypeQueryLogsShim             = "query-logs-shim"
+	CompositeTypeQueryTracesShim           = "query-traces-shim"
+	CompositeTypeQueryTransfersShim        = "query-transfers-shim"
 )
 
 const RequestContextKey ContextKey = "rq"
@@ -125,7 +132,9 @@ type RequestDirectives struct {
 
 	// Instruct the proxy to skip cache reads for example to force freshness,
 	// or override some cache corruption.
-	SkipCacheRead bool `json:"skipCacheRead"`
+	// Accepts "true" to skip all, "false" or "" to skip none,
+	// or a connector ID pattern (e.g. "redis*", "memory*|dynamo*") to skip specific cache drivers.
+	SkipCacheRead string `json:"skipCacheRead"`
 
 	// CacheMaxAgeSeconds limits how old a cached entry can be (per request).
 	// When set, entries older than this age are treated as cache misses.
@@ -317,9 +326,10 @@ func (d *RequestDirectives) Clone() *RequestDirectives {
 type NormalizedRequest struct {
 	sync.RWMutex
 
-	network  Network
-	cacheDal CacheDAL
-	body     []byte
+	network        Network
+	cacheDal       CacheDAL
+	body           []byte
+	ForwardHeaders http.Header
 
 	method         string
 	directives     *RequestDirectives
@@ -528,6 +538,11 @@ func (r *NormalizedRequest) SetDirectives(directives *RequestDirectives) {
 }
 
 // ApplyDirectiveDefaults applies the default directives from the network configuration.
+// It is a no-op if directives have already been populated (by a prior call to
+// ApplyDirectiveDefaults, SetDirectives, or EnrichFromHttp). This prevents the
+// defensive call in Network.Forward() from overwriting directives that were
+// explicitly set via HTTP headers/query params between the http_server's
+// ApplyDirectiveDefaults and Network.Forward.
 func (r *NormalizedRequest) ApplyDirectiveDefaults(directiveDefaults *DirectiveDefaultsConfig) {
 	if directiveDefaults == nil {
 		return
@@ -535,9 +550,10 @@ func (r *NormalizedRequest) ApplyDirectiveDefaults(directiveDefaults *DirectiveD
 	r.Lock()
 	defer r.Unlock()
 
-	if r.directives == nil {
-		r.directives = &RequestDirectives{}
+	if r.directives != nil {
+		return
 	}
+	r.directives = &RequestDirectives{}
 
 	if directiveDefaults.RetryEmpty != nil {
 		r.directives.RetryEmpty = *directiveDefaults.RetryEmpty
@@ -546,7 +562,12 @@ func (r *NormalizedRequest) ApplyDirectiveDefaults(directiveDefaults *DirectiveD
 		r.directives.RetryPending = *directiveDefaults.RetryPending
 	}
 	if directiveDefaults.SkipCacheRead != nil {
-		r.directives.SkipCacheRead = *directiveDefaults.SkipCacheRead
+		switch v := directiveDefaults.SkipCacheRead.(type) {
+		case string:
+			r.directives.SkipCacheRead = v
+		default:
+			r.directives.SkipCacheRead = fmt.Sprintf("%v", v)
+		}
 	}
 	if directiveDefaults.CacheMaxAgeSeconds != nil {
 		v := *directiveDefaults.CacheMaxAgeSeconds
@@ -698,7 +719,7 @@ func (r *NormalizedRequest) EnrichFromHttp(headers http.Header, queryArgs url.Va
 		r.directives.RetryPending = strings.ToLower(strings.TrimSpace(hv)) == "true"
 	}
 	if hv := headers.Get(headerDirectiveSkipCacheRead); hv != "" {
-		r.directives.SkipCacheRead = strings.ToLower(strings.TrimSpace(hv)) == "true"
+		r.directives.SkipCacheRead = strings.TrimSpace(hv)
 	}
 	if hv := headers.Get(headerDirectiveCacheMaxAge); hv != "" {
 		trimmed := strings.TrimSpace(hv)
@@ -788,7 +809,7 @@ func (r *NormalizedRequest) EnrichFromHttp(headers http.Header, queryArgs url.Va
 	}
 
 	if skipCacheRead := queryArgs.Get(queryDirectiveSkipCacheRead); skipCacheRead != "" {
-		r.directives.SkipCacheRead = strings.ToLower(strings.TrimSpace(skipCacheRead)) == "true"
+		r.directives.SkipCacheRead = strings.TrimSpace(skipCacheRead)
 	}
 	if cacheMaxAge := queryArgs.Get(queryDirectiveCacheMaxAge); cacheMaxAge != "" {
 		trimmed := strings.TrimSpace(cacheMaxAge)
@@ -862,14 +883,29 @@ func (r *NormalizedRequest) EnrichFromHttp(headers http.Header, queryArgs url.Va
 	}
 }
 
+// ShouldSkipCacheRead reports whether a cache read should be skipped for this request.
+// The directive may be "true" (skip all connectors) or a pattern (e.g. "redis-*") to skip only matching connectors.
+// connectorId is the cache connector being considered; pass "" when not evaluating a specific connector (e.g. before consulting any cache).
+func (r *NormalizedRequest) ShouldSkipCacheRead(connectorId string) bool {
+	if r == nil || r.directives == nil {
+		return false
+	}
+	v := r.directives.SkipCacheRead
+	if v == "" || strings.EqualFold(v, "false") {
+		return false
+	}
+	if strings.EqualFold(v, "true") {
+		return true
+	}
+	if connectorId == "" {
+		return false
+	}
+	matched, _ := WildcardMatch(v, connectorId)
+	return matched
+}
+
 func (r *NormalizedRequest) SkipCacheRead() bool {
-	if r == nil {
-		return false
-	}
-	if r.directives == nil {
-		return false
-	}
-	return r.directives.SkipCacheRead
+	return r.ShouldSkipCacheRead("")
 }
 
 func (r *NormalizedRequest) CacheMaxAgeSeconds() *int64 {
@@ -1096,6 +1132,14 @@ func (r *NormalizedRequest) ClientIP() string {
 		}
 	}
 	return "n/a"
+}
+
+// SetAgentName stores the agent name directly without HTTP-specific parsing
+func (r *NormalizedRequest) SetAgentName(name string) {
+	if r == nil || name == "" {
+		return
+	}
+	r.agentName.Store(name)
 }
 
 // TODO Move evm specific data to RequestMetadata struct so we can have multiple architectures besides evm

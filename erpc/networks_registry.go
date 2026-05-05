@@ -89,19 +89,37 @@ func NewNetwork(
 
 	key := fmt.Sprintf("%s/%s", projectId, nwCfg.NetworkId())
 
+	// Build a provider that resolves the dynamic block-unavailable retry delay
+	// from the network's EMA-estimated block time. Returns 0 before warmup so
+	// the static fallback kicks in.
+	var dynamicBlockUnavailableDelay func() time.Duration
+	if metricsTracker != nil {
+		networkId := nwCfg.NetworkId()
+		mult := common.DefaultBlockUnavailableDelayMultiplier
+		if nwCfg.Evm != nil && nwCfg.Evm.BlockUnavailableDelayMultiplier != nil && *nwCfg.Evm.BlockUnavailableDelayMultiplier > 0 {
+			mult = *nwCfg.Evm.BlockUnavailableDelayMultiplier
+		}
+		dynamicBlockUnavailableDelay = func() time.Duration {
+			if bt := metricsTracker.GetNetworkBlockTime(networkId); bt > 0 {
+				return time.Duration(float64(bt) * mult)
+			}
+			return 0
+		}
+	}
+
 	// Create failsafe executors from configs
 	var failsafeExecutors []*FailsafeExecutor
 	if len(nwCfg.Failsafe) > 0 {
 		for _, fsCfg := range nwCfg.Failsafe {
-			pls, err := upstream.CreateFailSafePolicies(appCtx, &lg, common.ScopeNetwork, key, fsCfg)
+			pls, err := upstream.CreateFailSafePolicies(appCtx, &lg, common.ScopeNetwork, key, fsCfg, dynamicBlockUnavailableDelay)
 			if err != nil {
 				return nil, err
 			}
-			policyArray := upstream.ToPolicyArray(pls, "timeout", "consensus", "retry", "hedge")
+			policyArray := upstream.ToPolicyArray(pls, "consensus", "retry", "hedge")
 
-			var timeoutDuration *time.Duration
+			var timeoutFn upstream.TimeoutFunc
 			if fsCfg.Timeout != nil {
-				timeoutDuration = fsCfg.Timeout.Duration.DurationPtr()
+				timeoutFn = upstream.NewTimeoutFunc(&lg, fsCfg.Timeout)
 			}
 
 			method := fsCfg.MatchMethod
@@ -119,7 +137,7 @@ func NewNetwork(
 				finalities:             fsCfg.MatchFinality,
 				upstreamGroup:          fsCfg.MatchUpstreamGroup,
 				executor:               failsafe.NewExecutor(policyArray...),
-				timeout:                timeoutDuration,
+				timeout:                timeoutFn,
 				consensusPolicyEnabled: fsCfg.Consensus != nil,
 				emptyResultAccept:      emptyAccept,
 			})
