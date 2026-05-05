@@ -579,6 +579,9 @@ func (s *HttpServer) createRequestHandler() http.Handler {
 								return
 							}
 							if matches {
+								if nq.ForwardHeaders == nil {
+									nq.ForwardHeaders = make(http.Header)
+								}
 								for _, value := range values {
 									nq.ForwardHeaders.Add(matchKey, value)
 								}
@@ -625,7 +628,7 @@ func (s *HttpServer) createRequestHandler() http.Handler {
 				if !shouldHandleMethod {
 					jsonrpcVersion := "2.0"
 					var reqId interface{}
-					if jrr, err := nq.JsonRpcRequest(); err != nil {
+					if jrr, err := nq.JsonRpcRequest(); err == nil {
 						jsonrpcVersion = jrr.JSONRPC
 						reqId = jrr.ID
 					}

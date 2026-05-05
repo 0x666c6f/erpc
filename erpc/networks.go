@@ -944,8 +944,6 @@ func (n *Network) Forward(ctx context.Context, req *common.NormalizedRequest) (*
 							loopSpan.End()
 							return r, nil
 						}
-						loopSpan.End()
-						return r, nil
 					}
 
 					// Deterministic errors: client faults and execution reverts are the

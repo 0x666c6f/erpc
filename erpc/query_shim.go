@@ -14,6 +14,11 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+const (
+	defaultQueryShimLimit uint32 = 100
+	maxQueryShimLimit     uint32 = 1000
+)
+
 func (qe *EvmQueryExecutor) shimQueryBlocks(ctx context.Context, req *evm.QueryBlocksRequest, fromBlock, toBlock uint64, onPage func(proto.Message) error) error {
 	_, shimSpan := common.StartDetailSpan(ctx, "Query.ShimBlocks")
 	defer shimSpan.End()
@@ -457,7 +462,10 @@ func (qe *EvmQueryExecutor) forwardSubrequest(ctx context.Context, method string
 
 func queryLimit(limit uint32) uint32 {
 	if limit == 0 {
-		return 100
+		return defaultQueryShimLimit
+	}
+	if limit > maxQueryShimLimit {
+		return maxQueryShimLimit
 	}
 	return limit
 }

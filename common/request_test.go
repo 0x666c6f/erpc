@@ -570,6 +570,21 @@ func TestNormalizedRequestForwardBody_MarshalsWhenNoRawBody(t *testing.T) {
 	}
 }
 
+func TestNormalizedRequestConstructorsInitializeForwardHeaders(t *testing.T) {
+	req := NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber"}`))
+	req.ForwardHeaders.Add("x-test", "from-raw")
+	if got := req.ForwardHeaders.Get("x-test"); got != "from-raw" {
+		t.Fatalf("expected raw-body request to accept forwarded headers, got %q", got)
+	}
+
+	jrq := NewJsonRpcRequest("eth_blockNumber", []interface{}{})
+	fromJSONRPC := NewNormalizedRequestFromJsonRpcRequest(jrq)
+	fromJSONRPC.ForwardHeaders.Add("x-test", "from-jsonrpc")
+	if got := fromJSONRPC.ForwardHeaders.Get("x-test"); got != "from-jsonrpc" {
+		t.Fatalf("expected json-rpc request to accept forwarded headers, got %q", got)
+	}
+}
+
 func TestNormalizedRequestForwardBody_StripsEthGetLogsMaxSizeFromUpstreamPayload(t *testing.T) {
 	raw := []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_getLogs","params":[{"fromBlock":"0x1","toBlock":"0x2","maxSize":2}]}`)
 	req := NewNormalizedRequest(raw)

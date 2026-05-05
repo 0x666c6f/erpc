@@ -63,6 +63,14 @@ func TestPaginateLogsByBlock_NoCursorWhenAllLogsFit(t *testing.T) {
 	require.Nil(t, cursor)
 }
 
+func TestQueryLimitCapsClientInput(t *testing.T) {
+	require.Equal(t, defaultQueryShimLimit, queryLimit(0))
+	require.Equal(t, uint32(42), queryLimit(42))
+	require.Equal(t, maxQueryShimLimit, queryLimit(maxQueryShimLimit))
+	require.Equal(t, maxQueryShimLimit, queryLimit(maxQueryShimLimit+1))
+	require.Equal(t, maxQueryShimLimit, queryLimit(^uint32(0)))
+}
+
 func TestLoadQueryLogParentData_CachesByBlockNumber(t *testing.T) {
 	fetchCalls := 0
 	cache := map[uint64]*queryLogParentData{}

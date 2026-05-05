@@ -403,7 +403,7 @@ func (gs *GrpcServer) QueryBlocks(req *evm.QueryBlocksRequest, stream evm.QueryS
 	if err != nil {
 		return err
 	}
-	return gs.processor.ProcessQueryStream(stream.Context(), input, req, func(page proto.Message) error {
+	return gs.processQueryStream(stream.Context(), input, req, func(page proto.Message) error {
 		return stream.Send(page.(*evm.QueryBlocksResponse))
 	})
 }
@@ -413,7 +413,7 @@ func (gs *GrpcServer) QueryTransactions(req *evm.QueryTransactionsRequest, strea
 	if err != nil {
 		return err
 	}
-	return gs.processor.ProcessQueryStream(stream.Context(), input, req, func(page proto.Message) error {
+	return gs.processQueryStream(stream.Context(), input, req, func(page proto.Message) error {
 		return stream.Send(page.(*evm.QueryTransactionsResponse))
 	})
 }
@@ -423,7 +423,7 @@ func (gs *GrpcServer) QueryLogs(req *evm.QueryLogsRequest, stream evm.QueryServi
 	if err != nil {
 		return err
 	}
-	return gs.processor.ProcessQueryStream(stream.Context(), input, req, func(page proto.Message) error {
+	return gs.processQueryStream(stream.Context(), input, req, func(page proto.Message) error {
 		return stream.Send(page.(*evm.QueryLogsResponse))
 	})
 }
@@ -433,7 +433,7 @@ func (gs *GrpcServer) QueryTraces(req *evm.QueryTracesRequest, stream evm.QueryS
 	if err != nil {
 		return err
 	}
-	return gs.processor.ProcessQueryStream(stream.Context(), input, req, func(page proto.Message) error {
+	return gs.processQueryStream(stream.Context(), input, req, func(page proto.Message) error {
 		return stream.Send(page.(*evm.QueryTracesResponse))
 	})
 }
@@ -443,9 +443,16 @@ func (gs *GrpcServer) QueryTransfers(req *evm.QueryTransfersRequest, stream evm.
 	if err != nil {
 		return err
 	}
-	return gs.processor.ProcessQueryStream(stream.Context(), input, req, func(page proto.Message) error {
+	return gs.processQueryStream(stream.Context(), input, req, func(page proto.Message) error {
 		return stream.Send(page.(*evm.QueryTransfersResponse))
 	})
+}
+
+func (gs *GrpcServer) processQueryStream(ctx context.Context, input *RequestInput, req proto.Message, onPage func(proto.Message) error) error {
+	if err := gs.processor.ProcessQueryStream(ctx, input, req, onPage); err != nil {
+		return gs.mapToGRPCStatus(err)
+	}
+	return nil
 }
 
 func (gs *GrpcServer) panicRecoveryUnary() grpc.UnaryServerInterceptor {
@@ -475,6 +482,9 @@ func (gs *GrpcServer) panicRecoveryStream() grpc.StreamServerInterceptor {
 func (gs *GrpcServer) mapToGRPCStatus(err error) error {
 	if err == nil {
 		return nil
+	}
+	if _, ok := status.FromError(err); ok {
+		return err
 	}
 	switch {
 	case common.HasErrorCode(err, common.ErrCodeEndpointUnsupported):

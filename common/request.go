@@ -366,8 +366,9 @@ type NormalizedRequest struct {
 
 func NewNormalizedRequest(body []byte) *NormalizedRequest {
 	nr := &NormalizedRequest{
-		body:       body,
-		directives: nil,
+		body:           body,
+		ForwardHeaders: make(http.Header),
+		directives:     nil,
 	}
 	nr.compositeType.Store(CompositeTypeNone)
 	return nr
@@ -375,7 +376,8 @@ func NewNormalizedRequest(body []byte) *NormalizedRequest {
 
 func NewNormalizedRequestFromJsonRpcRequest(jsonRpcRequest *JsonRpcRequest) *NormalizedRequest {
 	nr := &NormalizedRequest{
-		directives: nil,
+		ForwardHeaders: make(http.Header),
+		directives:     nil,
 	}
 	nr.jsonRpcRequest.Store(jsonRpcRequest)
 	nr.compositeType.Store(CompositeTypeNone)
