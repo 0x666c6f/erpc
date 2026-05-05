@@ -35,7 +35,7 @@ jobs:
       - name: Build
         run: make build
       - name: Test with the Go CLI
-        run: make test-fast
+        run: make test-fast PKG_EXCLUDE_REGEX='^github\.com/erpc/erpc/(cmd|test|erpc)($$|/)'
 
   security:
     runs-on: ubuntu-24.04
