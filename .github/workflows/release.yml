@@ -14,7 +14,7 @@ on:
     branches:
       - morpho-main
 
-permissions: read-all
+permissions: {}
 
 jobs:
   # Create Release PR - only on workflow_dispatch
@@ -25,8 +25,20 @@ jobs:
     runs-on: "${{ github.repository_owner == 'erpc' && 'blacksmith-8vcpu-ubuntu-2404' || 'ubuntu-24.04' }}"
     if: github.event_name == 'workflow_dispatch'
     outputs:
-      version: ${{ github.event.inputs.version_tag }}
+      version: ${{ steps.validate-version.outputs.version_tag }}
     steps:
+      - name: Validate version tag
+        id: validate-version
+        env:
+          VERSION_TAG: ${{ github.event.inputs.version_tag }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$VERSION_TAG" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            echo "Invalid version_tag: $VERSION_TAG" >&2
+            exit 1
+          fi
+          echo "version_tag=$VERSION_TAG" >> "$GITHUB_OUTPUT"
+
       - name: Harden the runner (Audit all outbound calls)
         uses: step-security/harden-runner@5ef0c079ce82195b2a36a210272d6b661572d83e # v2.14.2
         with:
@@ -43,7 +55,7 @@ jobs:
 
       - name: Generate types
         run: |
-          go install github.com/gzuidhof/tygo@latest
+          go install github.com/gzuidhof/tygo@v0.2.21
           tygo generate
       
       - name: Setup Syft
@@ -57,7 +69,7 @@ jobs:
           version: "~> v2"
           args: release --snapshot --clean
         env:
-          GORELEASER_CURRENT_TAG: ${{ github.event.inputs.version_tag }}
+          GORELEASER_CURRENT_TAG: ${{ steps.validate-version.outputs.version_tag }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       # Setup pnpm + node and install dependencies
@@ -83,20 +95,24 @@ jobs:
 
       # Update version in package.json files
       - name: Update package versions
+        env:
+          VERSION_TAG: ${{ steps.validate-version.outputs.version_tag }}
         run: |
           for pkg in . typescript/cli typescript/config; do
             cd $pkg
-            npm version ${{ github.event.inputs.version_tag }} --no-git-tag-version
+            npm version "$VERSION_TAG" --no-git-tag-version
             cd -
           done
 
       # Generate the release files using the snapshot checksums
       - name: Generate CLI release files
         working-directory: typescript/cli
+        env:
+          VERSION_TAG: ${{ steps.validate-version.outputs.version_tag }}
+          COMMIT_SHA: ${{ github.sha }}
+          CHECKSUMS_FILE: ../../dist/checksums.txt
         run: |
-          export VERSION="${{ github.event.inputs.version_tag }}"
-          export COMMIT_SHA=${{ github.sha }}
-          export CHECKSUMS_FILE=../../dist/checksums.txt
+          export VERSION="$VERSION_TAG"
           pnpm run build
           npx ts-node ./src/script/generate-release-files.ts
 
@@ -108,17 +124,17 @@ jobs:
       - name: Create Pull Request
         uses: peter-evans/create-pull-request@22a9089034f40e5a961c8808d113e2c98fb63676 # v7.0.11
         with:
-          commit-message: "chore: release ${{ github.event.inputs.version_tag }}"
-          title: "chore: release ${{ github.event.inputs.version_tag }}"
+          commit-message: "chore: release ${{ steps.validate-version.outputs.version_tag }}"
+          title: "chore: release ${{ steps.validate-version.outputs.version_tag }}"
           body: |
-            🚀 Release preparation for version ${{ github.event.inputs.version_tag }}
+            🚀 Release preparation for version ${{ steps.validate-version.outputs.version_tag }}
             
             This PR includes:
             - Version bumps in package.json files
             - Generated TypeScript types
             - Generated release files
             - Generated checksums
-          branch: "release/${{ github.event.inputs.version_tag }}"
+          branch: "release/${{ steps.validate-version.outputs.version_tag }}"
           base: morpho-main
           labels: release
 
