@@ -25,8 +25,23 @@ jobs:
     runs-on: "${{ github.repository_owner == 'erpc' && 'blacksmith-8vcpu-ubuntu-2404' || 'ubuntu-24.04' }}"
     if: github.event_name == 'workflow_dispatch'
     outputs:
-      version: ${{ github.event.inputs.version_tag }}
+      version: ${{ steps.validate-version.outputs.version }}
     steps:
+      - name: Validate version_tag
+        id: validate-version
+        shell: bash
+        env:
+          VERSION_TAG: ${{ github.event.inputs.version_tag }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! "$VERSION_TAG" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            printf 'Invalid version_tag: %s\n' "$VERSION_TAG" >&2
+            exit 1
+          fi
+
+          printf 'version=%s\n' "$VERSION_TAG" >> "$GITHUB_OUTPUT"
+
       - name: Harden the runner (Audit all outbound calls)
         uses: step-security/harden-runner@5ef0c079ce82195b2a36a210272d6b661572d83e # v2.14.2
         with:
@@ -57,7 +72,7 @@ jobs:
           version: "~> v2"
           args: release --snapshot --clean
         env:
-          GORELEASER_CURRENT_TAG: ${{ github.event.inputs.version_tag }}
+          GORELEASER_CURRENT_TAG: ${{ steps.validate-version.outputs.version }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       # Setup pnpm + node and install dependencies
@@ -83,20 +98,26 @@ jobs:
 
       # Update version in package.json files
       - name: Update package versions
+        env:
+          VERSION_TAG: ${{ steps.validate-version.outputs.version }}
         run: |
           for pkg in . typescript/cli typescript/config; do
-            cd $pkg
-            npm version ${{ github.event.inputs.version_tag }} --no-git-tag-version
+            cd "$pkg"
+            npm version "$VERSION_TAG" --no-git-tag-version
             cd -
           done
 
       # Generate the release files using the snapshot checksums
       - name: Generate CLI release files
         working-directory: typescript/cli
+        env:
+          CHECKSUMS_FILE: ../../dist/checksums.txt
+          COMMIT_SHA: ${{ github.sha }}
+          VERSION_TAG: ${{ steps.validate-version.outputs.version }}
         run: |
-          export VERSION="${{ github.event.inputs.version_tag }}"
-          export COMMIT_SHA=${{ github.sha }}
-          export CHECKSUMS_FILE=../../dist/checksums.txt
+          export VERSION="$VERSION_TAG"
+          export COMMIT_SHA
+          export CHECKSUMS_FILE
           pnpm run build
           npx ts-node ./src/script/generate-release-files.ts
 
@@ -108,17 +129,17 @@ jobs:
       - name: Create Pull Request
         uses: peter-evans/create-pull-request@22a9089034f40e5a961c8808d113e2c98fb63676 # v7.0.11
         with:
-          commit-message: "chore: release ${{ github.event.inputs.version_tag }}"
-          title: "chore: release ${{ github.event.inputs.version_tag }}"
+          commit-message: "chore: release ${{ steps.validate-version.outputs.version }}"
+          title: "chore: release ${{ steps.validate-version.outputs.version }}"
           body: |
-            🚀 Release preparation for version ${{ github.event.inputs.version_tag }}
+            🚀 Release preparation for version ${{ steps.validate-version.outputs.version }}
             
             This PR includes:
             - Version bumps in package.json files
             - Generated TypeScript types
             - Generated release files
             - Generated checksums
-          branch: "release/${{ github.event.inputs.version_tag }}"
+          branch: "release/${{ steps.validate-version.outputs.version }}"
           base: morpho-main
           labels: release
 
@@ -153,7 +174,7 @@ jobs:
           COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
         run: |
           VERSION=$(echo "$COMMIT_MESSAGE" | grep -oP 'release \K([0-9]+\.[0-9]+\.[0-9]+)')
-          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+          echo "VERSION=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Set up Go
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
@@ -305,7 +326,7 @@ jobs:
           COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
         run: |
           VERSION=$(echo "$COMMIT_MESSAGE" | grep -oP 'release \K([0-9]+\.[0-9]+\.[0-9]+)')
-          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+          echo "VERSION=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Build+push by digest (branch)
         id: build_main
@@ -431,7 +452,7 @@ jobs:
           COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
         run: |
           VERSION=$(echo "$COMMIT_MESSAGE" | grep -oP 'release \K([0-9]+\.[0-9]+\.[0-9]+)')
-          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+          echo "VERSION=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Build+push by digest (branch)
         id: build_main
@@ -538,7 +559,7 @@ jobs:
           COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
         run: |
           VERSION=$(echo "$COMMIT_MESSAGE" | grep -oP 'release \K([0-9]+\.[0-9]+\.[0-9]+)')
-          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+          echo "VERSION=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Create multi-arch manifest for branch
         id: main
@@ -593,10 +614,12 @@ jobs:
           DIGEST_RELEASE_VALIDATOR=$(docker inspect --format='{{index .RepoDigests 0}}' ghcr.io/${{ steps.meta.outputs.repo }}-validator:${{ steps.version.outputs.VERSION }})
           docker pull ghcr.io/${{ steps.meta.outputs.repo }}-validator:latest
           DIGEST_LATEST_VALIDATOR=$(docker inspect --format='{{index .RepoDigests 0}}' ghcr.io/${{ steps.meta.outputs.repo }}-validator:latest)
-          echo "digest_release=${DIGEST_RELEASE#*@}" >> "$GITHUB_OUTPUT"
-          echo "digest_latest=${DIGEST_LATEST#*@}" >> "$GITHUB_OUTPUT"
-          echo "digest_release_validator=${DIGEST_RELEASE_VALIDATOR#*@}" >> "$GITHUB_OUTPUT"
-          echo "digest_latest_validator=${DIGEST_LATEST_VALIDATOR#*@}" >> "$GITHUB_OUTPUT"
+          {
+            echo "digest_release=${DIGEST_RELEASE#*@}"
+            echo "digest_latest=${DIGEST_LATEST#*@}"
+            echo "digest_release_validator=${DIGEST_RELEASE_VALIDATOR#*@}"
+            echo "digest_latest_validator=${DIGEST_LATEST_VALIDATOR#*@}"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Attest build provenance (Docker Manifest Main)
         uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f # v3.2.0
