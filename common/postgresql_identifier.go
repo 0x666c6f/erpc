@@ -2,11 +2,9 @@ package common
 
 import (
 	"fmt"
-	"regexp"
 	"strings"
+	"unicode"
 )
-
-var postgreSQLIdentifierComponentRE = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
 
 // ValidatePostgreSQLTableIdentifier rejects table identifiers that cannot be
 // safely interpolated after pgx identifier quoting.
@@ -23,9 +21,24 @@ func PostgreSQLTableIdentifierParts(name string) ([]string, error) {
 		return nil, fmt.Errorf("postgres table identifier %q: too many qualifying parts", name)
 	}
 	for _, part := range parts {
-		if !postgreSQLIdentifierComponentRE.MatchString(part) {
+		if !isPostgreSQLIdentifierComponent(part) {
 			return nil, fmt.Errorf("postgres table identifier %q: invalid component %q", name, part)
 		}
 	}
 	return parts, nil
+}
+
+func isPostgreSQLIdentifierComponent(name string) bool {
+	for i, r := range name {
+		if i == 0 {
+			if r != '_' && !unicode.IsLetter(r) {
+				return false
+			}
+			continue
+		}
+		if r != '_' && r != '$' && !unicode.IsLetter(r) && !unicode.IsDigit(r) {
+			return false
+		}
+	}
+	return name != ""
 }

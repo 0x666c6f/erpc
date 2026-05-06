@@ -25,6 +25,8 @@ func TestPostgreSQLConnectorConfigValidateTableIdentifier(t *testing.T) {
 		"myschema.cache",
 		"_schema.table_1",
 		"CamelCase",
+		"schema.cache$2026",
+		"\u00e9rpc_cache",
 	} {
 		t.Run("valid_"+table, func(t *testing.T) {
 			require.NoError(t, baseConfig(table).Validate())
@@ -39,6 +41,8 @@ func TestPostgreSQLConnectorConfigValidateTableIdentifier(t *testing.T) {
 		".table",
 		"schema.",
 		"schema.*",
+		"$table",
+		"schema.$cache",
 		"table name",
 	} {
 		t.Run("invalid_"+table, func(t *testing.T) {
