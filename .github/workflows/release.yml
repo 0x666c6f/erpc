@@ -5,10 +5,10 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  AWS_REGION: eu-west-3
-  AWS_ROLE_ARN: arn:aws:iam::537124939463:role/morpho-org-erpc-github-actions-role
-  ECR_REPOSITORY: erpc
-  ECR_VALIDATOR_REPOSITORY: erpc-validator
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  AWS_ROLE_ARN: ${{ vars.AWS_ROLE_ARN }}
+  ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+  ECR_VALIDATOR_REPOSITORY: ${{ vars.ECR_VALIDATOR_REPOSITORY }}
 
 on:
   workflow_dispatch:
