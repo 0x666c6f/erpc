@@ -34,6 +34,8 @@ type PostgreSQLConnector struct {
 	minConns      int32
 	maxConns      int32
 	table         string
+	tableSchema   string
+	tableName     string
 	cleanupTicker *time.Ticker
 	initTimeout   time.Duration
 	getTimeout    time.Duration
@@ -70,10 +72,17 @@ func NewPostgreSQLConnector(
 	lg := logger.With().Str("connector", id).Logger()
 	lg.Debug().Interface("config", cfg).Msg("creating postgresql connector")
 
+	tableIdentifier, err := newPostgreSQLTableIdentifier(cfg.Table)
+	if err != nil {
+		return nil, err
+	}
+
 	connector := &PostgreSQLConnector{
 		id:            id,
 		logger:        &lg,
-		table:         cfg.Table,
+		table:         tableIdentifier.sql,
+		tableSchema:   tableIdentifier.schema,
+		tableName:     tableIdentifier.name,
 		minConns:      cfg.MinConns,
 		maxConns:      cfg.MaxConns,
 		initTimeout:   cfg.InitTimeout.Duration(),
@@ -132,18 +141,26 @@ func (p *PostgreSQLConnector) connectTask(ctx context.Context, cfg *common.Postg
 			expires_at TIMESTAMP WITH TIME ZONE,
 			PRIMARY KEY (partition_key, range_key)
 		)
-	`, cfg.Table))
+	`, p.table))
 	if err != nil {
 		return err
 	}
 
 	// Migrate existing TEXT column to BYTEA if needed
 	var dataType string
-	err = conn.QueryRow(ctx, `
+	dataTypeQuery := `
 		SELECT data_type 
 		FROM information_schema.columns 
 		WHERE table_name = $1 AND column_name = 'value'
-	`, cfg.Table).Scan(&dataType)
+	`
+	dataTypeArgs := []interface{}{p.tableName}
+	if p.tableSchema != "" {
+		dataTypeQuery += " AND table_schema = $2"
+		dataTypeArgs = append(dataTypeArgs, p.tableSchema)
+	} else {
+		dataTypeQuery += " AND table_schema = current_schema()"
+	}
+	err = conn.QueryRow(ctx, dataTypeQuery, dataTypeArgs...).Scan(&dataType)
 
 	if err == nil && dataType == "text" {
 		// Migration needed
@@ -152,7 +169,7 @@ func (p *PostgreSQLConnector) connectTask(ctx context.Context, cfg *common.Postg
 		// Add temporary column
 		_, err = conn.Exec(ctx, fmt.Sprintf(`
 			ALTER TABLE %s ADD COLUMN IF NOT EXISTS value_new BYTEA
-		`, cfg.Table))
+		`, p.table))
 		if err != nil {
 			return fmt.Errorf("failed to add temporary column: %w", err)
 		}
@@ -160,7 +177,7 @@ func (p *PostgreSQLConnector) connectTask(ctx context.Context, cfg *common.Postg
 		// Copy data (converting text to bytea)
 		_, err = conn.Exec(ctx, fmt.Sprintf(`
 			UPDATE %s SET value_new = value::bytea WHERE value IS NOT NULL
-		`, cfg.Table))
+		`, p.table))
 		if err != nil {
 			return fmt.Errorf("failed to migrate data: %w", err)
 		}
@@ -169,7 +186,7 @@ func (p *PostgreSQLConnector) connectTask(ctx context.Context, cfg *common.Postg
 		_, err = conn.Exec(ctx, fmt.Sprintf(`
 			ALTER TABLE %s DROP COLUMN value;
 			ALTER TABLE %s RENAME COLUMN value_new TO value;
-		`, cfg.Table, cfg.Table))
+		`, p.table, p.table))
 		if err != nil {
 			return fmt.Errorf("failed to complete migration: %w", err)
 		}
@@ -181,7 +198,7 @@ func (p *PostgreSQLConnector) connectTask(ctx context.Context, cfg *common.Postg
 	_, err = conn.Exec(ctx, fmt.Sprintf(`
         ALTER TABLE %s
         ADD COLUMN IF NOT EXISTS expires_at TIMESTAMP WITH TIME ZONE
-    `, cfg.Table))
+    `, p.table))
 	if err != nil {
 		return fmt.Errorf("failed to add expires_at column: %w", err)
 	}
@@ -192,7 +209,7 @@ func (p *PostgreSQLConnector) connectTask(ctx context.Context, cfg *common.Postg
 	// and migrate/downgrade the old index separately.
 	_, err = conn.Exec(ctx, fmt.Sprintf(`
 		CREATE INDEX IF NOT EXISTS idx_range_partition ON %s (range_key, partition_key)
-	`, cfg.Table))
+	`, p.table))
 	if err != nil {
 		return fmt.Errorf("failed to create reverse index: %w", err)
 	}
@@ -201,7 +218,7 @@ func (p *PostgreSQLConnector) connectTask(ctx context.Context, cfg *common.Postg
 	_, err = conn.Exec(ctx, fmt.Sprintf(`
 		CREATE INDEX IF NOT EXISTS idx_expires_at ON %s (expires_at)
 		WHERE expires_at IS NOT NULL
-	`, cfg.Table))
+	`, p.table))
 	if err != nil {
 		return fmt.Errorf("failed to create TTL index: %w", err)
 	}
@@ -247,6 +264,35 @@ func (p *PostgreSQLConnector) connectTask(ctx context.Context, cfg *common.Postg
 
 func (p *PostgreSQLConnector) Id() string {
 	return p.id
+}
+
+type postgreSQLTableIdentifier struct {
+	sql    string
+	schema string
+	name   string
+}
+
+func newPostgreSQLTableIdentifier(name string) (postgreSQLTableIdentifier, error) {
+	parts, err := common.PostgreSQLTableIdentifierParts(name)
+	if err != nil {
+		return postgreSQLTableIdentifier{}, err
+	}
+
+	normalizedParts := make([]string, len(parts))
+	for i, part := range parts {
+		normalizedParts[i] = strings.ToLower(part)
+	}
+
+	identifier := postgreSQLTableIdentifier{
+		sql: pgx.Identifier(normalizedParts).Sanitize(),
+	}
+	if len(normalizedParts) == 1 {
+		identifier.name = normalizedParts[0]
+	} else {
+		identifier.schema = normalizedParts[0]
+		identifier.name = normalizedParts[1]
+	}
+	return identifier, nil
 }
 
 func (p *PostgreSQLConnector) Set(ctx context.Context, partitionKey, rangeKey string, value []byte, ttl *time.Duration) error {
@@ -299,12 +345,12 @@ func (p *PostgreSQLConnector) Set(ctx context.Context, partitionKey, rangeKey st
 		// Avoid repeated large updates on hot keys: only update when we need to clear expires_at
 		// or the stored value is actually different.
 		_, err = p.conn.Exec(ctx, fmt.Sprintf(`
-			INSERT INTO %s (partition_key, range_key, value, expires_at)
+			INSERT INTO %s AS existing (partition_key, range_key, value, expires_at)
 			VALUES ($1, $2, $3, NULL)
 			ON CONFLICT (partition_key, range_key) DO UPDATE
 			SET value = EXCLUDED.value, expires_at = NULL
-			WHERE %s.expires_at IS NOT NULL OR %s.value IS DISTINCT FROM EXCLUDED.value
-		`, p.table, p.table, p.table), partitionKey, rangeKey, value)
+			WHERE existing.expires_at IS NOT NULL OR existing.value IS DISTINCT FROM EXCLUDED.value
+		`, p.table), partitionKey, rangeKey, value)
 	}
 
 	if err != nil {
