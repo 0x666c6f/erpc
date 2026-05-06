@@ -170,7 +170,7 @@ func (m *mockUpstreamForRetry) EvmBlockAvailabilityBounds() (int64, int64) {
 
 // Test helper to execute retry policy
 func executeRetryPolicy(t *testing.T, cfg *common.RetryPolicyConfig, scope common.Scope, response *common.NormalizedResponse, err error) (attempts int, finalErr error) {
-	policy, policyErr := createRetryPolicy(scope, cfg)
+	policy, policyErr := createRetryPolicy(scope, cfg, nil)
 	assert.NoError(t, policyErr)
 
 	executor := failsafe.NewExecutor(policy)
@@ -578,6 +578,67 @@ func TestRetryPolicy_EdgeCases(t *testing.T) {
 	})
 }
 
+func TestRetryPolicy_NonRetryableTowardNetwork(t *testing.T) {
+	cfg := &common.RetryPolicyConfig{MaxAttempts: 3}
+
+	t.Run("ExplicitlyNonRetryable_StopsAfterOneAttempt", func(t *testing.T) {
+		nonRetryable := common.NewErrEndpointClientSideException(
+			errors.New("deterministic client error"),
+		).WithRetryableTowardNetwork(false)
+
+		attempts, _ := executeRetryPolicy(t, cfg, common.ScopeNetwork, nil, nonRetryable)
+		assert.Equal(t, 1, attempts, "errors marked non-retryable toward network must not retry")
+	})
+
+	t.Run("DefaultRetryable_RetriesToMaxAttempts", func(t *testing.T) {
+		attempts, _ := executeRetryPolicy(t, cfg, common.ScopeNetwork, nil, errors.New("generic error"))
+		assert.Equal(t, 3, attempts, "errors without an explicit non-retryable hint keep default retry behavior")
+	})
+
+	// Mixed-bundle regression: ErrUpstreamsExhausted wrapping one explicitly
+	// non-retryable child and one plain error must NOT short-circuit. Mirrors
+	// IsRetryableTowardNetwork's "any retryable child → retry" semantics and
+	// guards against a DeepSearch fan-out picking up the flag from a single
+	// child (child order via sync.Map.Range is non-deterministic).
+	t.Run("MixedExhausted_FallsThroughToDefaultRetry", func(t *testing.T) {
+		nonRetryable := common.NewErrEndpointClientSideException(
+			errors.New("deterministic child"),
+		).WithRetryableTowardNetwork(false)
+		retryable := errors.New("transient child")
+
+		exhausted := &common.ErrUpstreamsExhausted{
+			BaseError: common.BaseError{
+				Code:    common.ErrCodeUpstreamsExhausted,
+				Message: "all upstream attempts failed",
+				Cause:   errors.Join(nonRetryable, retryable),
+			},
+		}
+
+		attempts, _ := executeRetryPolicy(t, cfg, common.ScopeNetwork, nil, exhausted)
+		assert.Equal(t, 3, attempts, "mixed exhausted bundle with any retryable child must still retry")
+	})
+
+	t.Run("AllNonRetryableExhausted_StopsAfterOneAttempt", func(t *testing.T) {
+		a := common.NewErrEndpointClientSideException(
+			errors.New("deterministic a"),
+		).WithRetryableTowardNetwork(false)
+		b := common.NewErrEndpointClientSideException(
+			errors.New("deterministic b"),
+		).WithRetryableTowardNetwork(false)
+
+		exhausted := &common.ErrUpstreamsExhausted{
+			BaseError: common.BaseError{
+				Code:    common.ErrCodeUpstreamsExhausted,
+				Message: "all upstream attempts failed",
+				Cause:   errors.Join(a, b),
+			},
+		}
+
+		attempts, _ := executeRetryPolicy(t, cfg, common.ScopeNetwork, nil, exhausted)
+		assert.Equal(t, 1, attempts, "exhausted bundle where every child is explicitly non-retryable must not retry")
+	})
+}
+
 func TestRetryPolicy_CombinedConfidenceAndIgnore(t *testing.T) {
 	t.Run("MethodInIgnoreList_IgnoresConfidence", func(t *testing.T) {
 		cfg := &common.RetryPolicyConfig{
@@ -675,7 +736,7 @@ func TestRetryPolicy_MaxAttemptsRespected(t *testing.T) {
 
 	mockResp := createMockResponse(true, req, mockUpstream)
 
-	policy, err := createRetryPolicy(common.ScopeNetwork, cfg)
+	policy, err := createRetryPolicy(common.ScopeNetwork, cfg, nil)
 	assert.NoError(t, err)
 
 	executor := failsafe.NewExecutor(policy)
@@ -731,7 +792,7 @@ func TestRetryPolicy_SimpleEmpty(t *testing.T) {
 	}
 
 	// Test with error - should retry
-	policy, _ := createRetryPolicy(common.ScopeNetwork, cfg)
+	policy, _ := createRetryPolicy(common.ScopeNetwork, cfg, nil)
 	executor := failsafe.NewExecutor(policy)
 	attempts := 0
 
@@ -786,7 +847,7 @@ func TestRetryPolicy_EmptyWithUpstream(t *testing.T) {
 	// Test 1: Empty response with no upstream - should retry
 	emptyResp := createMockResponse(true, req, nil)
 
-	policy, _ := createRetryPolicy(common.ScopeNetwork, cfg)
+	policy, _ := createRetryPolicy(common.ScopeNetwork, cfg, nil)
 	executor := failsafe.NewExecutor(policy)
 	attempts := 0
 
@@ -837,7 +898,7 @@ func TestRetryPolicy_EmptyWithEvmUpstream(t *testing.T) {
 
 	emptyResp := createMockResponse(true, req, mockUpstream)
 
-	policy, _ := createRetryPolicy(common.ScopeNetwork, cfg)
+	policy, _ := createRetryPolicy(common.ScopeNetwork, cfg, nil)
 	executor := failsafe.NewExecutor(policy)
 	attempts := 0
 
@@ -896,7 +957,7 @@ func TestRetryPolicy_TypeAssertion(t *testing.T) {
 }
 
 func executeRetryPolicyWithContext(t *testing.T, cfg *common.RetryPolicyConfig, scope common.Scope, response *common.NormalizedResponse, err error, ctx context.Context) (attempts int, finalErr error) {
-	policy, policyErr := createRetryPolicy(scope, cfg)
+	policy, policyErr := createRetryPolicy(scope, cfg, nil)
 	assert.NoError(t, policyErr)
 
 	executor := failsafe.NewExecutor(policy).WithContext(ctx)

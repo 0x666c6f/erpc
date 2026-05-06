@@ -96,6 +96,13 @@ export interface ServerConfig {
     httpPort?: number;
     httpPortV4?: number;
     httpPortV6?: number;
+    grpcEnabled?: boolean;
+    grpcHostV4?: string;
+    grpcPortV4?: number;
+    grpcHostV6?: string;
+    grpcPortV6?: number;
+    grpcMaxRecvMsgSize?: number;
+    grpcMaxSendMsgSize?: number;
     maxTimeout?: Duration;
     readTimeout?: Duration;
     writeTimeout?: Duration;
@@ -293,6 +300,8 @@ export interface ConnectorConfig {
     dynamodb?: DynamoDBConnectorConfig;
     postgresql?: PostgreSQLConnectorConfig;
     grpc?: GrpcConnectorConfig;
+    failsafeForGets?: (FailsafeConfig | undefined)[];
+    failsafeForSets?: (FailsafeConfig | undefined)[];
 }
 export interface GrpcConnectorConfig {
     bootstrap?: string;
@@ -420,6 +429,9 @@ export interface ProjectConfig {
      * Configure user agent tracking at the project level
      */
     userAgentMode?: UserAgentTrackingMode;
+    forwardHeaders?: string[];
+    ignoreMethods?: string[];
+    allowMethods?: string[];
 }
 /**
  * UserAgentTrackingMode controls how user agents are recorded for metrics/labels
@@ -483,6 +495,7 @@ export interface UpstreamConfig {
 }
 export interface ShadowUpstreamConfig {
     enabled: boolean;
+    sampleRate?: number;
     ignoreFields?: {
         [key: string]: string[];
     };
@@ -500,8 +513,8 @@ export interface RoutingConfig {
     scoreLatencyQuantile?: number;
 }
 export interface ScoreMultiplierConfig {
-    network: string;
-    method: string;
+    network?: string;
+    method?: string;
     finality?: DataFinalityState[];
     overall?: number;
     errorRate?: number;
@@ -512,7 +525,8 @@ export interface ScoreMultiplierConfig {
     finalizationLag?: number;
     misbehaviors?: number;
 }
-export type Alias = UpstreamConfig;
+export type UJAlias = UpstreamConfig;
+export type UYAlias = UpstreamConfig;
 export interface RateLimitAutoTuneConfig {
     enabled?: boolean;
     adjustmentPeriod: Duration;
@@ -535,9 +549,22 @@ export interface JsonRpcUpstreamConfig {
 export interface EvmUpstreamConfig {
     chainId: number;
     statePollerInterval?: Duration;
+    /**
+     * StatePollerDebounce overrides the debounce interval for the state poller.
+     * When 0 (default), the interval is dynamically inferred from the chain's
+     * observed block time, falling back to the network-level
+     * FallbackStatePollerDebounce, then to a 1s floor.
+     */
     statePollerDebounce?: Duration;
     blockAvailability?: EvmBlockAvailabilityConfig;
     getLogsAutoSplittingRangeThreshold?: number;
+    /**
+     * TraceFilterAutoSplittingRangeThreshold proactively splits trace_filter and
+     * arbtrace_filter requests whose block range exceeds this value into contiguous
+     * sub-requests executed concurrently and merged before returning. Zero disables
+     * the feature.
+     */
+    traceFilterAutoSplittingRangeThreshold?: number;
     skipWhenSyncing?: boolean;
     integrity?: UpstreamIntegrityConfig;
     /**
@@ -548,6 +575,15 @@ export interface EvmUpstreamConfig {
      * @deprecated: should be removed in a future release
      */
     maxAvailableRecentBlocks?: number;
+    queryShim?: EvmQueryShimConfig;
+}
+export interface EvmQueryShimConfig {
+    enabled?: boolean;
+    allowedMethods?: string[];
+    concurrency?: number;
+    maxBlockRange?: number;
+    maxLimit?: number;
+    defaultLimit?: number;
 }
 /**
  * EvmBlockAvailability defines optional lower/upper block availability expressions for an upstream.
@@ -626,6 +662,9 @@ export interface CircuitBreakerPolicyConfig {
 }
 export interface TimeoutPolicyConfig {
     duration?: Duration;
+    quantile?: number;
+    minDuration?: Duration;
+    maxDuration?: Duration;
 }
 export interface HedgePolicyConfig {
     delay?: Duration;
@@ -907,6 +946,17 @@ export interface EvmNetworkConfig {
      */
     getLogsCacheChunkConcurrency?: number;
     /**
+     * TraceFilterSplitOnError controls reactive splitting for trace_filter and
+     * arbtrace_filter requests when the upstream returns a range-too-large error.
+     * Nil disables the feature.
+     */
+    traceFilterSplitOnError?: boolean;
+    /**
+     * TraceFilterSplitConcurrency caps in-flight sub-requests when a trace_filter
+     * or arbtrace_filter request is split. Zero falls back to 10.
+     */
+    traceFilterSplitConcurrency?: number;
+    /**
      * EnforceBlockAvailability controls whether the network should enforce per-upstream
      * block availability bounds (upper/lower) for methods by default. Method-level config may override.
      * When nil or true, enforcement is enabled.
@@ -928,6 +978,22 @@ export interface EvmNetworkConfig {
      * Default includes common point-lookup methods like eth_getBlockByNumber, eth_getTransactionByHash, etc.
      */
     markEmptyAsErrorMethods?: string[];
+    /**
+     * DynamicBlockTimeDebounceMultiplier scales the EMA-estimated block time to derive
+     * the debounce interval for block polling. A value of 0.7 means debounce = 70% of
+     * the estimated block time, preferring fresher data at the cost of slightly more
+     * polling. Lower values reduce staleness risk; higher values reduce RPC calls.
+     * Default: 0.7 (30% under the estimated block time).
+     */
+    dynamicBlockTimeDebounceMultiplier?: number;
+    /**
+     * BlockUnavailableDelayMultiplier scales the EMA-estimated block time to derive
+     * the retry delay when all upstreams return ErrUpstreamBlockUnavailable. When the
+     * dynamic block time is known, the delay is blockTime * this multiplier.
+     * Falls back to the static RetryPolicyConfig.BlockUnavailableDelay when block time
+     * is not yet available. Default: 0.8.
+     */
+    blockUnavailableDelayMultiplier?: number;
     /**
      * IdempotentTransactionBroadcast enables idempotency handling for eth_sendRawTransaction.
      * When enabled (default), "already known" and verified "nonce too low" errors are converted
@@ -1070,6 +1136,7 @@ export declare const AuthTypeDatabase: AuthType;
 export declare const AuthTypeJwt: AuthType;
 export declare const AuthTypeSiwe: AuthType;
 export declare const AuthTypeNetwork: AuthType;
+export declare const AuthTypeX402: AuthType;
 export interface AuthConfig {
     strategies: TsAuthStrategyConfig[];
 }
@@ -1083,6 +1150,7 @@ export interface AuthStrategyConfig {
     database?: DatabaseStrategyConfig;
     jwt?: JwtStrategyConfig;
     siwe?: SiweStrategyConfig;
+    x402?: X402StrategyConfig;
 }
 export interface SecretStrategyConfig {
     id: string;
@@ -1159,6 +1227,22 @@ export interface MetricsConfig {
     port?: number;
     errorLabelMode?: LabelMode;
     histogramBuckets?: string;
+    /**
+     * HistogramDropLabels removes these labels from every histogram. Counters
+     * and gauges are unaffected. Useful to cap per-instance /metrics response
+     * size when high-cardinality labels (e.g. "user") push a scrape past the
+     * managed scraper's sample/body limits.
+     */
+    histogramDropLabels?: string[];
+    /**
+     * HistogramLabelOverrides re-adds labels for specific histograms even if
+     * they appear in HistogramDropLabels. Key is the metric Name (without the
+     * "erpc_" namespace prefix), e.g. "network_request_duration_seconds".
+     * Value is the list of label names to keep for that metric.
+     */
+    histogramLabelOverrides?: {
+        [key: string]: string[];
+    };
 }
 /**
  * RateLimitStoreConfig defines where rate limit counters are stored

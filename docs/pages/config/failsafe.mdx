@@ -60,7 +60,7 @@ projects:
               duration: 30s
             retry:
               maxAttempts: 3
-          
+
           # Fast timeout for simple queries
           - matchMethod: "eth_getBlock*|eth_getTransaction*"
             timeout:
@@ -68,14 +68,14 @@ projects:
             retry:
               maxAttempts: 2
               delay: 100ms
-          
+
           # Longer timeout for heavy trace methods
           - matchMethod: "trace_*|debug_*"
             timeout:
               duration: 60s
             retry:
               maxAttempts: 1    # expensive operations, minimize retries
-          
+
           # Different policy for finalized vs unfinalized data
           - matchMethod: "eth_call|eth_estimateGas"
             matchFinality: ["unfinalized", "realtime"]
@@ -132,6 +132,12 @@ export default createConfig({
 
 Sets a timeout for requests. Network-level timeout applies to the entire request lifecycle (including retries), while upstream-level timeout applies to each individual attempt.
 
+Timeout supports two modes: **fixed** (static duration) and **dynamic** (quantile-based, adapts to real latency).
+
+### Fixed timeout
+
+The simplest configuration — a static duration that applies to all requests matching the policy.
+
 <Tabs items={["yaml", "typescript"]} defaultIndex={0} storageKey="GlobalConfigTypeTabIndex">
   <Tabs.Tab>
 ```yaml filename="erpc.yaml"
@@ -145,7 +151,7 @@ projects:
           - matchMethod: "*"
             timeout:
               duration: 30s        # Total time including all retries
-    
+
     upstreams:
       - id: blastapi-chain-42161
         failsafe:
@@ -181,6 +187,90 @@ export default createConfig({
 ```
   </Tabs.Tab>
 </Tabs>
+
+### Dynamic quantile-based timeout
+
+<Callout type="info">
+  **Quantile-based timeout** (recommended) computes the timeout from real latency percentiles per method, so it automatically adapts to your traffic. Works similarly to [quantile-based hedging](/config/failsafe#hedge-policy).
+</Callout>
+
+When `quantile` is set, the timeout is computed dynamically from the DDSketch latency distribution for each RPC method. For example, `quantile: 0.99` means "set the timeout at the p99 of observed latencies" — only the slowest 1% of requests would be timed out.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `duration` | Duration | Cold-start fallback used until enough latency data is collected. Also serves as the fallback when `maxDuration` is not set. |
+| `quantile` | float | Percentile of latency distribution to use as timeout (e.g., `0.99` for p99). Must be between 0 and 1. |
+| `minDuration` | Duration | *(Optional)* Floor for the computed timeout. Prevents false timeouts when latencies are very low. |
+| `maxDuration` | Duration | *(Optional)* Ceiling for the computed timeout. Can be used as the cold-start fallback when `duration` is omitted. |
+
+<Callout type="tip">
+  For most use cases, just `duration` + `quantile` is sufficient. Use `quantile: 0.99` to timeout only truly stuck requests while letting the system self-tune. The `minDuration` and `maxDuration` fields are optional guard rails.
+</Callout>
+
+<Tabs items={["yaml", "typescript"]} defaultIndex={0} storageKey="GlobalConfigTypeTabIndex">
+  <Tabs.Tab>
+```yaml filename="erpc.yaml"
+projects:
+  - id: main
+    networks:
+      - architecture: evm
+        evm:
+          chainId: 1
+        failsafe:
+          # Recommended: pure dynamic timeout with p99
+          - matchMethod: "eth_call|eth_getLogs"
+            timeout:
+              duration: 30s        # Cold-start fallback
+              quantile: 0.99       # Timeout at p99 of observed latencies
+
+          # With optional guard rails
+          - matchMethod: "*"
+            timeout:
+              duration: 60s        # Cold-start fallback
+              quantile: 0.99
+              minDuration: 200ms   # Never timeout faster than this
+              maxDuration: 60s     # Never wait longer than this
+```
+  </Tabs.Tab>
+  <Tabs.Tab>
+```ts filename="erpc.ts"
+import { createConfig } from "@erpc-cloud/config";
+
+export default createConfig({
+  projects: [{
+    id: "main",
+    networks: [{
+      architecture: "evm",
+      evm: { chainId: 1 },
+      failsafe: [
+        // Recommended: pure dynamic timeout with p99
+        {
+          matchMethod: "eth_call|eth_getLogs",
+          timeout: {
+            duration: "30s",       // Cold-start fallback
+            quantile: 0.99         // Timeout at p99 of observed latencies
+          }
+        },
+        // With optional guard rails
+        {
+          matchMethod: "*",
+          timeout: {
+            duration: "60s",       // Cold-start fallback
+            quantile: 0.99,
+            minDuration: "200ms",  // Never timeout faster than this
+            maxDuration: "60s"     // Never wait longer than this
+          }
+        }
+      ]
+    }]
+  }]
+});
+```
+  </Tabs.Tab>
+</Tabs>
+
+Monitor the computed timeout values via Prometheus metric:
+- `erpc_network_timeout_duration_seconds` — histogram of dynamically computed timeout durations per method
 
 ## `retry` policy
 
@@ -334,7 +424,7 @@ projects:
               minDelay: 100ms     # Minimum wait before hedging
               maxDelay: 2s        # Maximum wait before hedging
               maxCount: 1         # Max parallel hedged requests
-              
+
               # Alternative: Fixed-delay hedging
               # delay: 500ms
               # maxCount: 1
@@ -358,7 +448,7 @@ export default createConfig({
           minDelay: "100ms",     // Minimum wait before hedging
           maxDelay: "2s",        // Maximum wait before hedging
           maxCount: 1            // Max parallel hedged requests
-          
+
           // Alternative: Fixed-delay hedging
           // delay: "500ms",
           // maxCount: 1
@@ -455,7 +545,7 @@ projects:
               maxCount: 2        # Up to 2 parallel hedges
             timeout:
               duration: 10s
-    
+
     upstreams:
       - id: primary-node
         failsafe:
@@ -466,7 +556,7 @@ projects:
               duration: 1s
             retry:
               maxAttempts: 1     # No time for retries
-          
+
           # Block data can be slower but must succeed
           - matchMethod: "eth_getBlock*"
             timeout:
@@ -535,7 +625,7 @@ failsafe:
     retry:
       maxAttempts: 5
       backoffFactor: 2
-  
+
   # Unfinalized data: aggressive timeouts
   - matchMethod: "*"
     matchFinality: ["unfinalized"]
@@ -544,7 +634,7 @@ failsafe:
     retry:
       maxAttempts: 2
       delay: 100ms
-  
+
   # Realtime data: fast with hedging
   - matchMethod: "*"
     matchFinality: ["realtime"]
@@ -553,7 +643,7 @@ failsafe:
     hedge:
       delay: 500ms
       maxCount: 1
-  
+
   # Unknown finality: moderate settings
   - matchMethod: "*"
     matchFinality: ["unknown"]
@@ -625,7 +715,7 @@ projects:
             retry:
               maxAttempts: 3
               backoffFactor: 2
-          
+
           # Trace methods are expensive but critical
           - matchMethod: "trace_*|arbtrace_*"
             timeout:

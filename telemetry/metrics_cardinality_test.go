@@ -25,6 +25,15 @@ func metricFamilyByName(t *testing.T, familyName string) *dto.MetricFamily {
 	return nil
 }
 
+func resetHistogramTestRegistry(t *testing.T) {
+	t.Helper()
+	reg := prometheus.NewRegistry()
+	prometheus.DefaultRegisterer = reg
+	prometheus.DefaultGatherer = reg
+	SetHistogramLabelFilter(nil, nil)
+	require.NoError(t, SetHistogramBuckets(""))
+}
+
 func metricLabelsByName(t *testing.T, familyName string) map[string]string {
 	t.Helper()
 
@@ -48,7 +57,7 @@ func metricHistogramBucketCountByName(t *testing.T, familyName string) int {
 }
 
 func TestUpstreamRequestDurationOmitsUserLabel(t *testing.T) {
-	require.NoError(t, SetHistogramBuckets(""))
+	resetHistogramTestRegistry(t)
 	MetricUpstreamRequestDuration.Reset()
 
 	MetricUpstreamRequestDuration.WithLabelValues(
@@ -68,7 +77,7 @@ func TestUpstreamRequestDurationOmitsUserLabel(t *testing.T) {
 }
 
 func TestNetworkRequestDurationUsesOutcomeInsteadOfHighCardinalityLabels(t *testing.T) {
-	require.NoError(t, SetHistogramBuckets(""))
+	resetHistogramTestRegistry(t)
 	MetricNetworkRequestDuration.Reset()
 
 	MetricNetworkRequestDuration.WithLabelValues(
@@ -87,7 +96,7 @@ func TestNetworkRequestDurationUsesOutcomeInsteadOfHighCardinalityLabels(t *test
 }
 
 func TestCacheDurationHistogramsOmitUserLabel(t *testing.T) {
-	require.NoError(t, SetHistogramBuckets(""))
+	resetHistogramTestRegistry(t)
 
 	MetricCacheSetSuccessDuration.Reset()
 	MetricCacheSetErrorDuration.Reset()
@@ -160,6 +169,7 @@ func TestCacheDurationHistogramsOmitUserLabel(t *testing.T) {
 }
 
 func TestNetworkEvmGetLogsRangeRequestedOmitsUserLabel(t *testing.T) {
+	resetHistogramTestRegistry(t)
 	MetricNetworkEvmGetLogsRangeRequested.Reset()
 
 	MetricNetworkEvmGetLogsRangeRequested.WithLabelValues(
@@ -176,15 +186,21 @@ func TestNetworkEvmGetLogsRangeRequestedOmitsUserLabel(t *testing.T) {
 }
 
 func TestHotRequestCountersKeepUserButDropAgentName(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	prometheus.DefaultRegisterer = reg
+	prometheus.DefaultGatherer = reg
+
 	testCases := []struct {
 		name       string
 		familyName string
+		collector  prometheus.Collector
 		reset      func()
 		observe    func()
 	}{
 		{
 			name:       "upstream request total",
 			familyName: "erpc_upstream_request_total",
+			collector:  MetricUpstreamRequestTotal,
 			reset:      MetricUpstreamRequestTotal.Reset,
 			observe: func() {
 				MetricUpstreamRequestTotal.WithLabelValues(
@@ -203,6 +219,7 @@ func TestHotRequestCountersKeepUserButDropAgentName(t *testing.T) {
 		{
 			name:       "upstream error total",
 			familyName: "erpc_upstream_request_errors_total",
+			collector:  MetricUpstreamErrorTotal,
 			reset:      MetricUpstreamErrorTotal.Reset,
 			observe: func() {
 				MetricUpstreamErrorTotal.WithLabelValues(
@@ -222,6 +239,7 @@ func TestHotRequestCountersKeepUserButDropAgentName(t *testing.T) {
 		{
 			name:       "network success total",
 			familyName: "erpc_network_successful_request_total",
+			collector:  MetricNetworkSuccessfulRequests,
 			reset:      MetricNetworkSuccessfulRequests.Reset,
 			observe: func() {
 				MetricNetworkSuccessfulRequests.WithLabelValues(
@@ -240,6 +258,7 @@ func TestHotRequestCountersKeepUserButDropAgentName(t *testing.T) {
 		{
 			name:       "network failed total",
 			familyName: "erpc_network_failed_request_total",
+			collector:  MetricNetworkFailedRequests,
 			reset:      MetricNetworkFailedRequests.Reset,
 			observe: func() {
 				MetricNetworkFailedRequests.WithLabelValues(
@@ -257,6 +276,7 @@ func TestHotRequestCountersKeepUserButDropAgentName(t *testing.T) {
 		{
 			name:       "rate limits total",
 			familyName: "erpc_rate_limits_total",
+			collector:  MetricRateLimitsTotal,
 			reset:      MetricRateLimitsTotal.Reset,
 			observe: func() {
 				MetricRateLimitsTotal.WithLabelValues(
@@ -275,6 +295,9 @@ func TestHotRequestCountersKeepUserButDropAgentName(t *testing.T) {
 			},
 		},
 	}
+	for _, tc := range testCases {
+		reg.MustRegister(tc.collector)
+	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -289,6 +312,7 @@ func TestHotRequestCountersKeepUserButDropAgentName(t *testing.T) {
 }
 
 func TestNetworkHedgeDelayHistogramUsesTrimmedBucketBudget(t *testing.T) {
+	resetHistogramTestRegistry(t)
 	MetricNetworkHedgeDelaySeconds.Reset()
 
 	MetricNetworkHedgeDelaySeconds.WithLabelValues(

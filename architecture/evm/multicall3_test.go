@@ -154,7 +154,7 @@ func TestBuildMulticall3Request_Success(t *testing.T) {
 
 	req1 := newEthCallRequest(t, 1, call1, "latest")
 	req2 := newEthCallRequest(t, "req-2", call2, "latest")
-	req1.SetDirectives(&common.RequestDirectives{SkipCacheRead: true})
+	req1.SetDirectives(&common.RequestDirectives{SkipCacheRead: "true"})
 	req1.SetUser(&common.User{Id: "user-1"})
 
 	mcReq, calls, err := BuildMulticall3Request([]*common.NormalizedRequest{req1, req2}, nil)
@@ -169,7 +169,7 @@ func TestBuildMulticall3Request_Success(t *testing.T) {
 	require.NotNil(t, mcReq.User())
 	assert.Equal(t, "user-1", mcReq.User().Id)
 	require.NotNil(t, mcReq.Directives())
-	assert.True(t, mcReq.Directives().SkipCacheRead)
+	assert.Equal(t, "true", mcReq.Directives().SkipCacheRead)
 
 	jrq, err := mcReq.JsonRpcRequest()
 	require.NoError(t, err)

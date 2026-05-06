@@ -345,7 +345,7 @@ func (s *HttpServer) handleEthCallBatchAggregation(
 		rlg.Trace().Interface("directives", nq.Directives()).Msgf("applied request directives")
 
 		// Acquire project rate limit early (for billing/analytics purposes)
-		if err := project.acquireRateLimitPermit(requestCtx, nq); err != nil {
+		if err := project.AcquireRateLimitPermit(requestCtx, nq); err != nil {
 			responses[i] = processErrorBody(&rlg, startedAt, nq, err, s.serverCfg.IncludeErrorDetails)
 			common.EndRequestSpan(requestCtx, nil, err)
 			continue

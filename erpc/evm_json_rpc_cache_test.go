@@ -2736,14 +2736,14 @@ func TestEvmJsonRpcCache_Compression(t *testing.T) {
 		require.NoError(t, err)
 		require.NotNil(t, cachedResp)
 
-			jrr, err := cachedResp.JsonRpcResponse()
-			require.NoError(t, err)
-			// Cached responses may use a streaming resultWriter; don't rely on GetResultString().
-			var buf bytes.Buffer
-			_, err = jrr.WriteResultTo(&buf, false)
-			require.NoError(t, err)
-			assert.Contains(t, buf.String(), largeData)
-		})
+		jrr, err := cachedResp.JsonRpcResponse()
+		require.NoError(t, err)
+		// Cached responses may use a streaming resultWriter; don't rely on GetResultString().
+		var buf bytes.Buffer
+		_, err = jrr.WriteResultTo(&buf, false)
+		require.NoError(t, err)
+		assert.Contains(t, buf.String(), largeData)
+	})
 
 	t.Run("CompressionThreshold_BelowThreshold", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
@@ -2807,13 +2807,14 @@ func TestEvmJsonRpcCache_Compression(t *testing.T) {
 
 		// Create random data that doesn't compress well
 		randomData := generateRandomString(100)
+		resultJSON := `"` + randomData + `"`
 		req := common.NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","method":"eth_getBlockByNumber","params":["0x5",false],"id":1}`))
 		req.SetNetwork(mockNetwork)
 		req.SetCacheDal(cache)
 
 		resp := common.NewNormalizedResponse().
 			WithRequest(req).
-			WithBody(stringToReaderCloser(`{"result":"` + randomData + `"}`))
+			WithBody(stringToReaderCloser(`{"result":` + resultJSON + `}`))
 		resp.SetUpstream(mockUpstreams[0])
 		req.SetLastValidResponse(ctx, resp)
 
@@ -2835,12 +2836,12 @@ func TestEvmJsonRpcCache_Compression(t *testing.T) {
 		err = cache.Set(ctx, req, resp)
 		require.NoError(t, err)
 
-		// If compression doesn't save space, it shouldn't be used
-		// This depends on the random data, but we can check the logic works
+		// The production code only uses compression when it actually saves space
+		// (compressed < original). Compare against the actual JSON result size
+		// (which includes quotes), not the raw random string length.
 		isCompressed := len(storedValue) >= 4 && storedValue[0] == 0x28 && storedValue[1] == 0xB5 && storedValue[2] == 0x2F && storedValue[3] == 0xFD
 		if isCompressed {
-			// If compressed, it should be smaller than original
-			assert.Less(t, len(storedValue), len(randomData))
+			assert.Less(t, len(storedValue), len(resultJSON))
 		}
 	})
 

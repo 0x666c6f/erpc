@@ -196,22 +196,27 @@ func MustNewJsonRpcResponseFromBytes(id []byte, resultRaw []byte, errBytes []byt
 	return jr
 }
 
+// parseID populates the typed r.id from r.idBytes WITHOUT modifying
+// r.idBytes. The wire output uses idBytes verbatim, so leaving it untouched
+// preserves byte-level fidelity for ids outside the int53 safe range and
+// for non-canonical numeric formats (e.g. "1.0"). Acquires r.idMu.
 func (r *JsonRpcResponse) parseID() error {
 	r.idMu.Lock()
 	defer r.idMu.Unlock()
+	return r.parseIDLocked()
+}
 
+// parseIDLocked is the lock-free variant for callers that already hold
+// r.idMu (e.g. SetIDBytes).
+func (r *JsonRpcResponse) parseIDLocked() error {
 	var rawID interface{}
-	err := SonicCfg.Unmarshal(r.idBytes, &rawID)
-	if err != nil {
+	if err := SonicCfg.Unmarshal(r.idBytes, &rawID); err != nil {
 		return err
 	}
-
 	switch v := rawID.(type) {
 	case float64:
 		r.id = int64(v)
-		// Update idBytes with the parsed int64 value
-		r.idBytes, err = SonicCfg.Marshal(r.id)
-		return err
+		return nil
 	case string:
 		r.id = v
 		return nil
@@ -260,12 +265,18 @@ func (r *JsonRpcResponse) ID() interface{} {
 	return r.id
 }
 
+// SetIDBytes stores the response id from raw JSON bytes verbatim. The wire
+// output (WriteTo) uses idBytes directly, so this preserves byte-for-byte
+// fidelity for large integers (>2^53), fractional ids, and any exotic
+// numeric format the upstream/client used. The parsed r.id is populated as
+// a best-effort typed view for callers that read it; precision loss there
+// is acceptable because the wire output never round-trips through r.id.
 func (r *JsonRpcResponse) SetIDBytes(idBytes []byte) error {
 	r.idMu.Lock()
 	defer r.idMu.Unlock()
 
 	r.idBytes = idBytes
-	return r.parseID()
+	return r.parseIDLocked()
 }
 
 func (r *JsonRpcResponse) ParseFromStream(ctx []context.Context, reader io.Reader, expectedSize int) error {
@@ -1325,6 +1336,8 @@ type JsonRpcRequest struct {
 	Method  string        `json:"method"`
 	Params  []interface{} `json:"params"`
 
+	// idRaw stores the verbatim request id bytes for response round-trip fidelity.
+	idRaw      []byte
 	cacheHash  atomic.Value
 	modified   atomic.Bool
 	normalized atomic.Bool
@@ -1375,6 +1388,10 @@ func (r *JsonRpcRequest) Clone() *JsonRpcRequest {
 	if r.normalized.Load() {
 		cloned.normalized.Store(true)
 	}
+	if len(r.idRaw) > 0 {
+		cloned.idRaw = make([]byte, len(r.idRaw))
+		copy(cloned.idRaw, r.idRaw)
+	}
 
 	return cloned
 }
@@ -1411,8 +1428,21 @@ func (r *JsonRpcRequest) SetID(id interface{}) error {
 	defer r.Unlock()
 
 	r.ID = id
+	r.idRaw = nil
 	r.modified.Store(true)
 	return nil
+}
+
+// IDRawBytes returns the verbatim id bytes as received from the client.
+func (r *JsonRpcRequest) IDRawBytes() []byte {
+	r.RLock()
+	defer r.RUnlock()
+	if len(r.idRaw) == 0 {
+		return nil
+	}
+	out := make([]byte, len(r.idRaw))
+	copy(out, r.idRaw)
+	return out
 }
 
 func (r *JsonRpcRequest) SetParams(params []interface{}) error {
@@ -1484,6 +1514,13 @@ func (r *JsonRpcRequest) UnmarshalJSON(data []byte) error {
 		var id interface{}
 		if err := SonicCfg.Unmarshal(*wireReq.ID, &id); err != nil {
 			return err
+		}
+		// Preserve verbatim id bytes for non-null ids so the response can
+		// echo them back without precision loss. Skip the literal `null`
+		// case so the existing random-id fallback below still applies.
+		if id != nil {
+			r.idRaw = make([]byte, len(*wireReq.ID))
+			copy(r.idRaw, *wireReq.ID)
 		}
 		switch v := id.(type) {
 		case float64:

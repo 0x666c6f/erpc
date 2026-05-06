@@ -21,7 +21,22 @@ jobs:
       id-token: write
 
     steps:
+      - name: Detect workflow self-change
+        id: workflow-change
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          if gh api "repos/${REPOSITORY}/pulls/${PR_NUMBER}/files" --paginate --jq '.[] | .filename' | grep -qx '.github/workflows/claude-code-review.yml'; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "Skipping Claude review because this PR updates the Claude review workflow."
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Check Claude token
+        if: steps.workflow-change.outputs.changed != 'true'
         id: token
         env:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -34,15 +49,15 @@ jobs:
           fi
 
       - name: Checkout repository
-        if: steps.token.outputs.configured == 'true'
-        uses: actions/checkout@v4
+        if: steps.workflow-change.outputs.changed != 'true' && steps.token.outputs.configured == 'true'
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 1
 
       - name: Run Claude Code Review
-        if: steps.token.outputs.configured == 'true'
+        if: steps.workflow-change.outputs.changed != 'true' && steps.token.outputs.configured == 'true'
         id: claude-review
-        uses: anthropics/claude-code-action@v1
+        uses: anthropics/claude-code-action@2cc1ac1331eac7a6a96d716dd204dd2888d0fcd2 # v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           claude_args: "--model claude-opus-4-6"

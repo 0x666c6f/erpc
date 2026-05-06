@@ -5,7 +5,7 @@
 Repo: erpc
 
 Top-level
-- .cursorrules
+- .cursor
 - .dockerignore
 - .github
 - .gitignore
@@ -15,6 +15,7 @@ Top-level
 - .vscode
 - AGENTS.md
 - CLA.md
+- CLAUDE.md
 - CODE_OF_CONDUCT.md
 - CONTRIBUTING.md
 - Dockerfile

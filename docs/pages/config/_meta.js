@@ -2,6 +2,9 @@ module.exports = {
 	"example": {
 		title: "erpc.yaml/ts",
 	},
+	presets: {
+		title: "Examples",
+	},
 	"projects": {
 		title: "Projects",
 	},

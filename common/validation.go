@@ -489,6 +489,31 @@ func (c *ConnectorConfig) Validate() error {
 		}
 	}
 
+	for i, fsCfg := range c.FailsafeForGets {
+		if err := validateConnectorFailsafe(c.Id, "failsafeForGets", i, fsCfg); err != nil {
+			return err
+		}
+	}
+	for i, fsCfg := range c.FailsafeForSets {
+		if err := validateConnectorFailsafe(c.Id, "failsafeForSets", i, fsCfg); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func validateConnectorFailsafe(connectorId, field string, index int, fsCfg *FailsafeConfig) error {
+	if fsCfg == nil {
+		return nil
+	}
+	prefix := fmt.Sprintf("connector '%s'.%s[%d]", connectorId, field, index)
+	if fsCfg.Consensus != nil {
+		return fmt.Errorf("%s: consensus is not supported for connector-level failsafe", prefix)
+	}
+	if fsCfg.Hedge != nil && fsCfg.Hedge.Quantile > 0 {
+		return fmt.Errorf("%s: hedge quantile is not supported for connector-level failsafe (no latency metric source)", prefix)
+	}
 	return nil
 }
 
@@ -739,6 +764,13 @@ func (s *AuthStrategyConfig) Validate() error {
 		if err := s.Database.Validate(); err != nil {
 			return err
 		}
+	case AuthTypeX402:
+		if s.X402 == nil {
+			return fmt.Errorf("auth.*.x402 is required for x402 strategy")
+		}
+		if err := s.X402.Validate(); err != nil {
+			return err
+		}
 	default:
 		return fmt.Errorf("auth.*.type '%s' is invalid must be one of: %v", s.Type, []AuthType{
 			AuthTypeNetwork,
@@ -746,6 +778,7 @@ func (s *AuthStrategyConfig) Validate() error {
 			AuthTypeJwt,
 			AuthTypeSiwe,
 			AuthTypeDatabase,
+			AuthTypeX402,
 		})
 	}
 	return nil
@@ -1054,8 +1087,18 @@ func (f *FailsafeConfig) Validate() error {
 }
 
 func (t *TimeoutPolicyConfig) Validate() error {
-	if t.Duration == 0 {
+	if t.Quantile > 0 {
+		if t.Quantile > 1 {
+			return fmt.Errorf("upstream.*.failsafe.timeout.quantile must be between 0 and 1")
+		}
+		if t.Duration == 0 && t.MaxDuration == 0 {
+			return fmt.Errorf("upstream.*.failsafe.timeout.duration or maxDuration is required when quantile is set")
+		}
+	} else if t.Duration == 0 {
 		return fmt.Errorf("upstream.*.failsafe.timeout.duration is required")
+	}
+	if t.MinDuration > 0 && t.MaxDuration > 0 && t.MinDuration > t.MaxDuration {
+		return fmt.Errorf("upstream.*.failsafe.timeout.minDuration must be less than or equal to maxDuration")
 	}
 	return nil
 }
@@ -1349,6 +1392,35 @@ func (n *NetworkConfig) Validate(c *Config) error {
 		if !util.IsValidIdentifier(n.Alias) {
 			return fmt.Errorf("network.*.alias '%s' must contain only alphanumeric characters, dash, or underscore", n.Alias)
 		}
+	}
+	for i, sr := range n.StaticResponses {
+		if err := sr.Validate(); err != nil {
+			return fmt.Errorf("network.*.staticResponses[%d]: %w", i, err)
+		}
+	}
+	return nil
+}
+
+func (s *StaticResponseConfig) Validate() error {
+	if s == nil {
+		return fmt.Errorf("entry is nil")
+	}
+	if s.Method == "" {
+		return fmt.Errorf("method is required")
+	}
+	if s.Response == nil {
+		return fmt.Errorf("response is required")
+	}
+	hasResult := s.Response.Result != nil
+	hasError := s.Response.Error != nil
+	if hasResult && hasError {
+		return fmt.Errorf("response must set exactly one of result or error, got both")
+	}
+	if !hasResult && !hasError {
+		return fmt.Errorf("response must set exactly one of result or error, got neither")
+	}
+	if hasError && s.Response.Error.Message == "" {
+		return fmt.Errorf("response.error.message is required")
 	}
 	return nil
 }

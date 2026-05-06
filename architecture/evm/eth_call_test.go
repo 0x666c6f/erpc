@@ -397,7 +397,7 @@ func TestHandleUserMulticall3_CopiesDirectives(t *testing.T) {
 	req := common.NewNormalizedRequestFromJsonRpcRequest(jrq)
 	maxAge := int64(7)
 	req.SetDirectives(&common.RequestDirectives{
-		SkipCacheRead:      true,
+		SkipCacheRead:      "true",
 		CacheMaxAgeSeconds: &maxAge,
 		UseUpstream:        "primary-*",
 	})
@@ -426,7 +426,7 @@ func TestHandleUserMulticall3_CopiesDirectives(t *testing.T) {
 		forwardFn: func(ctx context.Context, req *common.NormalizedRequest) (*common.NormalizedResponse, error) {
 			dirs := req.Directives()
 			require.NotNil(t, dirs)
-			require.True(t, dirs.SkipCacheRead)
+			require.Equal(t, "true", dirs.SkipCacheRead)
 			require.NotNil(t, dirs.CacheMaxAgeSeconds)
 			require.Equal(t, maxAge, *dirs.CacheMaxAgeSeconds)
 			require.Equal(t, "primary-*", dirs.UseUpstream)

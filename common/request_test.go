@@ -428,8 +428,8 @@ func TestHeaderOverridesConfigDefault_ValidateTransactionsRoot(t *testing.T) {
 		if dir == nil || dir.ValidateTransactionsRoot {
 			t.Fatalf("expected ValidateTransactionsRoot=false after header+query override, but got true")
 		}
-		if !dir.SkipCacheRead {
-			t.Fatalf("expected SkipCacheRead=true from header")
+		if dir.SkipCacheRead != "true" {
+			t.Fatalf("expected SkipCacheRead='true' from header, got '%s'", dir.SkipCacheRead)
 		}
 	})
 }
@@ -567,6 +567,21 @@ func TestNormalizedRequestForwardBody_MarshalsWhenNoRawBody(t *testing.T) {
 	expected := `{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}`
 	if string(forwardBody) != expected {
 		t.Fatalf("unexpected marshaled body, expected %s got %s", expected, string(forwardBody))
+	}
+}
+
+func TestNormalizedRequestConstructorsInitializeForwardHeaders(t *testing.T) {
+	req := NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber"}`))
+	req.ForwardHeaders.Add("x-test", "from-raw")
+	if got := req.ForwardHeaders.Get("x-test"); got != "from-raw" {
+		t.Fatalf("expected raw-body request to accept forwarded headers, got %q", got)
+	}
+
+	jrq := NewJsonRpcRequest("eth_blockNumber", []interface{}{})
+	fromJSONRPC := NewNormalizedRequestFromJsonRpcRequest(jrq)
+	fromJSONRPC.ForwardHeaders.Add("x-test", "from-jsonrpc")
+	if got := fromJSONRPC.ForwardHeaders.Get("x-test"); got != "from-jsonrpc" {
+		t.Fatalf("expected json-rpc request to accept forwarded headers, got %q", got)
 	}
 }
 

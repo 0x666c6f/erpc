@@ -3,10 +3,14 @@ package telemetry
 import (
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 )
 
 func TestNetworkUpstreamCallsPerRequestUsesTrimmedBucketBudget(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	prometheus.DefaultGatherer = reg
+	reg.MustRegister(MetricNetworkUpstreamCallsPerRequest)
 	MetricNetworkUpstreamCallsPerRequest.Reset()
 
 	MetricNetworkUpstreamCallsPerRequest.WithLabelValues(
@@ -21,6 +25,9 @@ func TestNetworkUpstreamCallsPerRequestUsesTrimmedBucketBudget(t *testing.T) {
 }
 
 func TestNetworkEvmBlockRangeRequestedOmitsVendorAndUpstreamLabels(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	prometheus.DefaultGatherer = reg
+	reg.MustRegister(MetricNetworkEvmBlockRangeRequested)
 	MetricNetworkEvmBlockRangeRequested.Reset()
 
 	MetricNetworkEvmBlockRangeRequested.WithLabelValues(

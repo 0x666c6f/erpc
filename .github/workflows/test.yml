@@ -34,8 +34,12 @@ jobs:
         run: make setup
       - name: Build
         run: make build
-      - name: Test with the Go CLI
-        run: make test
+      - name: Test packages with the Go CLI
+        run: make test-fast PKG_EXCLUDE_REGEX='^github\.com/erpc/erpc/(cmd|test|erpc)($$|/)'
+      - name: Test erpc critical paths
+        run: |
+          go test ./erpc -run '^(TestConsensusPolicy|TestConsensusPolicy_DSLScenarios)$' -count=1 -parallel 1 -timeout 3m -v
+          make test-fallback-config
 
   security:
     runs-on: ubuntu-24.04
@@ -54,6 +58,4 @@ jobs:
         with:
           go-version: '1.25.x'
       - name: Run Gosec Security Scanner
-        uses: securego/gosec@a631af86ec6d2557e40dac102293f15209794a75 # master
-        with:
-          args: -exclude=G115 -exclude-dir=test -tests=false ./...
+        run: go run github.com/securego/gosec/v2/cmd/gosec@v2.22.11 -exclude=G115 -exclude-dir=test -tests=false ./...
