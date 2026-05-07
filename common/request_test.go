@@ -375,6 +375,32 @@ func TestEnrichFromHttp_CacheMaxAgeDirective(t *testing.T) {
 // TestHeaderOverridesConfigDefault_ValidateTransactionsRoot verifies that when the
 // config defaults set ValidateTransactionsRoot=true, a header/query-string can
 // override it to false.
+func TestEnrichFromHttp_CheckAllUpstreamsDirective(t *testing.T) {
+	t.Run("header_sets_directive", func(t *testing.T) {
+		req := NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","id":1,"method":"eth_call"}`))
+		headers := http.Header{}
+		headers.Set("X-ERPC-Check-All-Upstreams", "true")
+
+		req.EnrichFromHttp(headers, nil, UserAgentTrackingModeSimplified)
+
+		if dir := req.Directives(); dir == nil || !dir.CheckAllUpstreams {
+			t.Fatalf("expected CheckAllUpstreams=true after header directive")
+		}
+	})
+
+	t.Run("query_sets_directive", func(t *testing.T) {
+		req := NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","id":1,"method":"eth_call"}`))
+		query := url.Values{}
+		query.Set("check-all-upstreams", "true")
+
+		req.EnrichFromHttp(nil, query, UserAgentTrackingModeSimplified)
+
+		if dir := req.Directives(); dir == nil || !dir.CheckAllUpstreams {
+			t.Fatalf("expected CheckAllUpstreams=true after query directive")
+		}
+	})
+}
+
 func TestHeaderOverridesConfigDefault_ValidateTransactionsRoot(t *testing.T) {
 	trueVal := true
 	cfgDefaults := &DirectiveDefaultsConfig{

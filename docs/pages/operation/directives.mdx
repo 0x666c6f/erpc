@@ -246,6 +246,33 @@ curl --location 'http://localhost:4000/main/evm/42161?use-upstream=up123'
 # ...
 ```
 
+## Check every selected upstream
+
+For compatibility investigations you can ask eRPC to run the same request against every selected upstream and return a diagnostic result instead of the first usable upstream response.
+
+Use either:
+
+* Header `X-ERPC-Check-All-Upstreams: true`
+* Or query parameter `?check-all-upstreams=true`
+
+This mode bypasses request multiplexing and cache reads for that request. The response reports each selected upstream's ID, vendor, success status, latency, result size when available, and error details. EVM execution exceptions (for example an `eth_call` revert with data) are marked with `executionException: true` and count as a successful upstream execution, because the provider accepted and executed the call even though the EVM reverted.
+
+This is useful for checking whether calldata size, returndata/revertdata size, or gas requirements work across all upstreams that could be selected at runtime.
+
+```bash
+curl --location 'http://localhost:4000/main/evm/42161?check-all-upstreams=true' \
+--header 'Content-Type: application/json' \
+--data '{
+    "method": "eth_call",
+    "params": [
+        {"data": "0x..."},
+        "latest"
+    ],
+    "id": 1,
+    "jsonrpc": "2.0"
+}'
+```
+
 ## Validation directives
 
 For high-integrity use-cases (such as indexing) where data accuracy is critical, eRPC provides validation directives that check response structure and consistency. When validation fails, the response is rejected and retry/consensus policies automatically try other upstreams.

@@ -44,6 +44,7 @@ const (
 	headerDirectiveSkipCacheRead              = "X-ERPC-Skip-Cache-Read"
 	headerDirectiveCacheMaxAge                = "X-ERPC-Cache-Max-Age"
 	headerDirectiveUseUpstream                = "X-ERPC-Use-Upstream"
+	headerDirectiveCheckAllUpstreams          = "X-ERPC-Check-All-Upstreams"
 	headerDirectiveSkipInterpolation          = "X-ERPC-Skip-Interpolation"
 	headerDirectiveEnforceHighestBlock        = "X-ERPC-Enforce-Highest-Block"
 	headerDirectiveEnforceGetLogsRange        = "X-ERPC-Enforce-GetLogs-Range"
@@ -70,6 +71,7 @@ const (
 	queryDirectiveSkipCacheRead              = "skip-cache-read"
 	queryDirectiveCacheMaxAge                = "cache-max-age"
 	queryDirectiveUseUpstream                = "use-upstream"
+	queryDirectiveCheckAllUpstreams          = "check-all-upstreams"
 	queryDirectiveSkipInterpolation          = "skip-interpolation"
 	queryDirectiveEnforceHighestBlock        = "enforce-highest-block"
 	queryDirectiveEnforceGetLogsRange        = "enforce-getlogs-range"
@@ -96,6 +98,7 @@ var directiveKeyRegistry = []directiveKeyNames{
 	{header: headerDirectiveSkipCacheRead, query: queryDirectiveSkipCacheRead},
 	{header: headerDirectiveCacheMaxAge, query: queryDirectiveCacheMaxAge},
 	{header: headerDirectiveUseUpstream, query: queryDirectiveUseUpstream},
+	{header: headerDirectiveCheckAllUpstreams, query: queryDirectiveCheckAllUpstreams},
 	{header: headerDirectiveSkipInterpolation, query: queryDirectiveSkipInterpolation},
 	{header: headerDirectiveEnforceHighestBlock, query: queryDirectiveEnforceHighestBlock},
 	{header: headerDirectiveEnforceGetLogsRange, query: queryDirectiveEnforceGetLogsRange},
@@ -150,6 +153,12 @@ type RequestDirectives struct {
 	// Value can use "*" star char as a wildcard to target multiple upstreams.
 	// For example "alchemy" or "my-own-*", etc.
 	UseUpstream string `json:"useUpstream,omitempty"`
+
+	// CheckAllUpstreams instructs the network to execute this request against
+	// every selected upstream and return a diagnostic result instead of the
+	// first usable upstream response. It is intended for probing provider-specific
+	// limits such as calldata, returndata, and gas limits.
+	CheckAllUpstreams bool `json:"checkAllUpstreams,omitempty"`
 
 	// Instruct the proxy to bypass method exclusion checks.
 	ByPassMethodExclusion bool `json:"-"`
@@ -247,6 +256,7 @@ func (d *RequestDirectives) Clone() *RequestDirectives {
 		SkipCacheRead:                   d.SkipCacheRead,
 		CacheMaxAgeSeconds:              nil,
 		UseUpstream:                     d.UseUpstream,
+		CheckAllUpstreams:               d.CheckAllUpstreams,
 		ByPassMethodExclusion:           d.ByPassMethodExclusion,
 		SkipInterpolation:               d.SkipInterpolation,
 		EnforceHighestBlock:             d.EnforceHighestBlock,
@@ -733,6 +743,9 @@ func (r *NormalizedRequest) EnrichFromHttp(headers http.Header, queryArgs url.Va
 	if hv := headers.Get(headerDirectiveUseUpstream); hv != "" {
 		r.directives.UseUpstream = hv
 	}
+	if hv := headers.Get(headerDirectiveCheckAllUpstreams); hv != "" {
+		r.directives.CheckAllUpstreams = strings.ToLower(strings.TrimSpace(hv)) == "true"
+	}
 	if hv := headers.Get(headerDirectiveSkipInterpolation); hv != "" {
 		r.directives.SkipInterpolation = strings.ToLower(strings.TrimSpace(hv)) == "true"
 	}
@@ -800,6 +813,9 @@ func (r *NormalizedRequest) EnrichFromHttp(headers http.Header, queryArgs url.Va
 	// Query parameters come after headers so they can still override when explicitly present in URL.
 	if useUpstream := queryArgs.Get(queryDirectiveUseUpstream); useUpstream != "" {
 		r.directives.UseUpstream = strings.TrimSpace(useUpstream)
+	}
+	if checkAllUpstreams := queryArgs.Get(queryDirectiveCheckAllUpstreams); checkAllUpstreams != "" {
+		r.directives.CheckAllUpstreams = strings.ToLower(strings.TrimSpace(checkAllUpstreams)) == "true"
 	}
 
 	if retryEmpty := queryArgs.Get(queryDirectiveRetryEmpty); retryEmpty != "" {
@@ -922,6 +938,13 @@ func (r *NormalizedRequest) CacheMaxAgeExplicit() bool {
 		return false
 	}
 	return r.directives.CacheMaxAgeExplicit
+}
+
+func (r *NormalizedRequest) ShouldCheckAllUpstreams() bool {
+	if r == nil || r.directives == nil {
+		return false
+	}
+	return r.directives.CheckAllUpstreams
 }
 
 func (r *NormalizedRequest) Directives() *RequestDirectives {

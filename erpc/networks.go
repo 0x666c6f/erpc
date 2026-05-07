@@ -93,6 +93,27 @@ func classifyAttemptReason(consensusEnabled bool, retries, hedges int) string {
 	}
 }
 
+type allUpstreamsCheckResult struct {
+	AllSucceeded bool                              `json:"allSucceeded"`
+	Total        int                               `json:"total"`
+	Succeeded    int                               `json:"succeeded"`
+	Failed       int                               `json:"failed"`
+	Upstreams    []allUpstreamsCheckUpstreamResult `json:"upstreams"`
+}
+
+type allUpstreamsCheckUpstreamResult struct {
+	ID                 string `json:"id"`
+	Vendor             string `json:"vendor"`
+	Succeeded          bool   `json:"succeeded"`
+	ExecutionException bool   `json:"executionException,omitempty"`
+	DurationMs         int64  `json:"durationMs"`
+	ResultSize         int    `json:"resultSize,omitempty"`
+	Error              string `json:"error,omitempty"`
+	ErrorCode          string `json:"errorCode,omitempty"`
+	ErrorSummary       string `json:"errorSummary,omitempty"`
+	ErrorFingerprint   string `json:"errorFingerprint,omitempty"`
+}
+
 type getSortedUpstreamsForNetworkFn func(
 	ctx context.Context,
 	registry *upstream.UpstreamsRegistry,
@@ -195,6 +216,97 @@ func shouldSkipNetworkRateLimit(ctx context.Context) bool {
 		}
 	}
 	return false
+}
+
+func cloneRequestForAllUpstreamsCheck(ctx context.Context, source *common.NormalizedRequest) (*common.NormalizedRequest, error) {
+	body, err := source.ForwardBody(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	cloned := common.NewNormalizedRequest(append([]byte(nil), body...))
+	if directives := source.Directives(); directives != nil {
+		cloned.SetDirectives(directives.Clone())
+	}
+	if source.ForwardHeaders != nil {
+		cloned.ForwardHeaders = source.ForwardHeaders.Clone()
+	}
+	cloned.CopyHttpContextFrom(source)
+	cloned.SetSkipMultiplex(true)
+
+	return cloned, nil
+}
+
+func (n *Network) forwardAllUpstreamsCheck(
+	ctx context.Context,
+	req *common.NormalizedRequest,
+	upsList []common.Upstream,
+	method string,
+) (*common.NormalizedResponse, error) {
+	result := allUpstreamsCheckResult{
+		AllSucceeded: true,
+		Total:        len(upsList),
+		Upstreams:    make([]allUpstreamsCheckUpstreamResult, 0, len(upsList)),
+	}
+
+	for _, ups := range upsList {
+		started := time.Now()
+		entry := allUpstreamsCheckUpstreamResult{
+			ID:     ups.Id(),
+			Vendor: ups.VendorName(),
+		}
+
+		probeReq, err := cloneRequestForAllUpstreamsCheck(ctx, req)
+		if err == nil {
+			probeReq.SetNetwork(n)
+			probeReq.SetCacheDal(n.cacheDal)
+
+			if skipErr, _ := n.checkUpstreamBlockAvailability(ctx, ups, probeReq, method); skipErr != nil {
+				err = skipErr
+			} else {
+				var probeResp *common.NormalizedResponse
+				probeResp, err = n.doForward(ctx, ups, probeReq, true)
+				if probeResp != nil {
+					if jrr, jrrErr := probeResp.JsonRpcResponse(ctx); jrrErr == nil && jrr != nil {
+						entry.ResultSize = len(jrr.GetResultBytes())
+						if jrr.Error != nil && err == nil {
+							err = jrr.Error
+						}
+					}
+					probeResp.Release()
+				}
+			}
+		}
+
+		entry.DurationMs = time.Since(started).Milliseconds()
+		entry.ExecutionException = common.HasErrorCode(err, common.ErrCodeEndpointExecutionException)
+		entry.Succeeded = err == nil || entry.ExecutionException
+		if err != nil {
+			entry.Error = err.Error()
+			entry.ErrorSummary = common.ErrorSummary(err)
+			entry.ErrorFingerprint = common.ErrorFingerprint(err)
+			if se, ok := err.(common.StandardError); ok && se.Base() != nil {
+				entry.ErrorCode = string(se.Base().Code)
+			}
+		}
+
+		if entry.Succeeded {
+			result.Succeeded++
+		} else {
+			result.Failed++
+			result.AllSucceeded = false
+		}
+		result.Upstreams = append(result.Upstreams, entry)
+	}
+
+	jrr, err := common.NewJsonRpcResponse(req.ID(), result, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	resp := common.NewNormalizedResponse().WithRequest(req).WithJsonRpcResponse(jrr)
+	resp.SetAttempts(len(upsList))
+	return resp, nil
 }
 
 func (n *Network) Bootstrap(ctx context.Context) error {
@@ -422,6 +534,8 @@ func (n *Network) Forward(ctx context.Context, req *common.NormalizedRequest) (*
 
 	method, _ := req.Method()
 	lg := n.logger.With().Str("method", method).Interface("id", req.ID()).Str("ptr", fmt.Sprintf("%p", req)).Logger()
+	var resp *common.NormalizedResponse
+	var err error
 	var upstreamCalls atomic.Int64
 	defer func() {
 		telemetry.ObserveNetworkUpstreamCallsPerRequest(
@@ -465,27 +579,32 @@ func (n *Network) Forward(ctx context.Context, req *common.NormalizedRequest) (*
 		}
 	}
 
-	mlx, resp, err := n.handleMultiplexing(ctx, &lg, req, startTime)
-	if err != nil || resp != nil {
-		// When the original request is already fulfilled by multiplexer (follower path)
-		forwardSpan.SetAttributes(
-			attribute.Bool("multiplexed", true),
-			attribute.String("multiplexer.role", "follower"),
-		)
-		if err != nil {
-			common.SetTraceSpanError(forwardSpan, err)
+	var mlx *Multiplexer
+	checkAllUpstreams := req.ShouldCheckAllUpstreams()
+	forwardSpan.SetAttributes(attribute.Bool("check_all_upstreams", checkAllUpstreams))
+	if !checkAllUpstreams {
+		mlx, resp, err = n.handleMultiplexing(ctx, &lg, req, startTime)
+		if err != nil || resp != nil {
+			// When the original request is already fulfilled by multiplexer (follower path)
+			forwardSpan.SetAttributes(
+				attribute.Bool("multiplexed", true),
+				attribute.String("multiplexer.role", "follower"),
+			)
+			if err != nil {
+				common.SetTraceSpanError(forwardSpan, err)
+			}
+			return resp, err
 		}
-		return resp, err
-	}
-	if mlx != nil {
-		forwardSpan.SetAttributes(
-			attribute.String("multiplexer.hash", mlx.hash),
-			attribute.String("multiplexer.role", "leader"),
-		)
-		defer n.cleanupMultiplexer(mlx)
+		if mlx != nil {
+			forwardSpan.SetAttributes(
+				attribute.String("multiplexer.hash", mlx.hash),
+				attribute.String("multiplexer.role", "leader"),
+			)
+			defer n.cleanupMultiplexer(mlx)
+		}
 	}
 
-	if n.cacheDal != nil && !req.ShouldSkipCacheRead("") {
+	if n.cacheDal != nil && !req.ShouldSkipCacheRead("") && !checkAllUpstreams {
 		lg.Debug().Msgf("checking cache for request")
 		resp, err := n.cacheDal.Get(ctx, req)
 		if err != nil {
@@ -675,6 +794,14 @@ func (n *Network) Forward(ctx context.Context, req *common.NormalizedRequest) (*
 			mlx.Close(ctx, nil, err)
 		}
 		return nil, err
+	}
+
+	if checkAllUpstreams {
+		resp, err := n.forwardAllUpstreamsCheck(ctx, req, upsList, method)
+		if err != nil {
+			common.SetTraceSpanError(forwardSpan, err)
+		}
+		return resp, err
 	}
 
 	// 5) Iterate over upstreams and forward the request until success or fatal failure
