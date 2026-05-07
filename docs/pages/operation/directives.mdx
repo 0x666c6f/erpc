@@ -255,7 +255,9 @@ Use either:
 * Header `X-ERPC-Check-All-Upstreams: true`
 * Or query parameter `?check-all-upstreams=true`
 
-This mode bypasses request multiplexing and cache reads for that request. The response reports each selected upstream's ID, vendor, success status, latency, result size when available, and error details. EVM execution exceptions (for example an `eth_call` revert with data) are marked with `executionException: true` and count as a successful upstream execution, because the provider accepted and executed the call even though the EVM reverted.
+This mode bypasses request multiplexing and cache reads/writes for that request, and disables `eth_call` multicall3 batching, so each upstream is probed with the original payload. The response reports each selected upstream's ID, vendor, success status, latency, result size when available, and error details. EVM execution exceptions (for example an `eth_call` revert with data) are marked with `executionException: true` and count as a successful upstream execution, because the provider accepted and executed the call even though the EVM reverted.
+
+`allSucceeded` reflects only whether each provider accepted and executed the request — it does **not** compare result payloads across upstreams. A revert with execution data on every upstream still yields `allSucceeded: true`. The summary also exposes a separate `executionExceptions` counter so operators can distinguish plain successes from upstreams that reverted.
 
 This is useful for checking whether calldata size, returndata/revertdata size, or gas requirements work across all upstreams that could be selected at runtime.
 

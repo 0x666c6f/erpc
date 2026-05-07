@@ -158,6 +158,10 @@ type RequestDirectives struct {
 	// every selected upstream and return a diagnostic result instead of the
 	// first usable upstream response. It is intended for probing provider-specific
 	// limits such as calldata, returndata, and gas limits.
+	//
+	// Setting this also bypasses request multiplexing and cache reads/writes
+	// for the originating request, and disables eth_call multicall3 batching,
+	// so each upstream is probed with the original payload.
 	CheckAllUpstreams bool `json:"checkAllUpstreams,omitempty"`
 
 	// Instruct the proxy to bypass method exclusion checks.

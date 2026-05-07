@@ -1,6 +1,7 @@
 package erpc
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -94,11 +95,12 @@ func classifyAttemptReason(consensusEnabled bool, retries, hedges int) string {
 }
 
 type allUpstreamsCheckResult struct {
-	AllSucceeded bool                              `json:"allSucceeded"`
-	Total        int                               `json:"total"`
-	Succeeded    int                               `json:"succeeded"`
-	Failed       int                               `json:"failed"`
-	Upstreams    []allUpstreamsCheckUpstreamResult `json:"upstreams"`
+	AllSucceeded        bool                              `json:"allSucceeded"`
+	Total               int                               `json:"total"`
+	Succeeded           int                               `json:"succeeded"`
+	ExecutionExceptions int                               `json:"executionExceptions"`
+	Failed              int                               `json:"failed"`
+	Upstreams           []allUpstreamsCheckUpstreamResult `json:"upstreams"`
 }
 
 type allUpstreamsCheckUpstreamResult struct {
@@ -106,6 +108,7 @@ type allUpstreamsCheckUpstreamResult struct {
 	Vendor             string `json:"vendor"`
 	Succeeded          bool   `json:"succeeded"`
 	ExecutionException bool   `json:"executionException,omitempty"`
+	RetryableSkip      bool   `json:"retryableSkip,omitempty"`
 	DurationMs         int64  `json:"durationMs"`
 	ResultSize         int    `json:"resultSize,omitempty"`
 	Error              string `json:"error,omitempty"`
@@ -224,9 +227,14 @@ func cloneRequestForAllUpstreamsCheck(ctx context.Context, source *common.Normal
 		return nil, err
 	}
 
-	cloned := common.NewNormalizedRequest(append([]byte(nil), body...))
+	cloned := common.NewNormalizedRequest(bytes.Clone(body))
 	if directives := source.Directives(); directives != nil {
-		cloned.SetDirectives(directives.Clone())
+		clonedDirs := directives.Clone()
+		// Force per-probe to bypass cache reads so the diagnostic truly
+		// contacts each upstream instead of returning a cache hit from
+		// EVM hook paths (e.g. handleUserMulticall3 honors SkipCacheRead).
+		clonedDirs.SkipCacheRead = "true"
+		cloned.SetDirectives(clonedDirs)
 	}
 	if source.ForwardHeaders != nil {
 		cloned.ForwardHeaders = source.ForwardHeaders.Clone()
@@ -250,63 +258,116 @@ func (n *Network) forwardAllUpstreamsCheck(
 	}
 
 	for _, ups := range upsList {
-		started := time.Now()
-		entry := allUpstreamsCheckUpstreamResult{
-			ID:     ups.Id(),
-			Vendor: ups.VendorName(),
-		}
+		entry := n.probeUpstreamForAllUpstreamsCheck(ctx, req, ups, method)
 
-		probeReq, err := cloneRequestForAllUpstreamsCheck(ctx, req)
-		if err == nil {
-			probeReq.SetNetwork(n)
-			probeReq.SetCacheDal(n.cacheDal)
-
-			if skipErr, _ := n.checkUpstreamBlockAvailability(ctx, ups, probeReq, method); skipErr != nil {
-				err = skipErr
-			} else {
-				var probeResp *common.NormalizedResponse
-				probeResp, err = n.doForward(ctx, ups, probeReq, true)
-				if probeResp != nil {
-					if jrr, jrrErr := probeResp.JsonRpcResponse(ctx); jrrErr == nil && jrr != nil {
-						entry.ResultSize = len(jrr.GetResultBytes())
-						if jrr.Error != nil && err == nil {
-							err = jrr.Error
-						}
-					}
-					probeResp.Release()
-				}
-			}
-		}
-
-		entry.DurationMs = time.Since(started).Milliseconds()
-		entry.ExecutionException = common.HasErrorCode(err, common.ErrCodeEndpointExecutionException)
-		entry.Succeeded = err == nil || entry.ExecutionException
-		if err != nil {
-			entry.Error = err.Error()
-			entry.ErrorSummary = common.ErrorSummary(err)
-			entry.ErrorFingerprint = common.ErrorFingerprint(err)
-			if se, ok := err.(common.StandardError); ok && se.Base() != nil {
-				entry.ErrorCode = string(se.Base().Code)
-			}
-		}
-
-		if entry.Succeeded {
+		switch {
+		case entry.ExecutionException:
+			result.ExecutionExceptions++
 			result.Succeeded++
-		} else {
+		case entry.Succeeded:
+			result.Succeeded++
+		default:
 			result.Failed++
 			result.AllSucceeded = false
 		}
 		result.Upstreams = append(result.Upstreams, entry)
 	}
 
+	if result.Total == 0 {
+		// AllSucceeded over an empty fleet is misleading; signal explicitly.
+		result.AllSucceeded = false
+	}
+
 	jrr, err := common.NewJsonRpcResponse(req.ID(), result, nil)
 	if err != nil {
+		n.logger.Error().Err(err).Msg("failed to marshal check-all-upstreams diagnostic result")
 		return nil, err
 	}
 
 	resp := common.NewNormalizedResponse().WithRequest(req).WithJsonRpcResponse(jrr)
 	resp.SetAttempts(len(upsList))
 	return resp, nil
+}
+
+// probeUpstreamForAllUpstreamsCheck runs a single upstream probe for the
+// CheckAllUpstreams diagnostic mode and returns the populated entry.
+func (n *Network) probeUpstreamForAllUpstreamsCheck(
+	ctx context.Context,
+	req *common.NormalizedRequest,
+	ups common.Upstream,
+	method string,
+) allUpstreamsCheckUpstreamResult {
+	started := time.Now()
+	entry := allUpstreamsCheckUpstreamResult{
+		ID:     ups.Id(),
+		Vendor: ups.VendorName(),
+	}
+
+	probeReq, err := cloneRequestForAllUpstreamsCheck(ctx, req)
+	if err == nil {
+		probeReq.SetNetwork(n)
+		probeReq.SetCacheDal(n.cacheDal)
+
+		if skipErr, isRetryable := n.checkUpstreamBlockAvailability(ctx, ups, probeReq, method); skipErr != nil {
+			err = skipErr
+			entry.RetryableSkip = isRetryable
+		} else {
+			var probeResp *common.NormalizedResponse
+			probeResp, err = n.doForward(ctx, ups, probeReq, true)
+			if probeResp != nil {
+				jrr, jrrErr := probeResp.JsonRpcResponse(ctx)
+				switch {
+				case jrrErr != nil:
+					// Don't silently swallow parse/decompression failures —
+					// surface them as the upstream's failure if no other error
+					// already won.
+					if err == nil {
+						err = jrrErr
+					}
+					n.logger.Warn().
+						Err(jrrErr).
+						Str("upstreamId", ups.Id()).
+						Msg("check-all-upstreams: failed to parse upstream JSON-RPC response")
+				case jrr != nil:
+					entry.ResultSize = len(jrr.GetResultBytes())
+					if jrr.Error != nil && err == nil {
+						// jrr.Error is a *ErrJsonRpcExceptionExternal whose top-level
+						// type code is not ErrCodeEndpointExecutionException. Wrap
+						// revert/call exceptions into ErrEndpointExecutionException so
+						// downstream HasErrorCode(...) detects them as execution
+						// exceptions — matching how the rest of the proxy classifies
+						// these errors and what the directive's docs promise.
+						switch common.JsonRpcErrorNumber(jrr.Error.Code) {
+						case common.JsonRpcErrorEvmReverted,
+							common.JsonRpcErrorCallException,
+							common.JsonRpcErrorTransactionRejected:
+							err = common.NewErrEndpointExecutionException(jrr.Error)
+						default:
+							err = jrr.Error
+						}
+					}
+				}
+				probeResp.Release()
+			}
+		}
+	}
+
+	entry.DurationMs = time.Since(started).Milliseconds()
+	entry.ExecutionException = common.HasErrorCode(err, common.ErrCodeEndpointExecutionException)
+	entry.Succeeded = err == nil || entry.ExecutionException
+	if err != nil {
+		entry.Error = err.Error()
+		entry.ErrorSummary = common.ErrorSummary(err)
+		entry.ErrorFingerprint = common.ErrorFingerprint(err)
+		var se common.StandardError
+		if errors.As(err, &se) {
+			if base := se.Base(); base != nil {
+				entry.ErrorCode = string(base.Code)
+			}
+		}
+	}
+
+	return entry
 }
 
 func (n *Network) Bootstrap(ctx context.Context) error {

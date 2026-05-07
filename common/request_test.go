@@ -372,9 +372,6 @@ func TestEnrichFromHttp_CacheMaxAgeDirective(t *testing.T) {
 	})
 }
 
-// TestHeaderOverridesConfigDefault_ValidateTransactionsRoot verifies that when the
-// config defaults set ValidateTransactionsRoot=true, a header/query-string can
-// override it to false.
 func TestEnrichFromHttp_CheckAllUpstreamsDirective(t *testing.T) {
 	t.Run("header_sets_directive", func(t *testing.T) {
 		req := NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","id":1,"method":"eth_call"}`))
@@ -399,8 +396,52 @@ func TestEnrichFromHttp_CheckAllUpstreamsDirective(t *testing.T) {
 			t.Fatalf("expected CheckAllUpstreams=true after query directive")
 		}
 	})
+
+	t.Run("parsing_edge_cases", func(t *testing.T) {
+		cases := []struct {
+			value   string
+			enabled bool
+		}{
+			{"true", true},
+			{"TRUE", true},
+			{" true ", true},
+			{"false", false},
+			{"FALSE", false},
+			{"1", false},  // only literal "true" (case-insensitive) enables
+			{"yes", false},
+			{"", false},   // empty value should leave directive unchanged
+		}
+		for _, tc := range cases {
+			t.Run("header="+tc.value, func(t *testing.T) {
+				req := NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","id":1,"method":"eth_call"}`))
+				headers := http.Header{}
+				if tc.value != "" {
+					headers.Set("X-ERPC-Check-All-Upstreams", tc.value)
+				}
+				req.EnrichFromHttp(headers, nil, UserAgentTrackingModeSimplified)
+				if got := req.Directives() != nil && req.Directives().CheckAllUpstreams; got != tc.enabled {
+					t.Fatalf("value=%q: expected CheckAllUpstreams=%v, got %v", tc.value, tc.enabled, got)
+				}
+			})
+		}
+	})
 }
 
+func TestShouldCheckAllUpstreams_NilSafety(t *testing.T) {
+	var nilReq *NormalizedRequest
+	if nilReq.ShouldCheckAllUpstreams() {
+		t.Fatalf("expected false from nil receiver")
+	}
+
+	req := NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","id":1,"method":"eth_call"}`))
+	if req.ShouldCheckAllUpstreams() {
+		t.Fatalf("expected false from request with no directives set")
+	}
+}
+
+// TestHeaderOverridesConfigDefault_ValidateTransactionsRoot verifies that when the
+// config defaults set ValidateTransactionsRoot=true, a header/query-string can
+// override it to false.
 func TestHeaderOverridesConfigDefault_ValidateTransactionsRoot(t *testing.T) {
 	trueVal := true
 	cfgDefaults := &DirectiveDefaultsConfig{
