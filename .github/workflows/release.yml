@@ -128,21 +128,43 @@ jobs:
 
       # Create PR with all changes
       - name: Create Pull Request
-        uses: peter-evans/create-pull-request@22a9089034f40e5a961c8808d113e2c98fb63676 # v7.0.11
-        with:
-          commit-message: "chore: release ${{ steps.validate-version.outputs.version_tag }}"
-          title: "chore: release ${{ steps.validate-version.outputs.version_tag }}"
-          body: |
-            🚀 Release preparation for version ${{ steps.validate-version.outputs.version_tag }}
-            
-            This PR includes:
-            - Version bumps in package.json files
-            - Generated TypeScript types
-            - Generated release files
-            - Generated checksums
-          branch: "release/${{ steps.validate-version.outputs.version_tag }}"
-          base: morpho-main
-          labels: release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION_TAG: ${{ steps.validate-version.outputs.version_tag }}
+        run: |
+          set -euo pipefail
+          BRANCH="release/${VERSION_TAG}"
+          TITLE="chore: release ${VERSION_TAG}"
+          BODY_FILE="$(mktemp)"
+
+          git config user.name github-actions
+          git config user.email github-actions@github.com
+          git checkout -B "$BRANCH"
+
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "No release changes to commit"
+            exit 0
+          fi
+
+          git add .
+          git commit -m "$TITLE"
+          git push --force-with-lease origin "$BRANCH"
+
+          cat > "$BODY_FILE" <<EOF
+          🚀 Release preparation for version ${VERSION_TAG}
+
+          This PR includes:
+          - Version bumps in package.json files
+          - Generated TypeScript types
+          - Generated release files
+          - Generated checksums
+          EOF
+
+          if gh pr view "$BRANCH" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh pr edit "$BRANCH" --repo "$GITHUB_REPOSITORY" --title "$TITLE" --body-file "$BODY_FILE" --add-label release
+          else
+            gh pr create --repo "$GITHUB_REPOSITORY" --base morpho-main --head "$BRANCH" --title "$TITLE" --body-file "$BODY_FILE" --label release
+          fi
 
   # Run on release PR merge
   release:
@@ -280,8 +302,7 @@ jobs:
       attestations: write
       id-token: write
     runs-on: "${{ github.repository_owner == 'erpc' && 'blacksmith-8vcpu-ubuntu-2404' || 'ubuntu-24.04' }}"
-    needs: [prepare-release, release]
-    if: always() && github.ref == 'refs/heads/morpho-main'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/morpho-main'
     timeout-minutes: 35
     outputs:
       digest_main: ${{ steps.build_main.outputs.digest }}
@@ -319,12 +340,7 @@ jobs:
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@376925c9d111252e87ae59691e5a442dd100ef6a # v2
 
-      - name: Setup Blacksmith Builder
-        if: github.repository_owner == 'erpc'
-        uses: useblacksmith/setup-docker-builder@ef12d5b165b596e3aa44ea8198d8fde563eab402 # v1.4.0
-
       - name: Set up Docker Buildx
-        if: github.repository_owner != 'erpc'
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       - name: Compute repo and short SHA
@@ -474,8 +490,7 @@ jobs:
       attestations: write
       id-token: write
     runs-on: "${{ github.repository_owner == 'erpc' && 'blacksmith-8vcpu-ubuntu-2404-arm' || 'ubuntu-24.04-arm' }}"
-    needs: [prepare-release, release]
-    if: always() && github.ref == 'refs/heads/morpho-main'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/morpho-main'
     timeout-minutes: 35
     outputs:
       digest_main: ${{ steps.build_main.outputs.digest }}
@@ -513,12 +528,7 @@ jobs:
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@376925c9d111252e87ae59691e5a442dd100ef6a # v2
 
-      - name: Setup Blacksmith Builder
-        if: github.repository_owner == 'erpc'
-        uses: useblacksmith/setup-docker-builder@ef12d5b165b596e3aa44ea8198d8fde563eab402 # v1.4.0
-
       - name: Set up Docker Buildx
-        if: github.repository_owner != 'erpc'
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       - name: Compute repo and short SHA
@@ -669,7 +679,7 @@ jobs:
       id-token: write
     runs-on: "${{ github.repository_owner == 'erpc' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-24.04' }}"
     needs: [docker-build-amd64, docker-build-arm64]
-    if: always() && github.ref == 'refs/heads/morpho-main'
+    if: always() && github.event_name == 'push' && github.ref == 'refs/heads/morpho-main'
     steps:
       - name: Harden the runner (Audit all outbound calls)
         uses: step-security/harden-runner@5ef0c079ce82195b2a36a210272d6b661572d83e # v2.14.2
@@ -851,7 +861,7 @@ jobs:
       packages: write
     runs-on: "${{ github.repository_owner == 'erpc' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-24.04' }}"
     needs: [docker-manifest]
-    if: always() && github.ref == 'refs/heads/morpho-main'
+    if: always() && github.event_name == 'push' && github.ref == 'refs/heads/morpho-main'
     steps:
       - name: Harden the runner (Audit all outbound calls)
         uses: step-security/harden-runner@5ef0c079ce82195b2a36a210272d6b661572d83e # v2.14.2
