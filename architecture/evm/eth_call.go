@@ -89,6 +89,13 @@ func projectPreForward_eth_call(ctx context.Context, network common.Network, nq 
 		return false, nil, nil
 	}
 
+	// Diagnostic mode: skip eth_call-specific pre-forward (multicall3 batching,
+	// param normalization, cache pre-check) so the request reaches Network.Forward
+	// unwrapped and each upstream is probed with the original payload.
+	if nq.ShouldCheckAllUpstreams() {
+		return false, nil, nil
+	}
+
 	// Normalize params: ensure block param is present
 	jrq.RLock()
 	paramsLen := len(jrq.Params)
