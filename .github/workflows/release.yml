@@ -4,6 +4,12 @@ concurrency:
   group: ${{ github.workflow }}
   cancel-in-progress: true
 
+env:
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  AWS_ROLE_ARN: ${{ vars.AWS_ROLE_ARN }}
+  ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+  ECR_VALIDATOR_REPOSITORY: ${{ vars.ECR_VALIDATOR_REPOSITORY }}
+
 on:
   workflow_dispatch:
     inputs:
@@ -14,7 +20,7 @@ on:
     branches:
       - morpho-main
 
-permissions: read-all
+permissions: {}
 
 jobs:
   # Create Release PR - only on workflow_dispatch
@@ -25,9 +31,9 @@ jobs:
     runs-on: "${{ github.repository_owner == 'erpc' && 'blacksmith-8vcpu-ubuntu-2404' || 'ubuntu-24.04' }}"
     if: github.event_name == 'workflow_dispatch'
     outputs:
-      version: ${{ steps.validate-version.outputs.version }}
+      version: ${{ steps.validate-version.outputs.version_tag }}
     steps:
-      - name: Validate version_tag
+      - name: Validate version tag
         id: validate-version
         shell: bash
         env:
@@ -40,7 +46,7 @@ jobs:
             exit 1
           fi
 
-          printf 'version=%s\n' "$VERSION_TAG" >> "$GITHUB_OUTPUT"
+          printf 'version_tag=%s\n' "$VERSION_TAG" >> "$GITHUB_OUTPUT"
 
       - name: Harden the runner (Audit all outbound calls)
         uses: step-security/harden-runner@5ef0c079ce82195b2a36a210272d6b661572d83e # v2.14.2
@@ -58,7 +64,7 @@ jobs:
 
       - name: Generate types
         run: |
-          go install github.com/gzuidhof/tygo@latest
+          go install github.com/gzuidhof/tygo@v0.2.21
           tygo generate
       
       - name: Setup Syft
@@ -72,7 +78,7 @@ jobs:
           version: "~> v2"
           args: release --snapshot --clean
         env:
-          GORELEASER_CURRENT_TAG: ${{ steps.validate-version.outputs.version }}
+          GORELEASER_CURRENT_TAG: ${{ steps.validate-version.outputs.version_tag }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       # Setup pnpm + node and install dependencies
@@ -99,7 +105,7 @@ jobs:
       # Update version in package.json files
       - name: Update package versions
         env:
-          VERSION_TAG: ${{ steps.validate-version.outputs.version }}
+          VERSION_TAG: ${{ steps.validate-version.outputs.version_tag }}
         run: |
           for pkg in . typescript/cli typescript/config; do
             cd "$pkg"
@@ -111,9 +117,9 @@ jobs:
       - name: Generate CLI release files
         working-directory: typescript/cli
         env:
-          CHECKSUMS_FILE: ../../dist/checksums.txt
+          VERSION_TAG: ${{ steps.validate-version.outputs.version_tag }}
           COMMIT_SHA: ${{ github.sha }}
-          VERSION_TAG: ${{ steps.validate-version.outputs.version }}
+          CHECKSUMS_FILE: ../../dist/checksums.txt
         run: |
           export VERSION="$VERSION_TAG"
           export COMMIT_SHA
@@ -127,21 +133,43 @@ jobs:
 
       # Create PR with all changes
       - name: Create Pull Request
-        uses: peter-evans/create-pull-request@22a9089034f40e5a961c8808d113e2c98fb63676 # v7.0.11
-        with:
-          commit-message: "chore: release ${{ steps.validate-version.outputs.version }}"
-          title: "chore: release ${{ steps.validate-version.outputs.version }}"
-          body: |
-            🚀 Release preparation for version ${{ steps.validate-version.outputs.version }}
-            
-            This PR includes:
-            - Version bumps in package.json files
-            - Generated TypeScript types
-            - Generated release files
-            - Generated checksums
-          branch: "release/${{ steps.validate-version.outputs.version }}"
-          base: morpho-main
-          labels: release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION_TAG: ${{ steps.validate-version.outputs.version_tag }}
+        run: |
+          set -euo pipefail
+          BRANCH="release/${VERSION_TAG}"
+          TITLE="chore: release ${VERSION_TAG}"
+          BODY_FILE="$(mktemp)"
+
+          git config user.name github-actions
+          git config user.email github-actions@github.com
+          git checkout -B "$BRANCH"
+
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "No release changes to commit"
+            exit 0
+          fi
+
+          git add .
+          git commit -m "$TITLE"
+          git push --force-with-lease origin "$BRANCH"
+
+          cat > "$BODY_FILE" <<EOF
+          🚀 Release preparation for version ${VERSION_TAG}
+
+          This PR includes:
+          - Version bumps in package.json files
+          - Generated TypeScript types
+          - Generated release files
+          - Generated checksums
+          EOF
+
+          if gh pr view "$BRANCH" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh pr edit "$BRANCH" --repo "$GITHUB_REPOSITORY" --title "$TITLE" --body-file "$BODY_FILE" --add-label release
+          else
+            gh pr create --repo "$GITHUB_REPOSITORY" --base morpho-main --head "$BRANCH" --title "$TITLE" --body-file "$BODY_FILE" --label release
+          fi
 
   # Run on release PR merge
   release:
@@ -279,14 +307,17 @@ jobs:
       attestations: write
       id-token: write
     runs-on: "${{ github.repository_owner == 'erpc' && 'blacksmith-8vcpu-ubuntu-2404' || 'ubuntu-24.04' }}"
-    needs: [prepare-release, release]
-    if: always() && github.ref == 'refs/heads/morpho-main'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/morpho-main'
     timeout-minutes: 35
     outputs:
       digest_main: ${{ steps.build_main.outputs.digest }}
       digest_release: ${{ steps.build_release.outputs.digest }}
       digest_main_validator: ${{ steps.build_main_validator.outputs.digest }}
       digest_release_validator: ${{ steps.build_release_validator.outputs.digest }}
+      digest_main_ecr: ${{ steps.build_main_ecr.outputs.digest }}
+      digest_release_ecr: ${{ steps.build_release_ecr.outputs.digest }}
+      digest_main_validator_ecr: ${{ steps.build_main_validator_ecr.outputs.digest }}
+      digest_release_validator_ecr: ${{ steps.build_release_validator_ecr.outputs.digest }}
     steps:
       - name: Harden the runner (Audit all outbound calls)
         uses: step-security/harden-runner@5ef0c079ce82195b2a36a210272d6b661572d83e # v2.14.2
@@ -304,12 +335,17 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Setup Blacksmith Builder
-        if: github.repository_owner == 'erpc'
-        uses: useblacksmith/setup-docker-builder@ef12d5b165b596e3aa44ea8198d8fde563eab402 # v1.4.0
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@376925c9d111252e87ae59691e5a442dd100ef6a # v2
 
       - name: Set up Docker Buildx
-        if: github.repository_owner != 'erpc'
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       - name: Compute repo and short SHA
@@ -341,6 +377,19 @@ jobs:
           sbom: false # not supported on docker driver, maybe works with blacksmith?
           outputs: type=registry,name=ghcr.io/${{ steps.meta.outputs.repo }},push-by-digest=true
 
+      - name: Build+push to ECR by digest (branch)
+        id: build_main_ecr
+        if: github.event.inputs.version_tag == ''
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          platforms: linux/amd64
+          build-args: |
+            VERSION=${{ github.ref_name }}
+            COMMIT_SHA=${{ steps.meta.outputs.short_sha }}
+          sbom: false # not supported on docker driver, maybe works with blacksmith?
+          outputs: type=registry,name=${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }},push-by-digest=true
+
       - name: Build+push by digest (release)
         id: build_release
         if: "contains(github.event.head_commit.message, 'chore: release')"
@@ -353,6 +402,19 @@ jobs:
             COMMIT_SHA=${{ steps.meta.outputs.short_sha }}
           sbom: false # not supported on docker driver, maybe works with blacksmith?
           outputs: type=registry,name=ghcr.io/${{ steps.meta.outputs.repo }},push-by-digest=true
+
+      - name: Build+push to ECR by digest (release)
+        id: build_release_ecr
+        if: "contains(github.event.head_commit.message, 'chore: release')"
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          platforms: linux/amd64
+          build-args: |
+            VERSION=${{ steps.version.outputs.VERSION }}
+            COMMIT_SHA=${{ steps.meta.outputs.short_sha }}
+          sbom: false # not supported on docker driver, maybe works with blacksmith?
+          outputs: type=registry,name=${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }},push-by-digest=true
 
       - name: Build+push validator by digest (branch)
         id: build_main_validator
@@ -368,6 +430,20 @@ jobs:
           sbom: false # not supported on docker driver, maybe works with blacksmith?
           outputs: type=registry,name=ghcr.io/${{ steps.meta.outputs.repo }}-validator,push-by-digest=true
 
+      - name: Build+push validator to ECR by digest (branch)
+        id: build_main_validator_ecr
+        if: github.event.inputs.version_tag == ''
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        with:
+          context: .
+          file: Dockerfile.validator
+          platforms: linux/amd64
+          build-args: |
+            VERSION=${{ github.ref_name }}
+            COMMIT_SHA=${{ steps.meta.outputs.short_sha }}
+          sbom: false # not supported on docker driver, maybe works with blacksmith?
+          outputs: type=registry,name=${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_VALIDATOR_REPOSITORY }},push-by-digest=true
+
       - name: Build+push validator by digest (release)
         id: build_release_validator
         if: "contains(github.event.head_commit.message, 'chore: release')"
@@ -381,6 +457,20 @@ jobs:
             COMMIT_SHA=${{ steps.meta.outputs.short_sha }}
           sbom: false # not supported on docker driver, maybe works with blacksmith?
           outputs: type=registry,name=ghcr.io/${{ steps.meta.outputs.repo }}-validator,push-by-digest=true
+
+      - name: Build+push validator to ECR by digest (release)
+        id: build_release_validator_ecr
+        if: "contains(github.event.head_commit.message, 'chore: release')"
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        with:
+          context: .
+          file: Dockerfile.validator
+          platforms: linux/amd64
+          build-args: |
+            VERSION=${{ steps.version.outputs.VERSION }}
+            COMMIT_SHA=${{ steps.meta.outputs.short_sha }}
+          sbom: false # not supported on docker driver, maybe works with blacksmith?
+          outputs: type=registry,name=${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_VALIDATOR_REPOSITORY }},push-by-digest=true
 
       - name: Attest build provenance (Docker Build)
         uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f # v3.2.0
@@ -405,14 +495,17 @@ jobs:
       attestations: write
       id-token: write
     runs-on: "${{ github.repository_owner == 'erpc' && 'blacksmith-8vcpu-ubuntu-2404-arm' || 'ubuntu-24.04-arm' }}"
-    needs: [prepare-release, release]
-    if: always() && github.ref == 'refs/heads/morpho-main'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/morpho-main'
     timeout-minutes: 35
     outputs:
       digest_main: ${{ steps.build_main.outputs.digest }}
       digest_release: ${{ steps.build_release.outputs.digest }}
       digest_main_validator: ${{ steps.build_main_validator.outputs.digest }}
       digest_release_validator: ${{ steps.build_release_validator.outputs.digest }}
+      digest_main_ecr: ${{ steps.build_main_ecr.outputs.digest }}
+      digest_release_ecr: ${{ steps.build_release_ecr.outputs.digest }}
+      digest_main_validator_ecr: ${{ steps.build_main_validator_ecr.outputs.digest }}
+      digest_release_validator_ecr: ${{ steps.build_release_validator_ecr.outputs.digest }}
     steps:
       - name: Harden the runner (Audit all outbound calls)
         uses: step-security/harden-runner@5ef0c079ce82195b2a36a210272d6b661572d83e # v2.14.2
@@ -430,12 +523,17 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Setup Blacksmith Builder
-        if: github.repository_owner == 'erpc'
-        uses: useblacksmith/setup-docker-builder@ef12d5b165b596e3aa44ea8198d8fde563eab402 # v1.4.0
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@376925c9d111252e87ae59691e5a442dd100ef6a # v2
 
       - name: Set up Docker Buildx
-        if: github.repository_owner != 'erpc'
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       - name: Compute repo and short SHA
@@ -467,6 +565,19 @@ jobs:
           sbom: false # not supported on docker driver, maybe works with blacksmith?
           outputs: type=registry,name=ghcr.io/${{ steps.meta.outputs.repo }},push-by-digest=true
 
+      - name: Build+push to ECR by digest (branch)
+        id: build_main_ecr
+        if: github.event.inputs.version_tag == ''
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          platforms: linux/arm64
+          build-args: |
+            VERSION=${{ github.ref_name }}
+            COMMIT_SHA=${{ steps.meta.outputs.short_sha }}
+          sbom: false # not supported on docker driver, maybe works with blacksmith?
+          outputs: type=registry,name=${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }},push-by-digest=true
+
       - name: Build+push by digest (release)
         id: build_release
         if: "contains(github.event.head_commit.message, 'chore: release')"
@@ -479,6 +590,19 @@ jobs:
             COMMIT_SHA=${{ steps.meta.outputs.short_sha }}
           sbom: false # not supported on docker driver, maybe works with blacksmith?
           outputs: type=registry,name=ghcr.io/${{ steps.meta.outputs.repo }},push-by-digest=true
+
+      - name: Build+push to ECR by digest (release)
+        id: build_release_ecr
+        if: "contains(github.event.head_commit.message, 'chore: release')"
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          platforms: linux/arm64
+          build-args: |
+            VERSION=${{ steps.version.outputs.VERSION }}
+            COMMIT_SHA=${{ steps.meta.outputs.short_sha }}
+          sbom: false # not supported on docker driver, maybe works with blacksmith?
+          outputs: type=registry,name=${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }},push-by-digest=true
 
       - name: Build+push validator by digest (branch)
         id: build_main_validator
@@ -494,6 +618,20 @@ jobs:
           sbom: false # not supported on docker driver, maybe works with blacksmith?
           outputs: type=registry,name=ghcr.io/${{ steps.meta.outputs.repo }}-validator,push-by-digest=true
 
+      - name: Build+push validator to ECR by digest (branch)
+        id: build_main_validator_ecr
+        if: github.event.inputs.version_tag == ''
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        with:
+          context: .
+          file: Dockerfile.validator
+          platforms: linux/arm64
+          build-args: |
+            VERSION=${{ github.ref_name }}
+            COMMIT_SHA=${{ steps.meta.outputs.short_sha }}
+          sbom: false # not supported on docker driver, maybe works with blacksmith?
+          outputs: type=registry,name=${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_VALIDATOR_REPOSITORY }},push-by-digest=true
+
       - name: Build+push validator by digest (release)
         id: build_release_validator
         if: "contains(github.event.head_commit.message, 'chore: release')"
@@ -507,6 +645,20 @@ jobs:
             COMMIT_SHA=${{ steps.meta.outputs.short_sha }}
           sbom: false # not supported on docker driver, maybe works with blacksmith?
           outputs: type=registry,name=ghcr.io/${{ steps.meta.outputs.repo }}-validator,push-by-digest=true
+
+      - name: Build+push validator to ECR by digest (release)
+        id: build_release_validator_ecr
+        if: "contains(github.event.head_commit.message, 'chore: release')"
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        with:
+          context: .
+          file: Dockerfile.validator
+          platforms: linux/arm64
+          build-args: |
+            VERSION=${{ steps.version.outputs.VERSION }}
+            COMMIT_SHA=${{ steps.meta.outputs.short_sha }}
+          sbom: false # not supported on docker driver, maybe works with blacksmith?
+          outputs: type=registry,name=${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_VALIDATOR_REPOSITORY }},push-by-digest=true
       
       - name: Attest build provenance (Docker Build)
         uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f # v3.2.0
@@ -532,7 +684,7 @@ jobs:
       id-token: write
     runs-on: "${{ github.repository_owner == 'erpc' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-24.04' }}"
     needs: [docker-build-amd64, docker-build-arm64]
-    if: always() && github.ref == 'refs/heads/morpho-main'
+    if: always() && github.event_name == 'push' && github.ref == 'refs/heads/morpho-main'
     steps:
       - name: Harden the runner (Audit all outbound calls)
         uses: step-security/harden-runner@5ef0c079ce82195b2a36a210272d6b661572d83e # v2.14.2
@@ -545,6 +697,16 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@376925c9d111252e87ae59691e5a442dd100ef6a # v2
 
       - name: Compute repo
         id: meta
@@ -581,6 +743,21 @@ jobs:
           DIGEST_MAIN_VALIDATOR=$(docker inspect --format='{{index .RepoDigests 0}}' ghcr.io/${{ steps.meta.outputs.repo }}-validator:${{ github.ref_name }})
           echo "digest_main=${DIGEST_MAIN#*@}" >> "$GITHUB_OUTPUT"
           echo "digest_main_validator=${DIGEST_MAIN_VALIDATOR#*@}" >> "$GITHUB_OUTPUT"
+
+      - name: Create ECR multi-arch manifest for branch
+        if: github.event.inputs.version_tag == ''
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          docker buildx imagetools create \
+            -t "$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:${{ github.sha }}" \
+            "$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}@${{ needs.docker-build-amd64.outputs.digest_main_ecr }}" \
+            "$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}@${{ needs.docker-build-arm64.outputs.digest_main_ecr }}"
+
+          docker buildx imagetools create \
+            -t "$ECR_REGISTRY/${{ env.ECR_VALIDATOR_REPOSITORY }}:${{ github.sha }}" \
+            "$ECR_REGISTRY/${{ env.ECR_VALIDATOR_REPOSITORY }}@${{ needs.docker-build-amd64.outputs.digest_main_validator_ecr }}" \
+            "$ECR_REGISTRY/${{ env.ECR_VALIDATOR_REPOSITORY }}@${{ needs.docker-build-arm64.outputs.digest_main_validator_ecr }}"
 
       - name: Create multi-arch manifests for release
         id: release
@@ -620,6 +797,21 @@ jobs:
             echo "digest_release_validator=${DIGEST_RELEASE_VALIDATOR#*@}"
             echo "digest_latest_validator=${DIGEST_LATEST_VALIDATOR#*@}"
           } >> "$GITHUB_OUTPUT"
+
+      - name: Create ECR multi-arch manifests for release
+        if: "contains(github.event.head_commit.message, 'chore: release')"
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          docker buildx imagetools create \
+            -t "$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:${{ steps.version.outputs.VERSION }}" \
+            "$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}@${{ needs.docker-build-amd64.outputs.digest_release_ecr }}" \
+            "$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}@${{ needs.docker-build-arm64.outputs.digest_release_ecr }}"
+
+          docker buildx imagetools create \
+            -t "$ECR_REGISTRY/${{ env.ECR_VALIDATOR_REPOSITORY }}:${{ steps.version.outputs.VERSION }}" \
+            "$ECR_REGISTRY/${{ env.ECR_VALIDATOR_REPOSITORY }}@${{ needs.docker-build-amd64.outputs.digest_release_validator_ecr }}" \
+            "$ECR_REGISTRY/${{ env.ECR_VALIDATOR_REPOSITORY }}@${{ needs.docker-build-arm64.outputs.digest_release_validator_ecr }}"
 
       - name: Attest build provenance (Docker Manifest Main)
         uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f # v3.2.0
@@ -676,7 +868,7 @@ jobs:
       packages: write
     runs-on: "${{ github.repository_owner == 'erpc' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-24.04' }}"
     needs: [docker-manifest]
-    if: always() && github.ref == 'refs/heads/morpho-main'
+    if: always() && github.event_name == 'push' && github.ref == 'refs/heads/morpho-main'
     steps:
       - name: Harden the runner (Audit all outbound calls)
         uses: step-security/harden-runner@5ef0c079ce82195b2a36a210272d6b661572d83e # v2.14.2
