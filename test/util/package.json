@@ -1,5 +1,6 @@
 {
     "name": "test-aux",
+    "packageManager": "pnpm@11.0.9",
     "description": "test-aux",
     "scripts": {
         "jwt-generate": "ts-node jwt-generate.ts",

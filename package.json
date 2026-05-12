@@ -11,7 +11,7 @@
         "@erpc-cloud/config": "workspace:*",
         "esbuild": "^0.27.3"
     },
-    "packageManager": "pnpm@10.28.2",
+    "packageManager": "pnpm@11.0.9",
     "engines": {
         "node": ">=18.14"
     },
