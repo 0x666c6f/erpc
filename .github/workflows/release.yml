@@ -58,6 +58,7 @@ jobs:
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version: '1.25.x'
+          cache: false
 
       - name: Generate types
         run: |
@@ -89,7 +90,6 @@ jobs:
         with:
           node-version: '20'
           registry-url: 'https://registry.npmjs.org'
-          cache: 'pnpm'
 
       - name: Install dependencies without postinstall hooks
         run: pnpm install --ignore-scripts
@@ -203,6 +203,7 @@ jobs:
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version: '1.25.x'
+          cache: false
 
       - name: Configure Git
         run: |
@@ -240,7 +241,6 @@ jobs:
         with:
           node-version: '20'
           registry-url: 'https://registry.npmjs.org'
-          cache: 'pnpm'
 
       - name: Install dependencies without postinstall hooks
         run: pnpm install --ignore-scripts
