@@ -30,6 +30,7 @@ jobs:
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version: '1.25.x'
+          cache: false
       - name: Install dependencies
         run: make setup
       - name: Build
@@ -57,5 +58,6 @@ jobs:
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version: '1.25.x'
+          cache: false
       - name: Run Gosec Security Scanner
         run: go run github.com/securego/gosec/v2/cmd/gosec@v2.22.11 -exclude=G115 -exclude-dir=test -tests=false ./...
