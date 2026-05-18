@@ -555,6 +555,9 @@ func (p *PostgreSQLConnectorConfig) Validate() error {
 	if p.Table == "" {
 		return fmt.Errorf("database.*.connector.postgresql.table is required")
 	}
+	if err := ValidatePostgreSQLTableIdentifier(p.Table); err != nil {
+		return fmt.Errorf("database.*.connector.postgresql.table is invalid: %w", err)
+	}
 	if p.MinConns == 0 {
 		return fmt.Errorf("database.*.connector.postgresql.minConns is required")
 	}

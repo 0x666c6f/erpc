@@ -866,11 +866,37 @@ export interface NetworkConfig {
   alias?: string;
   methods?: MethodsConfig;
   multiplexing?: boolean;
+  staticResponses?: (StaticResponseConfig | undefined)[];
+}
+/**
+ * StaticResponseConfig declares a canned JSON-RPC response for a specific
+ * (method, params) pair on a network.
+ */
+export interface StaticResponseConfig {
+  method: string;
+  params?: any[];
+  response?: StaticResponseBodyConfig;
+}
+/**
+ * StaticResponseBodyConfig holds the JSON-RPC payload to serve. Exactly one
+ * of Result or Error must be set.
+ */
+export interface StaticResponseBodyConfig {
+  result?: any;
+  error?: StaticResponseErrorConfig;
+}
+/**
+ * StaticResponseErrorConfig mirrors a JSON-RPC error object.
+ */
+export interface StaticResponseErrorConfig {
+  code: number /* int */;
+  message: string;
+  data?: any;
 }
 export interface DirectiveDefaultsConfig {
   retryEmpty?: boolean;
   retryPending?: boolean;
-  skipCacheRead?: boolean;
+  skipCacheRead?: any;
   cacheMaxAgeSeconds?: number /* int64 */;
   useUpstream?: string;
   skipInterpolation?: boolean;
@@ -1221,6 +1247,55 @@ export interface NetworkStrategyConfig {
    */
   rateLimitBudget?: string;
   ipAsUser?: boolean;
+}
+/**
+ * X402StrategyConfig enables x402 payment authentication (HTTP 402 Payment Required).
+ */
+export interface X402StrategyConfig {
+  /**
+   * FacilitatorURL is the x402 facilitator endpoint for verify/settle operations.
+   */
+  facilitatorUrl: string;
+  /**
+   * SellerAddress is the wallet address that receives payments.
+   */
+  sellerAddress: string;
+  /**
+   * PricePerRequest is the cost per request in atomic units.
+   */
+  pricePerRequest: string;
+  /**
+   * Network is the x402 network name for payment.
+   */
+  network: string;
+  /**
+   * Asset is the token contract address used for payment.
+   */
+  asset?: string;
+  /**
+   * Scheme is the x402 payment scheme.
+   */
+  scheme?: string;
+  /**
+   * Description is a human-readable description included in 402 responses.
+   */
+  description?: string;
+  /**
+   * MaxTimeoutSeconds is the payment authorization validity period.
+   */
+  maxTimeoutSeconds?: number /* int */;
+  /**
+   * RateLimitBudget, if set, is applied to the authenticated payer.
+   */
+  rateLimitBudget?: string;
+  /**
+   * VerifyOnly when true skips settlement.
+   */
+  verifyOnly?: boolean;
+  /**
+   * Extra contains additional fields merged into the payment requirement's extra object.
+   */
+  extra?: { [key: string]: any};
 }
 export type LabelMode = string;
 export const ErrorLabelModeVerbose: LabelMode = "verbose";
