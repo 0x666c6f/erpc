@@ -1006,9 +1006,21 @@ func (c *EvmJsonRpcCache) doGet(ctx context.Context, connector data.Connector, p
 	if err != nil {
 		return nil, 0, err
 	}
+	if isJsonRpcResponseMissingResult(jrr) {
+		span.SetAttributes(attribute.String("cache.connector_result", "missing_result_or_error"))
+		c.logger.Debug().
+			Str("pk", groupKey).
+			Str("rk", requestKey).
+			Msg("cached JSON-RPC payload has neither result nor error; treating as cache miss")
+		return nil, 0, nil
+	}
 	_ = jrr.SetID(rpcReq.ID)
 
 	return jrr, cachedAt, nil
+}
+
+func isJsonRpcResponseMissingResult(resp *common.JsonRpcResponse) bool {
+	return resp != nil && resp.Error == nil && resp.ResultLength() == 0
 }
 
 func shouldCacheResponse(
@@ -1017,9 +1029,19 @@ func shouldCacheResponse(
 	rpcResp *common.JsonRpcResponse,
 	policy *data.CachePolicy,
 ) (bool, error) {
+	if rpcResp == nil {
+		lg.Debug().Msg("skip caching because JSON-RPC response is nil")
+		return false, nil
+	}
+
 	// Never cache responses with errors
-	if rpcResp != nil && rpcResp.Error != nil {
+	if rpcResp.Error != nil {
 		lg.Debug().Msg("skip caching because response contains an error")
+		return false, nil
+	}
+
+	if isJsonRpcResponseMissingResult(rpcResp) {
+		lg.Debug().Msg("skip caching because JSON-RPC response has neither result nor error")
 		return false, nil
 	}
 

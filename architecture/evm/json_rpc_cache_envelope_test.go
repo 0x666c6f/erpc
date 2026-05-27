@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/erpc/erpc/common"
+	"github.com/erpc/erpc/data"
 	"github.com/erpc/erpc/util"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
@@ -47,6 +48,105 @@ func (n *testNetworkCacheEnvelope) EvmHighestFinalizedBlockNumber(ctx context.Co
 	return 0
 }
 func (n *testNetworkCacheEnvelope) EvmLeaderUpstream(ctx context.Context) common.Upstream { return nil }
+
+func newTestEvmJsonRpcCacheWithEmptyAllow(t *testing.T, ctx context.Context, lg *zerolog.Logger) *EvmJsonRpcCache {
+	t.Helper()
+
+	cfg := &common.CacheConfig{
+		Envelope: util.BoolPtr(true),
+		Connectors: []*common.ConnectorConfig{
+			{
+				Id:     "mem",
+				Driver: common.DriverMemory,
+				Memory: &common.MemoryConnectorConfig{
+					MaxItems:     10_000,
+					MaxTotalSize: "64MiB",
+				},
+			},
+		},
+		Policies: []*common.CachePolicyConfig{
+			{
+				Network:   "*",
+				Method:    "*",
+				Finality:  common.DataFinalityStateUnknown,
+				Empty:     common.CacheEmptyBehaviorAllow,
+				Connector: "mem",
+				TTL:       common.Duration(0),
+			},
+		},
+	}
+
+	cache, err := NewEvmJsonRpcCache(ctx, lg, cfg)
+	require.NoError(t, err)
+	return cache.WithProjectId("p1")
+}
+
+func newTestEvmCacheRequest() *common.NormalizedRequest {
+	jrq := common.NewJsonRpcRequest("eth_call", []interface{}{
+		map[string]interface{}{
+			"to":   "0x9896a8605763106e57A51aa0a97Fe8099E806bb3",
+			"data": "0x18160ddd",
+		},
+		"0x1a59129",
+	})
+	req := common.NewNormalizedRequestFromJsonRpcRequest(jrq)
+	req.SetNetwork(&testNetworkCacheEnvelope{cfg: &common.NetworkConfig{Evm: &common.EvmNetworkConfig{ChainId: 999}}})
+	return req
+}
+
+func TestEvmJsonRpcCache_SkipsJsonRpcPayloadMissingResultAndError(t *testing.T) {
+	util.ConfigureTestLogger()
+
+	ctx := context.Background()
+	lg := log.Logger
+	cache := newTestEvmJsonRpcCacheWithEmptyAllow(t, ctx, &lg)
+	req := newTestEvmCacheRequest()
+
+	missingResult, err := common.NewJsonRpcResponseFromBytes(nil, nil, nil)
+	require.NoError(t, err)
+	require.NoError(t, missingResult.SetID(1))
+	resp := common.NewNormalizedResponse().WithRequest(req).WithJsonRpcResponse(missingResult)
+
+	require.NoError(t, cache.Set(ctx, req, resp))
+
+	gotResp, err := cache.Get(ctx, req)
+	require.NoError(t, err)
+	require.Nil(t, gotResp)
+}
+
+func TestEvmJsonRpcCache_TreatsCachedPayloadMissingResultAndErrorAsMiss(t *testing.T) {
+	util.ConfigureTestLogger()
+
+	ctx := context.Background()
+	lg := log.Logger
+	cache := newTestEvmJsonRpcCacheWithEmptyAllow(t, ctx, &lg)
+	req := newTestEvmCacheRequest()
+
+	blockRef, _, err := ExtractBlockReferenceFromRequest(ctx, req)
+	require.NoError(t, err)
+	groupKey, requestKey, err := generateKeysForJsonRpcRequest(req, blockRef, ctx)
+	require.NoError(t, err)
+
+	policies := cache.currentPolicySnapshot().policies
+	require.Len(t, policies, 1)
+	connector := policies[0].GetConnector()
+	payload, wrapped := wrapCacheEnvelope(nil)
+	require.True(t, wrapped)
+	require.NoError(t, connector.Set(ctx, groupKey, requestKey, payload, policies[0].GetTTL()))
+	deadline := time.Now().Add(1 * time.Second)
+	for {
+		_, err = connector.Get(ctx, data.ConnectorMainIndex, groupKey, requestKey, req)
+		if err == nil {
+			break
+		}
+		require.True(t, time.Now().Before(deadline), "malformed fixture cache entry did not become visible: %v", err)
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	gotResp, err := cache.Get(ctx, req)
+	require.NoError(t, err)
+	require.Nil(t, gotResp)
+}
 
 func TestEvmJsonRpcCache_Envelope_RoundTrip(t *testing.T) {
 	util.ConfigureTestLogger()
