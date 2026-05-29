@@ -1,8 +1,8 @@
 # Use the official Node.js image as the base image
-FROM node:20-alpine@sha256:09e2b3d9726018aecf269bd35325f46bf75046a643a66d28360ec71132750ec8
+FROM node:22-alpine@sha256:968df39aedcea65eeb078fb336ed7191baf48f972b4479711397108be0966920
 
 # Install pnpm
-RUN npm install -g pnpm
+RUN npm install -g pnpm@11.0.9
 
 # Set the working directory to /app
 WORKDIR /app
@@ -11,7 +11,7 @@ WORKDIR /app
 COPY package.json pnpm-lock.yaml ./
 
 # Install dependencies using pnpm
-RUN pnpm install 
+RUN pnpm install --ignore-scripts
 
 # Copy the rest of your application code to the working directory
 COPY . .
