@@ -341,14 +341,25 @@ func (b *RateLimiterBudget) evaluateRule(ctx context.Context, projectId string, 
 	var statuses []*pb.RateLimitResponse_DescriptorStatus
 	var timedOut bool
 	var panicErr error
+	var admissionFull bool
 	waitStartedAt := time.Now()
 	if b.maxTimeout > 0 {
-		statuses, timedOut, panicErr = b.doLimitWithTimeout(ctx, cache, rlReq, limits, method, userLabel, networkLabel)
+		statuses, timedOut, admissionFull, panicErr = b.doLimitWithTimeout(ctx, cache, rlReq, limits, method, userLabel, networkLabel)
 	} else {
 		statuses, panicErr = b.doLimitSafely(ctx, cache, rlReq, limits, method, userLabel, networkLabel)
 	}
 	waitDuration := time.Since(waitStartedAt)
 
+	if admissionFull {
+		return b.recordFailOpen(
+			doSpan,
+			waitDuration,
+			evalCtx,
+			"admission_full",
+			"admission_full",
+			nil,
+		)
+	}
 	if timedOut {
 		return b.recordFailOpen(
 			doSpan,
@@ -439,14 +450,16 @@ func (b *RateLimiterBudget) doLimitSafely(
 				fmt.Sprintf("budget:%s", b.Id),
 				common.ErrorFingerprint(rec),
 			).Inc()
-			b.logger.Error().
-				Str("budget", b.Id).
-				Str("method", method).
-				Str("user", userLabel).
-				Str("network", networkLabel).
-				Interface("panic", rec).
-				Str("stack", string(debug.Stack())).
-				Msg("panic recovered during rate limiter DoLimit (failing open)")
+			if b.logger != nil {
+				b.logger.Error().
+					Str("budget", b.Id).
+					Str("method", method).
+					Str("user", userLabel).
+					Str("network", networkLabel).
+					Interface("panic", rec).
+					Str("stack", string(debug.Stack())).
+					Msg("panic recovered during rate limiter DoLimit (failing open)")
+			}
 
 			if b.registry != nil {
 				b.registry.onCacheFailure(cache, panicErr)
@@ -473,19 +486,51 @@ func (r *RateLimitRule) statsKeySuffix() string {
 }
 
 // doLimitWithTimeout executes doLimitSafely with a timeout.
-// Returns (statuses, timedOut, panicErr).
-// On timeout, returns (nil, true, nil).
-// On panic from DoLimit, returns (nil, false, err).
+// Returns (statuses, timedOut, admissionFull, panicErr).
+// On timeout, returns (nil, true, false, nil).
+// On admission saturation, returns (nil, false, true, nil).
+// On panic from DoLimit, returns (nil, false, false, err).
 func (b *RateLimiterBudget) doLimitWithTimeout(
 	ctx context.Context,
 	cache limiter.RateLimitCache,
 	rlReq *pb.RateLimitRequest,
 	limits []*config.RateLimit,
 	method, userLabel, networkLabel string,
-) ([]*pb.RateLimitResponse_DescriptorStatus, bool, error) {
+) ([]*pb.RateLimitResponse_DescriptorStatus, bool, bool, error) {
 	start := time.Now()
+	if b.admission != nil {
+		select {
+		case b.admission <- struct{}{}:
+			if b.inflightGauge != nil {
+				b.inflightGauge.Inc()
+			}
+		default:
+			if b.admissionShedded != nil {
+				b.admissionShedded.Inc()
+			}
+			if b.durationFailopen != nil {
+				b.durationFailopen.Observe(time.Since(start).Seconds())
+			}
+			if b.logger != nil && b.logger.GetLevel() <= zerolog.DebugLevel {
+				b.logger.Debug().
+					Str("budget", b.Id).
+					Str("method", method).
+					Int("admissionCap", cap(b.admission)).
+					Msg("rate limiter remote admission full, failing open")
+			}
+			return nil, false, true, nil
+		}
+	}
 	resultCh := make(chan doLimitResult, 1)
 	go func() {
+		if b.admission != nil {
+			defer func() {
+				<-b.admission
+				if b.inflightGauge != nil {
+					b.inflightGauge.Dec()
+				}
+			}()
+		}
 		statuses, panicErr := b.doLimitSafely(ctx, cache, rlReq, limits, method, userLabel, networkLabel)
 		resultCh <- doLimitResult{statuses: statuses, panicErr: panicErr}
 	}()
@@ -499,7 +544,7 @@ func (b *RateLimiterBudget) doLimitWithTimeout(
 			default:
 			}
 		}
-		return result.statuses, false, result.panicErr
+		return result.statuses, false, false, result.panicErr
 
 	case <-timer.C:
 		if b.durationFailopen != nil {
@@ -507,7 +552,7 @@ func (b *RateLimiterBudget) doLimitWithTimeout(
 		}
 		// Sample the warn log; under sustained pressure this fires hundreds of
 		// times per second and dwarfs the rest of the log volume.
-		if b.logger.GetLevel() <= zerolog.DebugLevel {
+		if b.logger != nil && b.logger.GetLevel() <= zerolog.DebugLevel {
 			b.logger.Debug().
 				Str("budget", b.Id).
 				Str("method", method).
@@ -518,6 +563,6 @@ func (b *RateLimiterBudget) doLimitWithTimeout(
 		// The detached DoLimit goroutine may still finish or panic after this return.
 		// That late panic is still counted via MetricUnexpectedPanicTotal and onCacheFailure,
 		// but this caller has already recorded timeout_fail_open for the permit attempt.
-		return nil, true, nil
+		return nil, true, false, nil
 	}
 }
