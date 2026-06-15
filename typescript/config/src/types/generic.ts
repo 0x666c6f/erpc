@@ -1,6 +1,7 @@
 import type {
     DynamoDBConnectorConfig,
     EvmNetworkConfig,
+    GrpcConnectorConfig,
     AuthStrategyConfig as GenAuthStrategyConfig,
     JwtStrategyConfig,
     MemoryConnectorConfig,
@@ -55,7 +56,8 @@ import type {
     | "memory"
     | "redis"
     | "postgresql"
-    | "dynamodb";
+    | "dynamodb"
+    | "grpc";
   
   /**
    * Connector config depending on the upstream type
@@ -80,6 +82,11 @@ import type {
         id: string;
         driver: "postgresql";
         postgresql: PostgreSQLConnectorConfig;
+      }
+    | {
+        id: string;
+        driver: "grpc";
+        grpc: GrpcConnectorConfig;
       };
   
   /**

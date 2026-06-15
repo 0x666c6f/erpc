@@ -81,6 +81,25 @@ const _stringEvalFunc = createConfig({
   ],
 });
 
+/* ───────────────────────── 2b. gRPC connector config compiles ─────────── */
+
+const _grpcConnectorConfig = createConfig({
+  database: {
+    evmJsonRpcCache: {
+      connectors: [
+        {
+          id: "grpc-cache",
+          driver: "grpc",
+          grpc: {
+            servers: ["cache.internal:9000"],
+            getTimeout: "250ms",
+          },
+        },
+      ],
+    },
+  },
+});
+
 /* ───────────────────────── 3. Custom predicates compose ───────────────── */
 
 const _customPredicateConfig = createConfig({
