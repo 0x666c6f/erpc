@@ -71,7 +71,7 @@ func newTestEvmJsonRpcCacheWithEmptyAllow(t *testing.T, ctx context.Context, lg 
 				Finality:  common.DataFinalityStateUnknown,
 				Empty:     common.CacheEmptyBehaviorAllow,
 				Connector: "mem",
-				TTL:       common.Duration(0),
+				TTL:       common.FixedDuration(0),
 			},
 		},
 	}
@@ -188,7 +188,7 @@ func TestEvmJsonRpcCache_Envelope_RoundTrip(t *testing.T) {
 					Finality:  common.DataFinalityStateUnknown,
 					Empty:     common.CacheEmptyBehaviorAllow,
 					Connector: "mem",
-					TTL:       common.Duration(0),
+					TTL:       common.FixedDuration(0),
 				},
 			},
 		}
@@ -242,7 +242,7 @@ func TestEvmJsonRpcCache_Envelope_RoundTrip(t *testing.T) {
 					Finality:  common.DataFinalityStateUnknown,
 					Empty:     common.CacheEmptyBehaviorAllow,
 					Connector: "mem",
-					TTL:       common.Duration(0),
+					TTL:       common.FixedDuration(0),
 				},
 			},
 		}

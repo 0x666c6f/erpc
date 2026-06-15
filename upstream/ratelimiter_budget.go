@@ -15,6 +15,7 @@ import (
 	"github.com/envoyproxy/ratelimit/src/limiter"
 	"github.com/erpc/erpc/common"
 	"github.com/erpc/erpc/telemetry"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/rs/zerolog"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
@@ -43,6 +44,33 @@ type RateLimiterBudget struct {
 	registry   *RateLimitersRegistry
 	rulesMu    sync.RWMutex
 	maxTimeout time.Duration
+
+	// admission is a buffered semaphore that bounds the number of concurrent
+	// in-flight remote (Redis) DoLimit calls per budget. It exists because the
+	// underlying envoyproxy/ratelimit + radix client does not honor context
+	// cancellation: a goroutine spawned in doLimitWithTimeout that has timed
+	// out will continue to live until Redis finally answers (which can be
+	// seconds when the connection pool is contended).
+	//
+	// Without this cap we observed 25k+ leaked goroutines per machine during
+	// a Redis-rate-limiter contention spike (root-caused 2026-05-07 cronos
+	// receipts incident), which then drove CPU/GC into a death spiral.
+	//
+	// When admission is full, doLimitWithTimeout fail-opens immediately
+	// without spawning a goroutine — increments
+	// MetricRateLimiterRemoteAdmissionSheddedTotal so we can alert on it.
+	//
+	// Nil when no remote cache is in use (e.g. memory cache); only allocated
+	// when maxTimeout > 0.
+	admission chan struct{}
+
+	// inflight gauge, kept here for fast hot-path access without a labels
+	// lookup on every call. Refreshed at registration time.
+	inflightGauge     prometheus.Gauge
+	admissionShedded  prometheus.Counter
+	durationFailopen  prometheus.Observer
+	durationOK        prometheus.Observer
+	durationOverlimit prometheus.Observer
 }
 
 type RateLimitRule struct {
@@ -455,6 +483,7 @@ func (b *RateLimiterBudget) doLimitWithTimeout(
 	limits []*config.RateLimit,
 	method, userLabel, networkLabel string,
 ) ([]*pb.RateLimitResponse_DescriptorStatus, bool, error) {
+	start := time.Now()
 	resultCh := make(chan doLimitResult, 1)
 	go func() {
 		statuses, panicErr := b.doLimitSafely(ctx, cache, rlReq, limits, method, userLabel, networkLabel)
@@ -473,11 +502,18 @@ func (b *RateLimiterBudget) doLimitWithTimeout(
 		return result.statuses, false, result.panicErr
 
 	case <-timer.C:
-		b.logger.Warn().
-			Str("budget", b.Id).
-			Str("method", method).
-			Dur("timeout", b.maxTimeout).
-			Msg("rate limiter timeout exceeded, failing open")
+		if b.durationFailopen != nil {
+			b.durationFailopen.Observe(time.Since(start).Seconds())
+		}
+		// Sample the warn log; under sustained pressure this fires hundreds of
+		// times per second and dwarfs the rest of the log volume.
+		if b.logger.GetLevel() <= zerolog.DebugLevel {
+			b.logger.Debug().
+				Str("budget", b.Id).
+				Str("method", method).
+				Dur("timeout", b.maxTimeout).
+				Msg("rate limiter timeout exceeded, failing open")
+		}
 
 		// The detached DoLimit goroutine may still finish or panic after this return.
 		// That late panic is still counted via MetricUnexpectedPanicTotal and onCacheFailure,

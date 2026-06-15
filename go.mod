@@ -10,6 +10,7 @@ require (
 	github.com/aws/aws-sdk-go v1.55.8
 	github.com/blockchain-data-standards/manifesto v0.0.0
 	github.com/bytedance/sonic v1.15.1
+	github.com/coder/websocket v1.8.14
 	github.com/dgraph-io/ristretto/v2 v2.4.0
 	github.com/dustin/go-humanize v1.0.1
 	github.com/envoyproxy/go-control-plane/envoy v1.37.0
@@ -22,6 +23,7 @@ require (
 	github.com/golang-jwt/jwt/v4 v4.5.2
 	github.com/grafana/sobek v0.0.0-20241024150027-d91f02b05e9b
 	github.com/h2non/gock v1.2.0
+	github.com/jackc/pgconn v1.14.3
 	github.com/jackc/pgx/v4 v4.18.3
 	github.com/joho/godotenv v1.5.1
 	github.com/klauspost/compress v1.18.4
@@ -44,6 +46,7 @@ require (
 	golang.org/x/crypto v0.48.0
 	golang.org/x/net v0.50.0
 	golang.org/x/sync v0.19.0
+	golang.org/x/time v0.14.0
 	google.golang.org/grpc v1.79.1
 	google.golang.org/protobuf v1.36.11
 	gopkg.in/yaml.v3 v3.0.1
@@ -106,7 +109,6 @@ require (
 	github.com/hashicorp/go-multierror v1.1.1 // indirect
 	github.com/holiman/uint256 v1.3.2 // indirect
 	github.com/jackc/chunkreader/v2 v2.0.1 // indirect
-	github.com/jackc/pgconn v1.14.3 // indirect
 	github.com/jackc/pgio v1.0.0 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgproto3/v2 v2.3.3 // indirect

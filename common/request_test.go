@@ -25,12 +25,15 @@ func (m *mockUpstreamForSelection) Config() *UpstreamConfig { return &UpstreamCo
 func (m *mockUpstreamForSelection) Logger() *zerolog.Logger { return nil }
 func (m *mockUpstreamForSelection) Vendor() Vendor          { return nil }
 func (m *mockUpstreamForSelection) Tracker() HealthTracker  { return nil }
-func (m *mockUpstreamForSelection) Forward(ctx context.Context, nq *NormalizedRequest, byPass bool) (*NormalizedResponse, error) {
+func (m *mockUpstreamForSelection) Forward(ctx context.Context, nq *NormalizedRequest, byPass, isHedgeAttempt bool) (*NormalizedResponse, error) {
 	return nil, nil
 }
 func (m *mockUpstreamForSelection) Cordon(method string, reason string)   {}
 func (m *mockUpstreamForSelection) Uncordon(method string, reason string) {}
 func (m *mockUpstreamForSelection) IgnoreMethod(method string)            {}
+func (m *mockUpstreamForSelection) ShouldHandleMethod(method string) (bool, error) {
+	return true, nil
+}
 
 func newMockUpstream(id string) *mockUpstreamForSelection {
 	return &mockUpstreamForSelection{id: id}
@@ -407,9 +410,9 @@ func TestEnrichFromHttp_CheckAllUpstreamsDirective(t *testing.T) {
 			{" true ", true},
 			{"false", false},
 			{"FALSE", false},
-			{"1", false},  // only literal "true" (case-insensitive) enables
+			{"1", false}, // only literal "true" (case-insensitive) enables
 			{"yes", false},
-			{"", false},   // empty value should leave directive unchanged
+			{"", false}, // empty value should leave directive unchanged
 		}
 		for _, tc := range cases {
 			t.Run("header="+tc.value, func(t *testing.T) {

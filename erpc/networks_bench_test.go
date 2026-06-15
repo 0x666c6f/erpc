@@ -69,10 +69,10 @@ func BenchmarkNetworkForward_SimpleSuccess(b *testing.B) {
 	if err != nil {
 		panic(err)
 	}
-		upsReg := upstream.NewUpstreamsRegistry(
-			ctx,
-			&log.Logger,
-			"benchProject",
+	upsReg := upstream.NewUpstreamsRegistry(
+		ctx,
+		&log.Logger,
+		"benchProject",
 		[]*common.UpstreamConfig{upConfig},
 		ssr,
 		rlr,
@@ -80,8 +80,6 @@ func BenchmarkNetworkForward_SimpleSuccess(b *testing.B) {
 		pr,
 		nil,
 		mt,
-		1*time.Second,
-		nil,
 		nil,
 	)
 
@@ -104,6 +102,7 @@ func BenchmarkNetworkForward_SimpleSuccess(b *testing.B) {
 		rlr,
 		upsReg,
 		mt,
+		nil,
 	)
 	if err != nil {
 		b.Fatal(err)
@@ -186,8 +185,6 @@ func BenchmarkNetworkForward_MethodIgnoreCase(b *testing.B) {
 		pr,
 		nil,
 		mt,
-		1*time.Second,
-		nil,
 		nil,
 	)
 
@@ -210,6 +207,7 @@ func BenchmarkNetworkForward_MethodIgnoreCase(b *testing.B) {
 		rlr,
 		upsReg,
 		mt,
+		nil,
 	)
 	if err != nil {
 		b.Fatal(err)
@@ -301,28 +299,28 @@ func BenchmarkNetworkForward_RetryFailures(b *testing.B) {
 		mt,
 		1*time.Second,
 		nil,
-		)
-		upsReg.Bootstrap(ctx)
-		// PrepareUpstreamsForNetwork can transiently return ErrNetworkInitializing while
-		// providers/bootstrap are warming up; retry a few times for stable benchmarks.
-		prepareStart := time.Now()
-		for {
-			err := upsReg.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123))
-			if err == nil {
-				break
-			}
-			if !common.HasErrorCode(err, common.ErrCodeNetworkInitializing) {
-				b.Fatal(err)
-			}
-			if time.Since(prepareStart) > 30*time.Second {
-				b.Fatal(err)
-			}
-			time.Sleep(50 * time.Millisecond)
+	)
+	upsReg.Bootstrap(ctx)
+	// PrepareUpstreamsForNetwork can transiently return ErrNetworkInitializing while
+	// providers/bootstrap are warming up; retry a few times for stable benchmarks.
+	prepareStart := time.Now()
+	for {
+		err := upsReg.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123))
+		if err == nil {
+			break
 		}
+		if !common.HasErrorCode(err, common.ErrCodeNetworkInitializing) {
+			b.Fatal(err)
+		}
+		if time.Since(prepareStart) > 30*time.Second {
+			b.Fatal(err)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 
-		ntw, err := NewNetwork(
-			ctx,
-			&log.Logger,
+	ntw, err := NewNetwork(
+		ctx,
+		&log.Logger,
 		"benchProject",
 		&common.NetworkConfig{
 			Architecture: common.ArchitectureEvm,
@@ -334,6 +332,7 @@ func BenchmarkNetworkForward_RetryFailures(b *testing.B) {
 		rlr,
 		upsReg,
 		mt,
+		nil,
 	)
 	if err != nil {
 		b.Fatal(err)
@@ -379,16 +378,16 @@ func BenchmarkNetworkForward_ConcurrentEthGetLogsIntegrityEnabled(b *testing.B) 
 	}
 
 	mt := health.NewTracker(&log.Logger, "benchProject", 2*time.Second)
-		upConfig := &common.UpstreamConfig{
-			Type:     common.UpstreamTypeEvm,
-			Id:       "rpc1",
-			Endpoint: "http://rpc1.localhost",
-			Evm: &common.EvmUpstreamConfig{
-				ChainId:             123,
-				// Benchmark: avoid long bootstrap debounce that can keep the network in "initializing".
-				StatePollerDebounce: common.Duration(10 * time.Millisecond),
-			},
-		}
+	upConfig := &common.UpstreamConfig{
+		Type:     common.UpstreamTypeEvm,
+		Id:       "rpc1",
+		Endpoint: "http://rpc1.localhost",
+		Evm: &common.EvmUpstreamConfig{
+			ChainId: 123,
+			// Benchmark: avoid long bootstrap debounce that can keep the network in "initializing".
+			StatePollerDebounce: common.Duration(10 * time.Millisecond),
+		},
+	}
 
 	vr := thirdparty.NewVendorsRegistry()
 	pr, err := thirdparty.NewProvidersRegistry(&log.Logger, vr, []*common.ProviderConfig{}, nil)
@@ -418,23 +417,23 @@ func BenchmarkNetworkForward_ConcurrentEthGetLogsIntegrityEnabled(b *testing.B) 
 		nil,
 		mt,
 		10*time.Second,
-			nil,
-		)
-		upsReg.Bootstrap(ctx)
-		prepareStart := time.Now()
-		for {
-			err := upsReg.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123))
-			if err == nil {
-				break
-			}
-			if !common.HasErrorCode(err, common.ErrCodeNetworkInitializing) {
-				b.Fatal(err)
-			}
-			if time.Since(prepareStart) > 10*time.Second {
-				b.Fatal(err)
-			}
-			time.Sleep(50 * time.Millisecond)
+		nil,
+	)
+	upsReg.Bootstrap(ctx)
+	prepareStart := time.Now()
+	for {
+		err := upsReg.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123))
+		if err == nil {
+			break
 		}
+		if !common.HasErrorCode(err, common.ErrCodeNetworkInitializing) {
+			b.Fatal(err)
+		}
+		if time.Since(prepareStart) > 10*time.Second {
+			b.Fatal(err)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 
 	ntw, err := NewNetwork(
 		ctx,
@@ -453,6 +452,7 @@ func BenchmarkNetworkForward_ConcurrentEthGetLogsIntegrityEnabled(b *testing.B) 
 		rlr,
 		upsReg,
 		mt,
+		nil,
 	)
 	if err != nil {
 		b.Fatal(err)

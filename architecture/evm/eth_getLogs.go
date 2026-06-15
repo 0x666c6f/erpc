@@ -497,7 +497,7 @@ func validateEmptyGetLogsBlockHashCompleteness(ctx context.Context, u common.Ups
 	auxReq.SetNetwork(rq.Network())
 	auxReq.CopyHttpContextFrom(rq)
 
-	auxResp, err := u.Forward(ctx, auxReq, true)
+	auxResp, err := u.Forward(ctx, auxReq, true, false)
 	if err != nil || auxResp == nil {
 		return nil
 	}

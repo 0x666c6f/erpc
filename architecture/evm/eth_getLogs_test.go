@@ -165,7 +165,7 @@ func (m *mockEvmUpstream) EvmAssertBlockAvailability(ctx context.Context, forMet
 	return args.Bool(0), args.Error(1)
 }
 
-func (m *mockEvmUpstream) Forward(ctx context.Context, req *common.NormalizedRequest, byPassMethodExclusion bool) (*common.NormalizedResponse, error) {
+func (m *mockEvmUpstream) Forward(ctx context.Context, req *common.NormalizedRequest, byPassMethodExclusion bool, isHedgeAttempt bool) (*common.NormalizedResponse, error) {
 	args := m.Called(ctx, req, byPassMethodExclusion)
 	resp, _ := args.Get(0).(*common.NormalizedResponse)
 	return resp, args.Error(1)

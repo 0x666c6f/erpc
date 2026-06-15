@@ -22,21 +22,21 @@ func TestFindGetPolicies_PreservesOrderingAcrossIndexBuckets(t *testing.T) {
 		Network:   "*",
 		Method:    "eth_getBalance",
 		Finality:  common.DataFinalityStateFinalized,
-		TTL:       common.Duration(time.Minute),
+		TTL:       common.FixedDuration(time.Minute),
 	})
 	policy1 := mustNewTestCachePolicy(t, connectorA, &common.CachePolicyConfig{
 		Connector: connectorA.Id(),
 		Network:   "evm:1",
 		Method:    "eth_getBalance",
 		Finality:  common.DataFinalityStateFinalized,
-		TTL:       common.Duration(time.Minute),
+		TTL:       common.FixedDuration(time.Minute),
 	})
 	policy2 := mustNewTestCachePolicy(t, connectorC, &common.CachePolicyConfig{
 		Connector: connectorC.Id(),
 		Network:   "evm:1",
 		Method:    "eth_*",
 		Finality:  common.DataFinalityStateFinalized,
-		TTL:       common.Duration(time.Minute),
+		TTL:       common.FixedDuration(time.Minute),
 	})
 	// Same connector as policy1, should be de-duped after policy1 matches.
 	policy3 := mustNewTestCachePolicy(t, connectorA, &common.CachePolicyConfig{
@@ -44,7 +44,7 @@ func TestFindGetPolicies_PreservesOrderingAcrossIndexBuckets(t *testing.T) {
 		Network:   "evm:*",
 		Method:    "eth_getBalance",
 		Finality:  common.DataFinalityStateFinalized,
-		TTL:       common.Duration(time.Minute),
+		TTL:       common.FixedDuration(time.Minute),
 	})
 
 	cache := newTestCacheWithPolicies(t, []*data.CachePolicy{policy0, policy1, policy2, policy3})
@@ -70,28 +70,28 @@ func TestFindGetPolicies_UnknownFinalityMatchesAllPolicyFinalities(t *testing.T)
 		Network:   "evm:1",
 		Method:    "eth_getBlockByHash",
 		Finality:  common.DataFinalityStateFinalized,
-		TTL:       common.Duration(time.Minute),
+		TTL:       common.FixedDuration(time.Minute),
 	})
 	policyUnfinalized := mustNewTestCachePolicy(t, connectorB, &common.CachePolicyConfig{
 		Connector: connectorB.Id(),
 		Network:   "evm:1",
 		Method:    "eth_getBlockByHash",
 		Finality:  common.DataFinalityStateUnfinalized,
-		TTL:       common.Duration(time.Minute),
+		TTL:       common.FixedDuration(time.Minute),
 	})
 	policyRealtime := mustNewTestCachePolicy(t, connectorC, &common.CachePolicyConfig{
 		Connector: connectorC.Id(),
 		Network:   "evm:1",
 		Method:    "eth_getBlockByHash",
 		Finality:  common.DataFinalityStateRealtime,
-		TTL:       common.Duration(time.Minute),
+		TTL:       common.FixedDuration(time.Minute),
 	})
 	policyUnknown := mustNewTestCachePolicy(t, connectorD, &common.CachePolicyConfig{
 		Connector: connectorD.Id(),
 		Network:   "evm:1",
 		Method:    "eth_getBlockByHash",
 		Finality:  common.DataFinalityStateUnknown,
-		TTL:       common.Duration(time.Minute),
+		TTL:       common.FixedDuration(time.Minute),
 	})
 
 	cache := newTestCacheWithPolicies(t, []*data.CachePolicy{
@@ -124,7 +124,7 @@ func TestCurrentPolicySnapshot_LegacyFallbackConcurrent(t *testing.T) {
 		Network:   "evm:1",
 		Method:    "eth_chainId",
 		Finality:  common.DataFinalityStateFinalized,
-		TTL:       common.Duration(time.Minute),
+		TTL:       common.FixedDuration(time.Minute),
 	})
 
 	logger := zerolog.Nop()
@@ -169,7 +169,7 @@ func TestFindGetPolicies_MultiMatchConnectorDedupUsesFirstMatchingPolicy(t *test
 		Method:    "eth_call",
 		Params:    []interface{}{"0xdeadbeef"},
 		Finality:  common.DataFinalityStateRealtime,
-		TTL:       common.Duration(time.Minute),
+		TTL:       common.FixedDuration(time.Minute),
 	})
 	policyMatchFirst := mustNewTestCachePolicy(t, connectorA, &common.CachePolicyConfig{
 		Connector: connectorA.Id(),
@@ -177,7 +177,7 @@ func TestFindGetPolicies_MultiMatchConnectorDedupUsesFirstMatchingPolicy(t *test
 		Method:    "eth_call",
 		Params:    []interface{}{"0x*"},
 		Finality:  common.DataFinalityStateRealtime,
-		TTL:       common.Duration(time.Minute),
+		TTL:       common.FixedDuration(time.Minute),
 	})
 	// Matches too, but same connector as policyMatchFirst; should be skipped.
 	policyMatchSecondSameConnector := mustNewTestCachePolicy(t, connectorA, &common.CachePolicyConfig{
@@ -185,7 +185,7 @@ func TestFindGetPolicies_MultiMatchConnectorDedupUsesFirstMatchingPolicy(t *test
 		Network:   "evm:1",
 		Method:    "eth_call",
 		Finality:  common.DataFinalityStateRealtime,
-		TTL:       common.Duration(time.Minute),
+		TTL:       common.FixedDuration(time.Minute),
 	})
 	policyMatchOtherConnector := mustNewTestCachePolicy(t, connectorB, &common.CachePolicyConfig{
 		Connector: connectorB.Id(),
@@ -193,7 +193,7 @@ func TestFindGetPolicies_MultiMatchConnectorDedupUsesFirstMatchingPolicy(t *test
 		Method:    "eth_call",
 		Params:    []interface{}{"0x*"},
 		Finality:  common.DataFinalityStateRealtime,
-		TTL:       common.Duration(time.Minute),
+		TTL:       common.FixedDuration(time.Minute),
 	})
 
 	cache := newTestCacheWithPolicies(t, []*data.CachePolicy{
@@ -223,14 +223,14 @@ func TestFindGetPolicies_SetPoliciesRebuildsLookup(t *testing.T) {
 		Network:   "evm:2",
 		Method:    "eth_getBalance",
 		Finality:  common.DataFinalityStateFinalized,
-		TTL:       common.Duration(time.Minute),
+		TTL:       common.FixedDuration(time.Minute),
 	})
 	updatedPolicy := mustNewTestCachePolicy(t, connectorB, &common.CachePolicyConfig{
 		Connector: connectorB.Id(),
 		Network:   "evm:1",
 		Method:    "eth_getBalance",
 		Finality:  common.DataFinalityStateFinalized,
-		TTL:       common.Duration(time.Minute),
+		TTL:       common.FixedDuration(time.Minute),
 	})
 
 	cache := newTestCacheWithPolicies(t, []*data.CachePolicy{initialPolicy})
@@ -298,7 +298,7 @@ func newBenchmarkCacheWithPolicies(tb testing.TB, policyCount int) *EvmJsonRpcCa
 			Method:    fmt.Sprintf("eth_method_%d", i),
 			Params:    []interface{}{"0x*"},
 			Finality:  common.DataFinalityStateFinalized,
-			TTL:       common.Duration(time.Minute),
+			TTL:       common.FixedDuration(time.Minute),
 		}))
 	}
 
@@ -309,7 +309,7 @@ func newBenchmarkCacheWithPolicies(tb testing.TB, policyCount int) *EvmJsonRpcCa
 		Method:    "eth_getBalance",
 		Params:    []interface{}{"0x*"},
 		Finality:  common.DataFinalityStateFinalized,
-		TTL:       common.Duration(time.Minute),
+		TTL:       common.FixedDuration(time.Minute),
 	}))
 
 	return newTestCacheWithPolicies(tb, policies)

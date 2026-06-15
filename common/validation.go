@@ -427,6 +427,17 @@ func (p *CachePolicyConfig) Validate(c *CacheConfig) error {
 		return fmt.Errorf("cache.*.policies.*.appliesTo must be one of: get, set, both")
 	}
 
+	if p.TTL != nil {
+		if err := p.TTL.validate("cache.*.policies.*.ttl"); err != nil {
+			return err
+		}
+		// Block-time-derived TTLs describe head freshness; other finality
+		// states are immutable and must not silently pick up a dynamic TTL.
+		if p.TTL.BlockTimeMultiplier > 0 && p.Finality != DataFinalityStateRealtime {
+			return fmt.Errorf("cache.*.policies.*.ttl.blockTimeMultiplier is only supported when finality is 'realtime'")
+		}
+	}
+
 	return nil
 }
 
@@ -511,7 +522,7 @@ func validateConnectorFailsafe(connectorId, field string, index int, fsCfg *Fail
 	if fsCfg.Consensus != nil {
 		return fmt.Errorf("%s: consensus is not supported for connector-level failsafe", prefix)
 	}
-	if fsCfg.Hedge != nil && fsCfg.Hedge.Quantile > 0 {
+	if fsCfg.Hedge != nil && fsCfg.Hedge.Delay != nil && fsCfg.Hedge.Delay.Quantile > 0 {
 		return fmt.Errorf("%s: hedge quantile is not supported for connector-level failsafe (no latency metric source)", prefix)
 	}
 	return nil
@@ -694,9 +705,6 @@ func (p *ProjectConfig) Validate(c *Config) error {
 			return fmt.Errorf("project.*.rateLimitBudget '%s' does not exist in config.rateLimiters", p.RateLimitBudget)
 		}
 	}
-	if p.ScoreMetricsWindowSize == 0 {
-		return fmt.Errorf("project.*.scoreMetricsWindowSize is required")
-	}
 	return nil
 }
 
@@ -767,13 +775,6 @@ func (s *AuthStrategyConfig) Validate() error {
 		if err := s.Database.Validate(); err != nil {
 			return err
 		}
-	case AuthTypeX402:
-		if s.X402 == nil {
-			return fmt.Errorf("auth.*.x402 is required for x402 strategy")
-		}
-		if err := s.X402.Validate(); err != nil {
-			return err
-		}
 	default:
 		return fmt.Errorf("auth.*.type '%s' is invalid must be one of: %v", s.Type, []AuthType{
 			AuthTypeNetwork,
@@ -781,7 +782,6 @@ func (s *AuthStrategyConfig) Validate() error {
 			AuthTypeJwt,
 			AuthTypeSiwe,
 			AuthTypeDatabase,
-			AuthTypeX402,
 		})
 	}
 	return nil
@@ -836,13 +836,6 @@ func (s *SiweStrategyConfig) Validate() error {
 func (c *CORSConfig) Validate() error {
 	if len(c.AllowedOrigins) == 0 {
 		return fmt.Errorf("*.cors.allowedOrigins is required, add at least one allowed origin")
-	}
-	return nil
-}
-
-func (h *DeprecatedProjectHealthCheckConfig) Validate() error {
-	if h.ScoreMetricsWindowSize == 0 {
-		return fmt.Errorf("project.*.healthCheck.scoreMetricsWindowSize is required")
 	}
 	return nil
 }
@@ -911,11 +904,6 @@ func (u *UpstreamConfig) Validate(c *Config, skipEndpointCheck bool) error {
 	}
 	if u.RateLimitAutoTune != nil {
 		if err := u.RateLimitAutoTune.Validate(); err != nil {
-			return err
-		}
-	}
-	if u.Routing != nil {
-		if err := u.Routing.Validate(); err != nil {
 			return err
 		}
 	}
@@ -1090,20 +1078,10 @@ func (f *FailsafeConfig) Validate() error {
 }
 
 func (t *TimeoutPolicyConfig) Validate() error {
-	if t.Quantile > 0 {
-		if t.Quantile > 1 {
-			return fmt.Errorf("upstream.*.failsafe.timeout.quantile must be between 0 and 1")
-		}
-		if t.Duration == 0 && t.MaxDuration == 0 {
-			return fmt.Errorf("upstream.*.failsafe.timeout.duration or maxDuration is required when quantile is set")
-		}
-	} else if t.Duration == 0 {
+	if t.Duration == nil {
 		return fmt.Errorf("upstream.*.failsafe.timeout.duration is required")
 	}
-	if t.MinDuration > 0 && t.MaxDuration > 0 && t.MinDuration > t.MaxDuration {
-		return fmt.Errorf("upstream.*.failsafe.timeout.minDuration must be less than or equal to maxDuration")
-	}
-	return nil
+	return t.Duration.validate("upstream.*.failsafe.timeout.duration")
 }
 
 func (r *RetryPolicyConfig) Validate() error {
@@ -1117,10 +1095,10 @@ func (r *RetryPolicyConfig) Validate() error {
 }
 
 func (h *HedgePolicyConfig) Validate() error {
-	if h.Quantile <= 0 && h.Delay <= 0 {
-		return fmt.Errorf("failsafe.hedge.delay or failsafe.hedge.quantile is required")
+	if h.Delay == nil || h.Delay.IsZero() {
+		return fmt.Errorf("failsafe.hedge.delay is required")
 	}
-	return nil
+	return h.Delay.validate("failsafe.hedge.delay")
 }
 
 func (c *CircuitBreakerPolicyConfig) Validate() error {
@@ -1168,6 +1146,21 @@ func (c *ConsensusPolicyConfig) Validate() error {
 	if c.MisbehaviorsDestination != nil {
 		if err := c.MisbehaviorsDestination.Validate(); err != nil {
 			return fmt.Errorf("consensus.misbehaviorsDestination is invalid: %w", err)
+		}
+	}
+
+	for i, rp := range c.RequiredParticipants {
+		if rp == nil {
+			return fmt.Errorf("consensus.requiredParticipants[%d] must not be null", i)
+		}
+		if strings.TrimSpace(rp.Tag) == "" {
+			return fmt.Errorf("consensus.requiredParticipants[%d].tag is required", i)
+		}
+		if rp.MinParticipants <= 0 {
+			return fmt.Errorf("consensus.requiredParticipants[%d].minParticipants must be greater than 0", i)
+		}
+		if rp.MinParticipants > c.MaxParticipants {
+			return fmt.Errorf("consensus.requiredParticipants[%d].minParticipants (%d) cannot exceed maxParticipants (%d)", i, rp.MinParticipants, c.MaxParticipants)
 		}
 	}
 
@@ -1306,20 +1299,6 @@ func (r *RateLimitAutoTuneConfig) Validate() error {
 	return nil
 }
 
-func (r *RoutingConfig) Validate() error {
-	if len(r.ScoreMultipliers) > 0 {
-		for _, multiplier := range r.ScoreMultipliers {
-			if err := multiplier.Validate(); err != nil {
-				return err
-			}
-		}
-	}
-	if r.ScoreLatencyQuantile < 0 || r.ScoreLatencyQuantile > 1 {
-		return fmt.Errorf("upstream.*.routing.scoreLatencyQuantile must be between 0 and 1")
-	}
-	return nil
-}
-
 func (n *NetworkConfig) Validate(c *Config) error {
 	if n.Architecture == "" {
 		return fmt.Errorf("network.*.architecture is required")
@@ -1450,6 +1429,23 @@ func (e *EvmNetworkConfig) Validate() error {
 	if e.GetLogsCacheChunkConcurrency < 0 {
 		return fmt.Errorf("network.*.evm.getLogsCacheChunkConcurrency must be greater than or equal to 0")
 	}
+	if e.ServedTip != nil {
+		for _, tag := range e.ServedTip.EnabledFor {
+			switch strings.ToLower(strings.TrimSpace(tag)) {
+			case "latest", "finalized", "safe":
+			default:
+				return fmt.Errorf("network.*.evm.servedTip.enabledFor contains unknown tag %q (valid: latest, finalized, safe)", tag)
+			}
+		}
+		if e.ServedTip.ClusterDelta < 0 {
+			return fmt.Errorf("network.*.evm.servedTip.clusterDelta must be >= 0 (0 auto-derives from block time)")
+		}
+		for _, m := range e.ServedTip.GuaranteedMethods {
+			if err := ValidatePattern(m); err != nil {
+				return fmt.Errorf("network.*.evm.servedTip.guaranteedMethods has invalid pattern %q: %w", m, err)
+			}
+		}
+	}
 	if e.Multicall3Aggregation != nil && e.Multicall3Aggregation.Enabled {
 		if err := e.Multicall3Aggregation.IsValid(); err != nil {
 			return fmt.Errorf("network.*.evm.multicall3Aggregation: %w", err)
@@ -1458,76 +1454,32 @@ func (e *EvmNetworkConfig) Validate() error {
 	return nil
 }
 
+// Validate checks the SelectionPolicyConfig against the new spec.
+//
+//   - All durations must be strictly positive.
+//   - EvalTimeout must be < EvalInterval (otherwise a slow eval would never
+//     finish before the next tick fires).
+//   - The eval must compile under sobek; SetDefaults populates CompiledProgram
+//     so a non-nil program here implies a clean compile.
 func (c *SelectionPolicyConfig) Validate() error {
 	if c.EvalInterval <= 0 {
 		return fmt.Errorf("selectionPolicy.evalInterval must be greater than 0")
 	}
-	if !c.UsesEvalFunction() && len(c.Rules) == 0 {
-		return fmt.Errorf("selectionPolicy.evalFunction or selectionPolicy.rules is required")
+	if c.EvalTimeout <= 0 {
+		return fmt.Errorf("selectionPolicy.evalTimeout must be greater than 0")
 	}
-	for i, rule := range c.Rules {
-		if rule == nil {
-			return fmt.Errorf("selectionPolicy.rules[%d] cannot be null", i)
-		}
-		if err := rule.Validate(); err != nil {
-			return fmt.Errorf("selectionPolicy.rules[%d]: %w", i, err)
-		}
+	if c.EvalTimeout >= c.EvalInterval {
+		return fmt.Errorf("selectionPolicy.evalTimeout (%s) must be less than evalInterval (%s)",
+			c.EvalTimeout.Duration(), c.EvalInterval.Duration())
 	}
-	// ResampleInterval and ResampleCount are only required when ResampleExcluded is true
-	if c.ResampleExcluded {
-		if c.ResampleInterval <= 0 {
-			return fmt.Errorf("selectionPolicy.resampleInterval must be greater than 0 when resampleExcluded is true")
-		}
-		if c.ResampleCount <= 0 {
-			return fmt.Errorf("selectionPolicy.resampleCount must be greater than 0 when resampleExcluded is true")
-		}
+	if c.EvalFunc == "" {
+		return fmt.Errorf("selectionPolicy.evalFunc is required")
 	}
-	return nil
-}
-
-func (r *SelectionPolicyRuleConfig) Validate() error {
-	if r == nil {
-		return fmt.Errorf("rule is required")
-	}
-	action := strings.ToLower(strings.TrimSpace(string(r.Action)))
-	if action != "" && action != string(SelectionPolicyRuleActionInclude) && action != string(SelectionPolicyRuleActionExclude) {
-		return fmt.Errorf("action must be either 'include' or 'exclude'")
-	}
-	if err := ValidatePattern(r.MatchMethod); err != nil {
-		return fmt.Errorf("matchMethod is invalid: %w", err)
-	}
-	if err := ValidatePattern(r.MatchUpstreamID); err != nil {
-		return fmt.Errorf("matchUpstreamId is invalid: %w", err)
-	}
-	if err := ValidatePattern(r.MatchUpstreamGroup); err != nil {
-		return fmt.Errorf("matchUpstreamGroup is invalid: %w", err)
-	}
-	checkNonNegative := func(name string, v *float64) error {
-		if v != nil && *v < 0 {
-			return fmt.Errorf("%s must be greater than or equal to 0", name)
-		}
+	if IsTSFunctionSentinel(c.EvalFunc) {
 		return nil
 	}
-	if err := checkNonNegative("maxErrorRate", r.MaxErrorRate); err != nil {
-		return err
-	}
-	if err := checkNonNegative("maxBlockHeadLag", r.MaxBlockHeadLag); err != nil {
-		return err
-	}
-	if err := checkNonNegative("maxFinalizationLag", r.MaxFinalizationLag); err != nil {
-		return err
-	}
-	if err := checkNonNegative("maxP90ResponseSeconds", r.MaxP90ResponseSeconds); err != nil {
-		return err
-	}
-	if err := checkNonNegative("maxP95ResponseSeconds", r.MaxP95ResponseSeconds); err != nil {
-		return err
-	}
-	if err := checkNonNegative("maxP99ResponseSeconds", r.MaxP99ResponseSeconds); err != nil {
-		return err
-	}
-	if err := checkNonNegative("maxThrottledRate", r.MaxThrottledRate); err != nil {
-		return err
+	if c.CompiledProgram == nil {
+		return fmt.Errorf("selectionPolicy.evalFunc failed to compile (CompiledProgram is nil)")
 	}
 	return nil
 }

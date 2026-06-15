@@ -557,7 +557,7 @@ func TestEvmJsonRpcCache_Set(t *testing.T) {
 			Network:   "*",
 			Method:    "*",
 			Finality:  common.DataFinalityStateFinalized,
-			TTL:       0, // Forever
+			TTL:       nil, // Forever
 			Connector: "mock1",
 		}, mockConnectors[0])
 		require.NoError(t, err)
@@ -566,7 +566,7 @@ func TestEvmJsonRpcCache_Set(t *testing.T) {
 			Network:   "*",
 			Method:    "*",
 			Finality:  common.DataFinalityStateUnknown,
-			TTL:       common.Duration(30 * time.Second),
+			TTL:       common.FixedDuration(30 * time.Second),
 			Connector: "mock1",
 		}, mockConnectors[0])
 		require.NoError(t, err)
@@ -575,7 +575,7 @@ func TestEvmJsonRpcCache_Set(t *testing.T) {
 			Network:   "*",
 			Method:    "*",
 			Finality:  common.DataFinalityStateUnfinalized,
-			TTL:       common.Duration(30 * time.Second),
+			TTL:       common.FixedDuration(30 * time.Second),
 			Connector: "mock1",
 		}, mockConnectors[0])
 		require.NoError(t, err)
@@ -771,7 +771,7 @@ func TestEvmJsonRpcCache_Set(t *testing.T) {
 			Network:  "evm:123",
 			Method:   "eth_getBlockByNumber",
 			Params:   []interface{}{"latest", "*"},
-			TTL:      common.Duration(5 * time.Second),
+			TTL:      common.FixedDuration(5 * time.Second),
 			Finality: common.DataFinalityStateRealtime,
 		}, mockConnectors[0])
 		require.NoError(t, err)
@@ -805,7 +805,7 @@ func TestEvmJsonRpcCache_Set(t *testing.T) {
 			Network:  "evm:123",
 			Method:   "eth_getBlockByNumber",
 			Params:   []interface{}{"finalized", "*"},
-			TTL:      common.Duration(5 * time.Second),
+			TTL:      common.FixedDuration(5 * time.Second),
 			Finality: common.DataFinalityStateRealtime,
 		}, mockConnectors[0])
 		require.NoError(t, err)
@@ -842,7 +842,7 @@ func TestEvmJsonRpcCache_Set(t *testing.T) {
 			Network:   "*",
 			Method:    "*",
 			Finality:  common.DataFinalityStateFinalized,
-			TTL:       0, // forever
+			TTL:       nil, // forever
 			Connector: "mock1",
 		}, mockConnectors[0])
 		require.NoError(t, err)
@@ -879,7 +879,7 @@ func TestEvmJsonRpcCache_Set(t *testing.T) {
 			Network:   "*",
 			Method:    "*",
 			Finality:  common.DataFinalityStateFinalized,
-			TTL:       0, // forever
+			TTL:       nil, // forever
 			Connector: "mock1",
 		}, mockConnectors[0])
 		require.NoError(t, err)
@@ -925,7 +925,7 @@ func TestEvmJsonRpcCache_Set(t *testing.T) {
 			Network:   "evm:123",
 			Method:    "eth_getBlockByNumber",
 			Params:    []interface{}{"latest", "*"},
-			TTL:       common.Duration(5 * time.Minute),
+			TTL:       common.FixedDuration(5 * time.Minute),
 			Finality:  common.DataFinalityStateRealtime,
 			Connector: "mock1",
 		}, mockConnectors[0])
@@ -936,7 +936,7 @@ func TestEvmJsonRpcCache_Set(t *testing.T) {
 			Network:   "*",
 			Method:    "*",
 			Finality:  common.DataFinalityStateFinalized,
-			TTL:       0,
+			TTL:       nil,
 			Connector: "mock1",
 		}, mockConnectors[0])
 		require.NoError(t, err)
@@ -981,7 +981,7 @@ func TestEvmJsonRpcCache_Set(t *testing.T) {
 			Network:   "*",
 			Method:    "*",
 			Finality:  common.DataFinalityStateFinalized,
-			TTL:       0, // forever
+			TTL:       nil, // forever
 			Connector: "mock1",
 		}, mockConnectors[0])
 		require.NoError(t, err)
@@ -1189,7 +1189,7 @@ func TestEvmJsonRpcCache_Set_WithTTL(t *testing.T) {
 		policy, err := data.NewCachePolicy(&common.CachePolicyConfig{
 			Network: "evm:123",
 			Method:  "eth_getBalance",
-			TTL:     common.Duration(ttl),
+			TTL:     common.FixedDuration(ttl),
 		}, mockConnectors[0])
 		require.NoError(t, err)
 		cache.SetPolicies([]*data.CachePolicy{
@@ -1237,7 +1237,7 @@ func TestEvmJsonRpcCache_Set_WithTTL(t *testing.T) {
 		policy0, err0 := data.NewCachePolicy(&common.CachePolicyConfig{
 			Network: "evm:123",
 			Method:  "eth_getBlockByNumber",
-			TTL:     common.Duration(2 * time.Minute),
+			TTL:     common.FixedDuration(2 * time.Minute),
 		}, mockConnectors[0])
 		require.NoError(t, err0)
 
@@ -1245,7 +1245,7 @@ func TestEvmJsonRpcCache_Set_WithTTL(t *testing.T) {
 		policy1, err1 := data.NewCachePolicy(&common.CachePolicyConfig{
 			Network: "evm:123",
 			Method:  "eth_getBalance",
-			TTL:     ttl,
+			TTL:     &common.BlockTimeAdaptiveDuration{Fallback: ttl},
 		}, mockConnectors[1])
 		require.NoError(t, err1)
 
@@ -1363,9 +1363,14 @@ func TestEvmJsonRpcCache_Get(t *testing.T) {
 		assert.NoError(t, err)
 		assert.Equal(t, cachedResponse, jrr.GetResultString())
 
-		// Verify both connectors were checked in order
-		mockConnectors[0].AssertCalled(t, "Get", mock.Anything, mock.Anything, "evm:123:1", mock.Anything, mock.Anything)
-		mockConnectors[1].AssertCalled(t, "Get", mock.Anything, mock.Anything, "evm:123:1", mock.Anything, mock.Anything)
+		// Verify both connectors were dispatched. Fan-out is parallel, so
+		// connector[1] can return before connector[0]'s goroutine has even
+		// entered its mock call under heavy CI load. assert.Eventually
+		// gives both goroutines a chance to finish before failing.
+		assert.Eventually(t, func() bool {
+			return mockConnectors[0].AssertCalled(new(testing.T), "Get", mock.Anything, mock.Anything, "evm:123:1", mock.Anything, mock.Anything) &&
+				mockConnectors[1].AssertCalled(new(testing.T), "Get", mock.Anything, mock.Anything, "evm:123:1", mock.Anything, mock.Anything)
+		}, 2*time.Second, 20*time.Millisecond, "both connectors should be dispatched by the fan-out")
 	})
 }
 
@@ -1930,6 +1935,14 @@ func TestEvmJsonRpcCache_ItemSizeLimits(t *testing.T) {
 }
 
 func TestEvmJsonRpcCache_DynamoDB(t *testing.T) {
+	// createMockUpstream bootstraps a real upstream against rpc1.localhost
+	// (chainId detection + state poller); register the standard poller mocks
+	// so this test is self-contained instead of freeloading on persist mocks
+	// leaked by whichever test happens to run before it in the same process.
+	util.ResetGock()
+	defer util.ResetGock()
+	util.SetupMocksForEvmStatePoller()
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -1998,14 +2011,14 @@ func TestEvmJsonRpcCache_DynamoDB(t *testing.T) {
 			Method:    "*",
 			Finality:  common.DataFinalityStateUnfinalized,
 			Connector: "dynamodb1",
-			TTL:       common.Duration(5 * time.Minute),
+			TTL:       common.FixedDuration(5 * time.Minute),
 		},
 		{
 			Network:   "*",
 			Method:    "*",
 			Finality:  common.DataFinalityStateRealtime,
 			Connector: "dynamodb1",
-			TTL:       common.Duration(30 * time.Second),
+			TTL:       common.FixedDuration(30 * time.Second),
 		},
 	}
 
@@ -2311,6 +2324,13 @@ func TestEvmJsonRpcCache_DynamoDB(t *testing.T) {
 }
 
 func TestEvmJsonRpcCache_Redis(t *testing.T) {
+	// Same hygiene as TestEvmJsonRpcCache_DynamoDB: createMockUpstream
+	// bootstraps against rpc1.localhost, so this test must register its own
+	// poller mocks rather than depend on leftovers from earlier tests.
+	util.ResetGock()
+	defer util.ResetGock()
+	util.SetupMocksForEvmStatePoller()
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -2372,14 +2392,14 @@ func TestEvmJsonRpcCache_Redis(t *testing.T) {
 			Method:    "*",
 			Finality:  common.DataFinalityStateUnfinalized,
 			Connector: "redis1",
-			TTL:       common.Duration(5 * time.Minute),
+			TTL:       common.FixedDuration(5 * time.Minute),
 		},
 		{
 			Network:   "*",
 			Method:    "*",
 			Finality:  common.DataFinalityStateRealtime,
 			Connector: "redis1",
-			TTL:       common.Duration(30 * time.Second),
+			TTL:       common.FixedDuration(30 * time.Second),
 		},
 	}
 
