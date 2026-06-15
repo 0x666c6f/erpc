@@ -129,8 +129,8 @@ test:
 .PHONY: test-fallback-config
 test-fallback-config:
 	@go clean -testcache
-	@go test ./erpc -list '^TestPolicyEvaluator$$' | grep -q '^TestPolicyEvaluator$$'
-	@go test ./erpc -run 'TestPolicyEvaluator/DefaultPolicy' -count=1
+	@go test ./erpc -list '^TestNetworkPolicy_SafetyNet_WhenAllBroken$$' | grep -q '^TestNetworkPolicy_SafetyNet_WhenAllBroken$$'
+	@go test ./erpc -run '^TestNetworkPolicy_SafetyNet_WhenAllBroken$$' -count=1
 	@go test ./erpc -list '^TestNetworkForward_TryAllUpstreams_FallbackWithinSameRound$$' | grep -q '^TestNetworkForward_TryAllUpstreams_FallbackWithinSameRound$$'
 	@go test ./erpc -run '^TestNetworkForward_TryAllUpstreams_FallbackWithinSameRound$$' -count=1
 	@go test ./erpc -list '^TestHandleEthCallBatchAggregation_FallbackPaths$$' | grep -q '^TestHandleEthCallBatchAggregation_FallbackPaths$$'
