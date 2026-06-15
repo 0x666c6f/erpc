@@ -299,8 +299,8 @@ jobs:
       - name: Verify packages are live on npm
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          VERSION: ${{ steps.version.outputs.VERSION }}
         run: |
-          VERSION=${{ steps.version.outputs.VERSION }}
           for pkg in @erpc-cloud/cli erpc start-rpc start-erpc @erpc-cloud/config; do
             for attempt in 1 2 3 4 5; do
               if [ -n "$(npm view "${pkg}@${VERSION}" version 2>/dev/null)" ]; then
