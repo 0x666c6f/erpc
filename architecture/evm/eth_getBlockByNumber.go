@@ -444,7 +444,72 @@ func upstreamPostForward_eth_getBlockByNumber(ctx context.Context, n common.Netw
 		return rs, err
 	}
 
+	if err := filterHyperEVMSystemTransactions(ctx, n, rs); err != nil {
+		return rs, err
+	}
+
 	return rs, re
+}
+
+const hyperEVMChainId int64 = 999
+
+func filterHyperEVMSystemTransactions(ctx context.Context, n common.Network, rs *common.NormalizedResponse) error {
+	if !isHyperEVMNetwork(n) || rs == nil {
+		return nil
+	}
+
+	jrr, err := rs.JsonRpcResponse(ctx)
+	if err != nil || jrr == nil || jrr.Error != nil {
+		return err
+	}
+
+	var block map[string]interface{}
+	if err := common.SonicCfg.Unmarshal(jrr.GetResultBytes(), &block); err != nil {
+		return common.NewErrEndpointContentValidation(fmt.Errorf("invalid JSON result for HyperEVM block transaction filtering: %w", err), rs.Upstream())
+	}
+
+	txs, ok := block["transactions"].([]interface{})
+	if !ok || len(txs) == 0 {
+		return nil
+	}
+
+	filteredTxs := make([]interface{}, 0, len(txs))
+	for _, tx := range txs {
+		if isHyperEVMSystemTransaction(tx) {
+			continue
+		}
+		filteredTxs = append(filteredTxs, tx)
+	}
+	if len(filteredTxs) == len(txs) {
+		return nil
+	}
+
+	block["transactions"] = filteredTxs
+	result, err := common.SonicCfg.Marshal(block)
+	if err != nil {
+		return common.NewErrEndpointContentValidation(fmt.Errorf("failed to marshal HyperEVM filtered block: %w", err), rs.Upstream())
+	}
+	jrr.SetResult(result)
+	return nil
+}
+
+func isHyperEVMNetwork(n common.Network) bool {
+	if n == nil {
+		return false
+	}
+	if cfg := n.Config(); cfg != nil && cfg.Evm != nil && cfg.Evm.ChainId == hyperEVMChainId {
+		return true
+	}
+	return strings.EqualFold(n.Id(), "evm:999")
+}
+
+func isHyperEVMSystemTransaction(tx interface{}) bool {
+	txObj, ok := tx.(map[string]interface{})
+	if !ok {
+		return false
+	}
+	gasPrice, ok := txObj["gasPrice"].(string)
+	return ok && isZeroishHex(gasPrice)
 }
 
 // blockValidationTxLite is a minimal transaction model for block validation

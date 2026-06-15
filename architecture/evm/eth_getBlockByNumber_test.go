@@ -7,6 +7,7 @@ import (
 	"github.com/erpc/erpc/common"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // testNetwork is a simple test implementation of common.Network interface for this file
@@ -72,6 +73,75 @@ func (t *testNetwork) GetFinality(ctx context.Context, req *common.NormalizedReq
 
 func (t *testNetwork) Cache() common.CacheDAL {
 	return nil
+}
+
+func TestUpstreamPostForward_HyperEVMFiltersSystemTransactions(t *testing.T) {
+	ctx := context.Background()
+	blockJSON := `{
+		"number": "0x100",
+		"hash": "0xabc123",
+		"transactions": [
+			{"hash": "0xsystem1", "gasPrice": "0x0"},
+			{"hash": "0xreal", "gasPrice": "0x1"},
+			{"hash": "0xsystem2", "gasPrice": "0x00"}
+		]
+	}`
+
+	newResponse := func(t *testing.T) (*common.NormalizedRequest, *common.NormalizedResponse) {
+		t.Helper()
+
+		jrpcResp, err := common.NewJsonRpcResponseFromBytes([]byte(`1`), []byte(blockJSON), nil)
+		require.NoError(t, err)
+		req := common.NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","id":1,"method":"eth_getBlockByNumber","params":["0x100",true]}`))
+		resp := common.NewNormalizedResponse().
+			WithRequest(req).
+			WithJsonRpcResponse(jrpcResp)
+		return req, resp
+	}
+
+	t.Run("FiltersGasPriceZeroTransactionsOnHyperEVM", func(t *testing.T) {
+		req, resp := newResponse(t)
+		network := &testNetwork{cfg: &common.NetworkConfig{
+			Architecture: common.ArchitectureEvm,
+			Evm: &common.EvmNetworkConfig{
+				ChainId: 999,
+			},
+		}}
+
+		filteredResp, err := upstreamPostForward_eth_getBlockByNumber(ctx, network, nil, req, resp, nil)
+		require.NoError(t, err)
+
+		jrr, err := filteredResp.JsonRpcResponse(ctx)
+		require.NoError(t, err)
+		var block struct {
+			Transactions []map[string]interface{} `json:"transactions"`
+		}
+		require.NoError(t, common.SonicCfg.Unmarshal(jrr.GetResultBytes(), &block))
+		require.Len(t, block.Transactions, 1)
+		assert.Equal(t, "0xreal", block.Transactions[0]["hash"])
+		assert.Equal(t, "0x1", block.Transactions[0]["gasPrice"])
+	})
+
+	t.Run("PreservesGasPriceZeroTransactionsOnOtherChains", func(t *testing.T) {
+		req, resp := newResponse(t)
+		network := &testNetwork{cfg: &common.NetworkConfig{
+			Architecture: common.ArchitectureEvm,
+			Evm: &common.EvmNetworkConfig{
+				ChainId: 1,
+			},
+		}}
+
+		unfilteredResp, err := upstreamPostForward_eth_getBlockByNumber(ctx, network, nil, req, resp, nil)
+		require.NoError(t, err)
+
+		jrr, err := unfilteredResp.JsonRpcResponse(ctx)
+		require.NoError(t, err)
+		var block struct {
+			Transactions []map[string]interface{} `json:"transactions"`
+		}
+		require.NoError(t, common.SonicCfg.Unmarshal(jrr.GetResultBytes(), &block))
+		require.Len(t, block.Transactions, 3)
+	})
 }
 
 func TestAllPhantomTransactions(t *testing.T) {
