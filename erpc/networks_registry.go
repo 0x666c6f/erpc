@@ -92,11 +92,9 @@ func NewNetwork(
 ) (*Network, error) {
 	lg := logger.With().Str("component", "proxy").Str("networkId", nwCfg.NetworkId()).Logger()
 	var policyEngine *policy.Engine
-	if len(policyEngines) > 0 {
+	if len(policyEngines) > 0 && policyEngines[0] != nil {
 		policyEngine = policyEngines[0]
 	}
-
-	_ = projectId // network executor scope is per-network; project label comes from the metrics tracker.
 
 	// Build a provider that resolves the dynamic block-unavailable retry delay
 	// from the network's EMA-estimated block time. Returns 0 before warmup so
@@ -170,7 +168,6 @@ func NewNetwork(
 		postCompletionResults: &sync.Map{},
 		failsafeExecutors:     failsafeExecutors,
 		initializer:           util.NewInitializer(appCtx, &lg, nil),
-		getSortedUpstreamsFn:  defaultGetSortedUpstreamsForNetwork,
 	}
 
 	if nwCfg.Architecture == "" {

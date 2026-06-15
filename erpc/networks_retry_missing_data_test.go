@@ -238,7 +238,8 @@ func TestNetworkRetry_BlockSanityValidation(t *testing.T) {
 	require.NotNil(t, resp)
 
 	// Must fail over to rpc2 within the same execution (no network retry round).
-	assert.Equal(t, 1, resp.Attempts())
+	// rpc1's invalid block response still counts as an upstream attempt.
+	assert.Equal(t, 2, resp.Attempts())
 	assert.Equal(t, 0, resp.Retries())
 	assert.Equal(t, "rpc2", resp.UpstreamId())
 

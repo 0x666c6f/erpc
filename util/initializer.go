@@ -132,7 +132,8 @@ func (t *BootstrapTask) Wait(ctx context.Context) error {
 				if TaskState(t.state.Load()) == TaskFailed {
 					wr, _ := t.lastErr.Load().(wrappedError)
 					if wr.err == nil {
-						t.lastErr.Store(wrappedError{err: errors.New("task failed without specific error")})
+						wr.err = errors.New("task failed without specific error")
+						t.lastErr.Store(wr)
 					}
 					return wr.err
 				}
@@ -233,8 +234,10 @@ func (i *Initializer) waitForTasks(ctx context.Context, tasks ...*BootstrapTask)
 		}
 		// If task is failed, record that error
 		state := TaskState(task.state.Load())
-		if state == TaskFailed && task.Error() != nil {
-			errs = append(errs, task.Error().Err)
+		if state == TaskFailed {
+			if taskErr := task.Error(); taskErr != nil && taskErr.Err != nil {
+				errs = append(errs, taskErr.Err)
+			}
 		}
 	}
 	if len(errs) > 0 {
@@ -404,8 +407,8 @@ func (i *Initializer) Errors() error {
 	var errs []error
 	i.tasks.Range(func(key, value interface{}) bool {
 		t := value.(*BootstrapTask)
-		if t.Error() != nil {
-			errs = append(errs, t.Error().Err)
+		if taskErr := t.Error(); taskErr != nil && taskErr.Err != nil {
+			errs = append(errs, taskErr.Err)
 		}
 		return true
 	})

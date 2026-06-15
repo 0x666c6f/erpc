@@ -542,6 +542,9 @@ func (e *networkExecutor) runHedge(
 			return inner(ctx, req)
 		}
 	}
+	if e.shouldSuppressStableFinalizedHedge(ctx, req) {
+		return inner(ctx, req)
+	}
 
 	// Hedge delay is the unified AdaptiveDuration — scalar Base for fixed
 	// delays, Quantile for adaptive timing, Min/Max for floor/ceiling.
@@ -652,4 +655,43 @@ func (e *networkExecutor) runHedge(
 	return failsafe.RunHedged[*common.NormalizedResponse](
 		ctx, e.cfg.Hedge.MaxCount, delayFn, wrapInner, keep, release, hooks,
 	)
+}
+
+func (e *networkExecutor) shouldSuppressStableFinalizedHedge(ctx context.Context, req *common.NormalizedRequest) bool {
+	if e == nil || e.cfg == nil || e.cfg.Hedge == nil || e.cfg.Hedge.Delay == nil || req == nil {
+		return false
+	}
+	if req.Finality(ctx) != common.DataFinalityStateFinalized {
+		return false
+	}
+	method, _ := req.Method()
+	if !isStableFinalizedPointRead(method) {
+		return false
+	}
+	ntw := req.Network()
+	if ntw == nil {
+		return false
+	}
+	mt := ntw.GetMethodMetrics(method)
+	if mt == nil || mt.GetResponseQuantiles() == nil {
+		return false
+	}
+	p70 := mt.GetResponseQuantiles().GetQuantile(0.70)
+	if p70 <= 0 {
+		return false
+	}
+	delay := e.cfg.Hedge.Delay.ResolveForRequest(req)
+	return delay > 0 && p70 < delay
+}
+
+func isStableFinalizedPointRead(method string) bool {
+	switch method {
+	case "eth_getBalance",
+		"eth_getCode",
+		"eth_getStorageAt",
+		"eth_getTransactionCount":
+		return true
+	default:
+		return false
+	}
 }

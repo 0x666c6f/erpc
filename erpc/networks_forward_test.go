@@ -533,6 +533,9 @@ func TestNetwork_Forward_BatchSelectionCacheReuse(t *testing.T) {
 		method string,
 	) ([]common.Upstream, error) {
 		getSortedCalls.Add(1)
+		if origGetSorted == nil {
+			return defaultGetSortedUpstreamsForNetwork(ctx, registry, networkID, method)
+		}
 		return origGetSorted(ctx, registry, networkID, method)
 	}
 	defer func() {

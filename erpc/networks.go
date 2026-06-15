@@ -463,14 +463,15 @@ func (n *Network) Bootstrap(ctx context.Context) error {
 	if n.policyEngine == nil {
 		return nil
 	}
-	cfg := n.cfg.SelectionPolicy
-	if cfg == nil {
-		cfg = &common.SelectionPolicyConfig{}
-		n.cfg.SelectionPolicy = cfg
+	cfg := &common.SelectionPolicyConfig{}
+	if n.cfg.SelectionPolicy != nil {
+		copied := *n.cfg.SelectionPolicy
+		cfg = &copied
 	}
 	// Defensive: callers may have set Eval but skipped SetDefaults (common
 	// in tests that build Config as Go struct literals). Compile here so
-	// the engine never sees a nil program.
+	// the engine never sees a nil program. Work on a private copy so admin
+	// config reads never race with bootstrap defaults/compilation.
 	if cfg.CompiledProgram == nil {
 		if err := cfg.SetDefaults(); err != nil {
 			return fmt.Errorf("selectionPolicy SetDefaults: %w", err)
@@ -1311,12 +1312,29 @@ func (n *Network) Forward(ctx context.Context, req *common.NormalizedRequest) (*
 	upstreamGroup := failsafeExecutor.MatchUpstreamGroup()
 
 	loadUpstreams := func() ([]common.Upstream, error) {
-		_, upstreamSpan := common.StartDetailSpan(ctx, "GetSortedUpstreams")
-		getSortedUpstreams := n.getSortedUpstreamsFn
-		if getSortedUpstreams == nil {
-			getSortedUpstreams = defaultGetSortedUpstreamsForNetwork
+		_, upstreamSpan := common.StartDetailSpan(ctx, "PolicyEngine.GetOrdered")
+		var upsList []common.Upstream
+		var err error
+		if n.getSortedUpstreamsFn != nil {
+			upsList, err = n.getSortedUpstreamsFn(ctx, n.upstreamsRegistry, n.networkId, method)
+		} else if useUpstreamDirective != "" {
+			// Explicit targeting is an operator/debug override. Use the raw
+			// registry order so a policy-excluded upstream can still be selected.
+			upsList, err = defaultGetSortedUpstreamsForNetwork(ctx, n.upstreamsRegistry, n.networkId, method)
+		} else if n.policyEngine != nil {
+			// Pass the request's actual finality so per-finality slots
+			// resolve to the bucket-specific ordering. Networks not
+			// configured per-finality resolve to the wildcard slot.
+			finality := req.Finality(ctx).String()
+			upsList = n.policyEngine.GetOrdered(n.networkId, method, finality)
+			if len(upsList) == 0 && n.policyEngine.LastEvalAt(n.networkId, method, finality).IsZero() {
+				// Cold-start fallback only: serve registry order until the
+				// policy slot publishes its first cache for this bucket.
+				upsList, err = defaultGetSortedUpstreamsForNetwork(ctx, n.upstreamsRegistry, n.networkId, method)
+			}
+		} else {
+			upsList, err = defaultGetSortedUpstreamsForNetwork(ctx, n.upstreamsRegistry, n.networkId, method)
 		}
-		upsList, err := getSortedUpstreams(ctx, n.upstreamsRegistry, n.networkId, method)
 		upstreamSpan.SetAttributes(attribute.Int("upstreams.count", len(upsList)))
 		if common.IsTracingDetailed {
 			names := make([]string, len(upsList))
@@ -1331,6 +1349,11 @@ func (n *Network) Forward(ctx context.Context, req *common.NormalizedRequest) (*
 
 		if err != nil {
 			return nil, err
+		}
+
+		if eligible, dropped := filterMethodEligible(upsList, method); dropped > 0 && len(eligible) > 0 {
+			upstreamSpan.SetAttributes(attribute.Int("upstreams.method_ineligible", dropped))
+			upsList = eligible
 		}
 
 		// Filter upstreams by group if the failsafe executor specifies a group.
@@ -1407,6 +1430,14 @@ func (n *Network) Forward(ctx context.Context, req *common.NormalizedRequest) (*
 		)
 	} else {
 		upsList, err = loadUpstreams()
+	}
+
+	if err != nil {
+		common.SetTraceSpanError(forwardSpan, err)
+		if mlx != nil {
+			mlx.Close(ctx, nil, err)
+		}
+		return nil, err
 	}
 
 	if len(upsList) == 0 {

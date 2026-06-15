@@ -56,6 +56,22 @@ func TestInitializer_SingleTaskImmediateFailureNoRetry(t *testing.T) {
 	assert.Equal(t, expectedErr, task.Error().Err)
 }
 
+func TestInitializer_ErrorsUsesTaskErrorSnapshot(t *testing.T) {
+	appCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	init := setupInitializer(t, appCtx, nil)
+	defer init.Stop(nil)
+
+	expectedErr := errors.New("snapshot failure")
+	task := NewBootstrapTask("failed", func(ctx context.Context) error { return expectedErr })
+	task.state.Store(int32(TaskFailed))
+	task.lastAttempt.Store(time.Now())
+	task.lastErr.Store(wrappedError{err: expectedErr})
+	init.tasks.Store(task.Name, task)
+
+	require.ErrorIs(t, init.Errors(), expectedErr)
+}
+
 func TestInitializer_SingleTaskFailureWithRetryNeverSucceeds(t *testing.T) {
 	appCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -347,9 +363,9 @@ func TestInitializer_MultipleRapidFailures(t *testing.T) {
 	defer cancel()
 	init := setupInitializer(t, appCtx, conf)
 
-	var attempts int
+	var attempts atomic.Int32
 	task := NewBootstrapTask("quick-failer", func(ctx context.Context) error {
-		attempts++
+		attempts.Add(1)
 		// Fail quickly:
 		return errors.New("keep failing")
 	})
@@ -366,15 +382,14 @@ func TestInitializer_MultipleRapidFailures(t *testing.T) {
 	require.Error(t, err, "task should eventually fail or context should time out")
 
 	// Check we tried multiple times (rapidly)
-	assert.True(t, attempts > 1, "should attempt multiple times in quick succession")
+	require.Eventually(t, func() bool {
+		return attempts.Load() > 1
+	}, time.Millisecond*300, time.Millisecond*10, "should attempt multiple times in quick succession")
 
-	// Check final State is either partial or failed
+	// During active auto-retry the snapshot may be either failed (between
+	// attempts) or retrying (next attempt already running).
 	state := init.State()
-	assert.True(
-		t,
-		state == StateFailed,
-		"final state should reflect the repeated failures, got %v", state,
-	)
+	assert.Contains(t, []InitializationState{StateFailed, StateRetrying}, state)
 
 	init.Stop(nil)
 }

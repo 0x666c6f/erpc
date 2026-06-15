@@ -112,6 +112,28 @@ func defaultQueryShimUpstreamConfig() *common.EvmUpstreamConfig {
 	}
 }
 
+func mockQueryBlockByNumber(blockNum, hash, parentHash string) {
+	gock.New("http://rpc1.localhost").
+		Post("").
+		Persist().
+		Filter(func(request *http.Request) bool {
+			body := util.SafeReadBody(request)
+			return strings.Contains(body, "eth_getBlockByNumber") &&
+				strings.Contains(body, blockNum) &&
+				!strings.Contains(body, "latest") &&
+				!strings.Contains(body, "finalized")
+		}).
+		Reply(200).
+		JSON(map[string]interface{}{
+			"jsonrpc": "2.0", "id": 1,
+			"result": map[string]interface{}{
+				"number": blockNum, "hash": hash, "parentHash": parentHash,
+				"timestamp": "0x100", "gasUsed": "0x0", "gasLimit": "0x7a120",
+				"transactions": []interface{}{},
+			},
+		})
+}
+
 func TestNetworkQuery_QueryBlocks_ShimDecomposesToGetBlockByNumber(t *testing.T) {
 	util.ResetGock()
 	defer util.ResetGock()
@@ -242,7 +264,7 @@ func TestNetworkQuery_QueryLogs_ForwardsFilterToEthGetLogs(t *testing.T) {
 	util.ResetGock()
 	defer util.ResetGock()
 	util.SetupMocksForEvmStatePoller()
-	defer util.AssertNoPendingMocks(t, 1)
+	defer util.AssertNoPendingMocks(t, 2)
 
 	gock.New("http://rpc1.localhost").
 		Post("").
@@ -269,24 +291,8 @@ func TestNetworkQuery_QueryLogs_ForwardsFilterToEthGetLogs(t *testing.T) {
 			},
 		})
 
-	gock.New("http://rpc1.localhost").
-		Post("").
-		Persist().
-		Filter(func(request *http.Request) bool {
-			body := util.SafeReadBody(request)
-			return strings.Contains(body, "eth_getBlockByNumber") &&
-				(strings.Contains(body, "0x64") || strings.Contains(body, "0x65")) &&
-				!strings.Contains(body, "latest") && !strings.Contains(body, "finalized")
-		}).
-		Reply(200).
-		JSON(map[string]interface{}{
-			"jsonrpc": "2.0", "id": 1,
-			"result": map[string]interface{}{
-				"number": "0x64", "hash": "0xb001", "parentHash": "0xb000",
-				"timestamp": "0x100", "gasUsed": "0x0", "gasLimit": "0x7a120",
-				"transactions": []interface{}{},
-			},
-		})
+	mockQueryBlockByNumber("0x64", "0xb001", "0xb000")
+	mockQueryBlockByNumber("0x65", "0xb002", "0xb001")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -570,7 +576,7 @@ func TestNetworkQuery_QueryLogs_DescOrderReversesResults(t *testing.T) {
 	util.ResetGock()
 	defer util.ResetGock()
 	util.SetupMocksForEvmStatePoller()
-	defer util.AssertNoPendingMocks(t, 1)
+	defer util.AssertNoPendingMocks(t, 2)
 
 	gock.New("http://rpc1.localhost").
 		Post("").
@@ -595,24 +601,8 @@ func TestNetworkQuery_QueryLogs_DescOrderReversesResults(t *testing.T) {
 			},
 		})
 
-	gock.New("http://rpc1.localhost").
-		Post("").
-		Persist().
-		Filter(func(request *http.Request) bool {
-			body := util.SafeReadBody(request)
-			return strings.Contains(body, "eth_getBlockByNumber") &&
-				(strings.Contains(body, "0xc8") || strings.Contains(body, "0xc9")) &&
-				!strings.Contains(body, "latest") && !strings.Contains(body, "finalized")
-		}).
-		Reply(200).
-		JSON(map[string]interface{}{
-			"jsonrpc": "2.0", "id": 1,
-			"result": map[string]interface{}{
-				"number": "0xc9", "hash": "0xb002", "parentHash": "0xb001",
-				"timestamp": "0x101", "gasUsed": "0x0", "gasLimit": "0x7a120",
-				"transactions": []interface{}{},
-			},
-		})
+	mockQueryBlockByNumber("0xc8", "0xb001", "0xb000")
+	mockQueryBlockByNumber("0xc9", "0xb002", "0xb001")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

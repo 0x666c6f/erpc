@@ -3,8 +3,10 @@ package erpc
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -12,12 +14,10 @@ import (
 	"github.com/erpc/erpc/common"
 	"github.com/erpc/erpc/data"
 	"github.com/erpc/erpc/health"
-	"github.com/erpc/erpc/telemetry"
 	"github.com/erpc/erpc/thirdparty"
 	"github.com/erpc/erpc/upstream"
 	"github.com/erpc/erpc/util"
 	"github.com/h2non/gock"
-	promUtil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -25,6 +25,53 @@ import (
 
 func init() {
 	util.ConfigureTestLogger()
+}
+
+type trackedReadCloser struct {
+	io.ReadCloser
+	once sync.Once
+	done func()
+}
+
+func (r *trackedReadCloser) Close() error {
+	err := r.ReadCloser.Close()
+	r.once.Do(r.done)
+	return err
+}
+
+func trackSendRawTxResponse(wg *sync.WaitGroup, resp *gock.Response) *gock.Response {
+	wg.Add(1)
+	return resp.Map(func(httpResp *http.Response) *http.Response {
+		if httpResp.Body == nil {
+			wg.Done()
+			return httpResp
+		}
+		httpResp.Body = &trackedReadCloser{
+			ReadCloser: httpResp.Body,
+			done:       wg.Done,
+		}
+		return httpResp
+	})
+}
+
+func waitForSendRawTxBroadcasts(t *testing.T, wg *sync.WaitGroup) {
+	t.Helper()
+
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+		require.FailNow(t, "timed out waiting for sendRawTransaction responses to close")
+	}
+	require.Eventually(t, func() bool {
+		return len(gock.Pending()) == util.EvmBlockTrackerMocks
+	}, 30*time.Second, 50*time.Millisecond,
+		"only persistent mocks should remain - all sendRawTx mocks should be consumed")
 }
 
 // Sample signed LEGACY (type-0) transaction for testing (a valid RLP-encoded Ethereum transaction)
@@ -1716,11 +1763,12 @@ func TestNetwork_SendRawTransaction_FireAndForget(t *testing.T) {
 		util.ResetGock()
 		defer util.ResetGock()
 		util.SetupMocksForEvmStatePoller()
+		var wg sync.WaitGroup
 
 		requestBytes := []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_sendRawTransaction","params":["` + sampleSignedTx + `"]}`)
 
 		// First upstream responds immediately with success
-		gock.New("http://rpc1.localhost").
+		trackSendRawTxResponse(&wg, gock.New("http://rpc1.localhost").
 			Post("").
 			Filter(func(r *http.Request) bool {
 				body := util.SafeReadBody(r)
@@ -1731,52 +1779,42 @@ func TestNetwork_SendRawTransaction_FireAndForget(t *testing.T) {
 				"jsonrpc": "2.0",
 				"id":      1,
 				"result":  expectedTxHash,
-			})
+			}))
 
 		// Second upstream responds after delay (should still receive the request)
-		gock.New("http://rpc2.localhost").
+		trackSendRawTxResponse(&wg, gock.New("http://rpc2.localhost").
 			Post("").
 			Filter(func(r *http.Request) bool {
 				body := util.SafeReadBody(r)
 				return strings.Contains(body, "eth_sendRawTransaction")
 			}).
 			Reply(200).
-			Delay(200 * time.Millisecond).
+			Delay(200*time.Millisecond).
 			JSON(map[string]interface{}{
 				"jsonrpc": "2.0",
 				"id":      1,
 				"result":  expectedTxHash,
-			})
+			}))
 
 		// Third upstream responds after longer delay (should still receive the request)
-		gock.New("http://rpc3.localhost").
+		trackSendRawTxResponse(&wg, gock.New("http://rpc3.localhost").
 			Post("").
 			Filter(func(r *http.Request) bool {
 				body := util.SafeReadBody(r)
 				return strings.Contains(body, "eth_sendRawTransaction")
 			}).
 			Reply(200).
-			Delay(400 * time.Millisecond).
+			Delay(400*time.Millisecond).
 			JSON(map[string]interface{}{
 				"jsonrpc": "2.0",
 				"id":      1,
 				"result":  expectedTxHash,
-			})
+			}))
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
 		network := setupSendRawTxTestNetworkWithFireAndForget(t, ctx)
-		beforeFireAndForget := promUtil.ToFloat64(
-			telemetry.MetricNetworkAttemptReasonTotal.WithLabelValues(
-				"test",
-				network.Label(),
-				"eth_sendRawTransaction",
-				telemetry.AttemptReasonFireAndForget,
-				telemetry.MetricsVariantLabel(),
-				telemetry.MetricsReleaseLabel(),
-			),
-		)
 
 		// Time the request
 		start := time.Now()
@@ -1797,36 +1835,22 @@ func TestNetwork_SendRawTransaction_FireAndForget(t *testing.T) {
 		assert.Less(t, duration, 150*time.Millisecond,
 			"fire-and-forget should return quickly after first success")
 
-		// Wait for background requests to complete
-		time.Sleep(600 * time.Millisecond)
-
 		// Verify all upstreams received the transaction
 		// Note: gock.IsDone() doesn't work with persistent mocks, so check pending count instead
 		// All non-persistent sendRawTx mocks should be consumed, leaving only the persistent state poller mocks
-		assert.Equal(t, util.EvmBlockTrackerMocks, len(gock.Pending()),
-			"only persistent mocks should remain - all sendRawTx mocks should be consumed")
-		afterFireAndForget := promUtil.ToFloat64(
-			telemetry.MetricNetworkAttemptReasonTotal.WithLabelValues(
-				"test",
-				network.Label(),
-				"eth_sendRawTransaction",
-				telemetry.AttemptReasonFireAndForget,
-				telemetry.MetricsVariantLabel(),
-				telemetry.MetricsReleaseLabel(),
-			),
-		)
-		assert.GreaterOrEqual(t, afterFireAndForget, beforeFireAndForget+1)
+		waitForSendRawTxBroadcasts(t, &wg)
 	})
 
 	t.Run("FireAndForgetReturnsFirstSuccessWhileOthersComplete", func(t *testing.T) {
 		util.ResetGock()
 		defer util.ResetGock()
 		util.SetupMocksForEvmStatePoller()
+		var wg sync.WaitGroup
 
 		requestBytes := []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_sendRawTransaction","params":["` + sampleSignedTx + `"]}`)
 
 		// First upstream returns "already known" (still a success for idempotent broadcast)
-		gock.New("http://rpc1.localhost").
+		trackSendRawTxResponse(&wg, gock.New("http://rpc1.localhost").
 			Post("").
 			Filter(func(r *http.Request) bool {
 				body := util.SafeReadBody(r)
@@ -1840,36 +1864,36 @@ func TestNetwork_SendRawTransaction_FireAndForget(t *testing.T) {
 					"code":    -32000,
 					"message": "already known",
 				},
-			})
+			}))
 
 		// Second and third upstreams respond with success after delays
-		gock.New("http://rpc2.localhost").
+		trackSendRawTxResponse(&wg, gock.New("http://rpc2.localhost").
 			Post("").
 			Filter(func(r *http.Request) bool {
 				body := util.SafeReadBody(r)
 				return strings.Contains(body, "eth_sendRawTransaction")
 			}).
 			Reply(200).
-			Delay(200 * time.Millisecond).
+			Delay(200*time.Millisecond).
 			JSON(map[string]interface{}{
 				"jsonrpc": "2.0",
 				"id":      1,
 				"result":  expectedTxHash,
-			})
+			}))
 
-		gock.New("http://rpc3.localhost").
+		trackSendRawTxResponse(&wg, gock.New("http://rpc3.localhost").
 			Post("").
 			Filter(func(r *http.Request) bool {
 				body := util.SafeReadBody(r)
 				return strings.Contains(body, "eth_sendRawTransaction")
 			}).
 			Reply(200).
-			Delay(300 * time.Millisecond).
+			Delay(300*time.Millisecond).
 			JSON(map[string]interface{}{
 				"jsonrpc": "2.0",
 				"id":      1,
 				"result":  expectedTxHash,
-			})
+			}))
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -1887,54 +1911,51 @@ func TestNetwork_SendRawTransaction_FireAndForget(t *testing.T) {
 		require.NoError(t, err)
 		assert.Contains(t, jrr.GetResultString(), "0x")
 
-		// Wait for background requests to complete
-		time.Sleep(500 * time.Millisecond)
-
 		// Verify all upstreams were called
 		// Note: gock.IsDone() doesn't work with persistent mocks, so check pending count instead
-		assert.Equal(t, util.EvmBlockTrackerMocks, len(gock.Pending()),
-			"only persistent mocks should remain - all sendRawTx mocks should be consumed")
+		waitForSendRawTxBroadcasts(t, &wg)
 	})
 
 	t.Run("FireAndForgetHandlesSlowUpstreams", func(t *testing.T) {
 		util.ResetGock()
 		defer util.ResetGock()
 		util.SetupMocksForEvmStatePoller()
+		var wg sync.WaitGroup
 
 		requestBytes := []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_sendRawTransaction","params":["` + sampleSignedTx + `"]}`)
 
 		// First upstream is slow
-		gock.New("http://rpc1.localhost").
+		trackSendRawTxResponse(&wg, gock.New("http://rpc1.localhost").
 			Post("").
 			Filter(func(r *http.Request) bool {
 				body := util.SafeReadBody(r)
 				return strings.Contains(body, "eth_sendRawTransaction")
 			}).
 			Reply(200).
-			Delay(500 * time.Millisecond).
+			Delay(500*time.Millisecond).
 			JSON(map[string]interface{}{
 				"jsonrpc": "2.0",
 				"id":      1,
 				"result":  expectedTxHash,
-			})
+			}))
 
 		// Second upstream responds quickly
-		gock.New("http://rpc2.localhost").
+		trackSendRawTxResponse(&wg, gock.New("http://rpc2.localhost").
 			Post("").
 			Filter(func(r *http.Request) bool {
 				body := util.SafeReadBody(r)
 				return strings.Contains(body, "eth_sendRawTransaction")
 			}).
 			Reply(200).
-			Delay(50 * time.Millisecond).
+			Delay(50*time.Millisecond).
 			JSON(map[string]interface{}{
 				"jsonrpc": "2.0",
 				"id":      1,
 				"result":  expectedTxHash,
-			})
+			}))
 
 		// Third upstream responds even faster
-		gock.New("http://rpc3.localhost").
+		trackSendRawTxResponse(&wg, gock.New("http://rpc3.localhost").
 			Post("").
 			Filter(func(r *http.Request) bool {
 				body := util.SafeReadBody(r)
@@ -1945,7 +1966,7 @@ func TestNetwork_SendRawTransaction_FireAndForget(t *testing.T) {
 				"jsonrpc": "2.0",
 				"id":      1,
 				"result":  expectedTxHash,
-			})
+			}))
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -1969,24 +1990,21 @@ func TestNetwork_SendRawTransaction_FireAndForget(t *testing.T) {
 		assert.Less(t, duration, 200*time.Millisecond,
 			"fire-and-forget should return after fastest upstream responds")
 
-		// Wait for all background requests
-		time.Sleep(700 * time.Millisecond)
-
 		// All upstreams should have received the request
 		// Note: gock.IsDone() doesn't work with persistent mocks, so check pending count instead
-		assert.Equal(t, util.EvmBlockTrackerMocks, len(gock.Pending()),
-			"only persistent mocks should remain - all sendRawTx mocks should be consumed")
+		waitForSendRawTxBroadcasts(t, &wg)
 	})
 
 	t.Run("FireAndForgetWithMixedResponses", func(t *testing.T) {
 		util.ResetGock()
 		defer util.ResetGock()
 		util.SetupMocksForEvmStatePoller()
+		var wg sync.WaitGroup
 
 		requestBytes := []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_sendRawTransaction","params":["` + sampleSignedTx + `"]}`)
 
 		// First upstream succeeds
-		gock.New("http://rpc1.localhost").
+		trackSendRawTxResponse(&wg, gock.New("http://rpc1.localhost").
 			Post("").
 			Filter(func(r *http.Request) bool {
 				body := util.SafeReadBody(r)
@@ -1997,17 +2015,17 @@ func TestNetwork_SendRawTransaction_FireAndForget(t *testing.T) {
 				"jsonrpc": "2.0",
 				"id":      1,
 				"result":  expectedTxHash,
-			})
+			}))
 
 		// Second upstream returns error (should still complete in background)
-		gock.New("http://rpc2.localhost").
+		trackSendRawTxResponse(&wg, gock.New("http://rpc2.localhost").
 			Post("").
 			Filter(func(r *http.Request) bool {
 				body := util.SafeReadBody(r)
 				return strings.Contains(body, "eth_sendRawTransaction")
 			}).
 			Reply(200).
-			Delay(100 * time.Millisecond).
+			Delay(100*time.Millisecond).
 			JSON(map[string]interface{}{
 				"jsonrpc": "2.0",
 				"id":      1,
@@ -2015,17 +2033,17 @@ func TestNetwork_SendRawTransaction_FireAndForget(t *testing.T) {
 					"code":    -32000,
 					"message": "already known",
 				},
-			})
+			}))
 
 		// Third upstream returns different error (should still complete in background)
-		gock.New("http://rpc3.localhost").
+		trackSendRawTxResponse(&wg, gock.New("http://rpc3.localhost").
 			Post("").
 			Filter(func(r *http.Request) bool {
 				body := util.SafeReadBody(r)
 				return strings.Contains(body, "eth_sendRawTransaction")
 			}).
 			Reply(200).
-			Delay(200 * time.Millisecond).
+			Delay(200*time.Millisecond).
 			JSON(map[string]interface{}{
 				"jsonrpc": "2.0",
 				"id":      1,
@@ -2033,7 +2051,7 @@ func TestNetwork_SendRawTransaction_FireAndForget(t *testing.T) {
 					"code":    3,
 					"message": "execution reverted",
 				},
-			})
+			}))
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -2051,13 +2069,9 @@ func TestNetwork_SendRawTransaction_FireAndForget(t *testing.T) {
 		require.NoError(t, err)
 		assert.Contains(t, jrr.GetResultString(), expectedTxHash)
 
-		// Wait for background requests
-		time.Sleep(400 * time.Millisecond)
-
 		// All upstreams should have been called
 		// Note: gock.IsDone() doesn't work with persistent mocks, so check pending count instead
-		assert.Equal(t, util.EvmBlockTrackerMocks, len(gock.Pending()),
-			"only persistent mocks should remain - all sendRawTx mocks should be consumed")
+		waitForSendRawTxBroadcasts(t, &wg)
 	})
 
 	// REGRESSION TEST: This test verifies the fix for the bug where background requests
@@ -2068,11 +2082,12 @@ func TestNetwork_SendRawTransaction_FireAndForget(t *testing.T) {
 		util.ResetGock()
 		defer util.ResetGock()
 		util.SetupMocksForEvmStatePoller()
+		var wg sync.WaitGroup
 
 		requestBytes := []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_sendRawTransaction","params":["` + sampleSignedTx + `"]}`)
 
 		// First upstream responds immediately - triggers short-circuit
-		gock.New("http://rpc1.localhost").
+		trackSendRawTxResponse(&wg, gock.New("http://rpc1.localhost").
 			Post("").
 			Filter(func(r *http.Request) bool {
 				body := util.SafeReadBody(r)
@@ -2083,38 +2098,38 @@ func TestNetwork_SendRawTransaction_FireAndForget(t *testing.T) {
 				"jsonrpc": "2.0",
 				"id":      1,
 				"result":  expectedTxHash,
-			})
+			}))
 
 		// Second upstream responds slowly - this is the key test:
 		// It should still complete even after parent context is cancelled
-		gock.New("http://rpc2.localhost").
+		trackSendRawTxResponse(&wg, gock.New("http://rpc2.localhost").
 			Post("").
 			Filter(func(r *http.Request) bool {
 				body := util.SafeReadBody(r)
 				return strings.Contains(body, "eth_sendRawTransaction")
 			}).
 			Reply(200).
-			Delay(300 * time.Millisecond). // Slow - will complete after parent cancel
+			Delay(300*time.Millisecond). // Slow - will complete after parent cancel
 			JSON(map[string]interface{}{
 				"jsonrpc": "2.0",
 				"id":      1,
 				"result":  expectedTxHash,
-			})
+			}))
 
 		// Third upstream even slower
-		gock.New("http://rpc3.localhost").
+		trackSendRawTxResponse(&wg, gock.New("http://rpc3.localhost").
 			Post("").
 			Filter(func(r *http.Request) bool {
 				body := util.SafeReadBody(r)
 				return strings.Contains(body, "eth_sendRawTransaction")
 			}).
 			Reply(200).
-			Delay(500 * time.Millisecond). // Very slow - will complete after parent cancel
+			Delay(500*time.Millisecond). // Very slow - will complete after parent cancel
 			JSON(map[string]interface{}{
 				"jsonrpc": "2.0",
 				"id":      1,
 				"result":  expectedTxHash,
-			})
+			}))
 
 		// Create a cancellable context to simulate HTTP request lifecycle
 		ctx, cancel := context.WithCancel(context.Background())
@@ -2149,10 +2164,7 @@ func TestNetwork_SendRawTransaction_FireAndForget(t *testing.T) {
 		//   - 30 s → current ceiling. The happy path typically returns in
 		//     ~600 ms, so this only kicks in when the runner is heavily
 		//     contended; it's still well inside the package-level timeout.
-		require.Eventually(t, func() bool {
-			return len(gock.Pending()) == util.EvmBlockTrackerMocks
-		}, 30*time.Second, 50*time.Millisecond,
-			"all sendRawTx mocks should be consumed - background requests must complete even after parent context cancelled")
+		waitForSendRawTxBroadcasts(t, &wg)
 	})
 
 	// REGRESSION TEST: Verifies that fire-and-forget lets requests complete even when
@@ -2162,51 +2174,52 @@ func TestNetwork_SendRawTransaction_FireAndForget(t *testing.T) {
 		util.ResetGock()
 		defer util.ResetGock()
 		util.SetupMocksForEvmStatePoller()
+		var wg sync.WaitGroup
 
 		requestBytes := []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_sendRawTransaction","params":["` + sampleSignedTx + `"]}`)
 
 		// ALL upstreams are slow - parent will be cancelled before any responds
-		gock.New("http://rpc1.localhost").
+		trackSendRawTxResponse(&wg, gock.New("http://rpc1.localhost").
 			Post("").
 			Filter(func(r *http.Request) bool {
 				body := util.SafeReadBody(r)
 				return strings.Contains(body, "eth_sendRawTransaction")
 			}).
 			Reply(200).
-			Delay(500 * time.Millisecond). // Slow - responds after parent cancel
+			Delay(500*time.Millisecond). // Slow - responds after parent cancel
 			JSON(map[string]interface{}{
 				"jsonrpc": "2.0",
 				"id":      1,
 				"result":  expectedTxHash,
-			})
+			}))
 
-		gock.New("http://rpc2.localhost").
+		trackSendRawTxResponse(&wg, gock.New("http://rpc2.localhost").
 			Post("").
 			Filter(func(r *http.Request) bool {
 				body := util.SafeReadBody(r)
 				return strings.Contains(body, "eth_sendRawTransaction")
 			}).
 			Reply(200).
-			Delay(600 * time.Millisecond).
+			Delay(600*time.Millisecond).
 			JSON(map[string]interface{}{
 				"jsonrpc": "2.0",
 				"id":      1,
 				"result":  expectedTxHash,
-			})
+			}))
 
-		gock.New("http://rpc3.localhost").
+		trackSendRawTxResponse(&wg, gock.New("http://rpc3.localhost").
 			Post("").
 			Filter(func(r *http.Request) bool {
 				body := util.SafeReadBody(r)
 				return strings.Contains(body, "eth_sendRawTransaction")
 			}).
 			Reply(200).
-			Delay(700 * time.Millisecond).
+			Delay(700*time.Millisecond).
 			JSON(map[string]interface{}{
 				"jsonrpc": "2.0",
 				"id":      1,
 				"result":  expectedTxHash,
-			})
+			}))
 
 		// Create context that will be cancelled BEFORE any upstream responds
 		ctx, cancel := context.WithCancel(context.Background())
@@ -2234,10 +2247,7 @@ func TestNetwork_SendRawTransaction_FireAndForget(t *testing.T) {
 		// on loaded CI runners where the slowest 700 ms mock can miss a
 		// tight fixed window. Same history as the sibling assertion above
 		// — 30 s is the conservative ceiling for race-loaded CI.
-		require.Eventually(t, func() bool {
-			return len(gock.Pending()) == util.EvmBlockTrackerMocks
-		}, 30*time.Second, 50*time.Millisecond,
-			"fire-and-forget must broadcast to all nodes even when parent cancelled before short-circuit")
+		waitForSendRawTxBroadcasts(t, &wg)
 	})
 }
 

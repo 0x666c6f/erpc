@@ -14,21 +14,35 @@ import (
 )
 
 // mockGetBlockByNumberNonNull makes every listed upstream answer
-// eth_getBlockByNumber with a NON-null sentinel block (number 0x270f). The
-// future-block short-circuit, when it fires, never dispatches — so the caller
-// sees null. Asserting null vs. the sentinel cleanly distinguishes
+// eth_getBlockByNumber with a NON-null block matching the requested number.
+// The future-block short-circuit, when it fires, never dispatches — so the
+// caller sees null. Asserting null vs. the sentinel hash cleanly distinguishes
 // "short-circuited" from "dispatched". (eth_chainId is mocked by the setup
 // helper already.)
 func mockGetBlockByNumberNonNull(ids ...string) {
+	responses := []struct {
+		arg    string
+		number string
+	}{
+		{arg: `"0x64"`, number: "0x64"},
+		{arg: `"0x69"`, number: "0x69"},
+		{arg: `"latest"`, number: "0x270f"},
+	}
 	for _, id := range ids {
-		gock.New("http://" + id + ".localhost").
-			Post("").
-			Persist().
-			Filter(func(r *http.Request) bool {
-				return strings.Contains(util.SafeReadBody(r), "eth_getBlockByNumber")
-			}).
-			Reply(200).
-			JSON([]byte(`{"jsonrpc":"2.0","id":1,"result":{"number":"0x270f","hash":"0xabc"}}`))
+		for _, resp := range responses {
+			gock.New("http://" + id + ".localhost").
+				Post("").
+				Persist().
+				Filter(func(arg string) func(*http.Request) bool {
+					return func(r *http.Request) bool {
+						body := util.SafeReadBody(r)
+						return strings.Contains(body, "eth_getBlockByNumber") &&
+							strings.Contains(body, arg)
+					}
+				}(resp.arg)).
+				Reply(200).
+				JSON([]byte(`{"jsonrpc":"2.0","id":1,"result":{"number":"` + resp.number + `","hash":"0xabc"}}`))
+		}
 	}
 }
 
@@ -85,7 +99,7 @@ func TestForward_FutureBlock_AtMaxHead_Dispatches(t *testing.T) {
 	require.NotNil(t, resp)
 	jrr, err := resp.JsonRpcResponse(ctx)
 	require.NoError(t, err)
-	assert.Contains(t, jrr.GetResultString(), "0x270f",
+	assert.Contains(t, jrr.GetResultString(), "0xabc",
 		"block at the head must be dispatched (served from upstream), not short-circuited")
 }
 
@@ -113,7 +127,7 @@ func TestForward_FutureBlock_ServedTipDisabled_Dispatches(t *testing.T) {
 	require.NotNil(t, resp)
 	jrr, err := resp.JsonRpcResponse(ctx)
 	require.NoError(t, err)
-	assert.Contains(t, jrr.GetResultString(), "0x270f",
+	assert.Contains(t, jrr.GetResultString(), "0xabc",
 		"with served-tip disabled the short-circuit is off; request must dispatch")
 }
 
@@ -141,6 +155,6 @@ func TestForward_FutureBlock_LatestTag_Dispatches(t *testing.T) {
 	require.NotNil(t, resp)
 	jrr, err := resp.JsonRpcResponse(ctx)
 	require.NoError(t, err)
-	assert.Contains(t, jrr.GetResultString(), "0x270f",
+	assert.Contains(t, jrr.GetResultString(), "0xabc",
 		"latest tag has no concrete future number; must dispatch normally")
 }
