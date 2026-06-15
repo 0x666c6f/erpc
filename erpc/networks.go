@@ -1879,12 +1879,11 @@ func (n *Network) Forward(ctx context.Context, req *common.NormalizedRequest) (*
 			}
 		}
 
-		// Use the counters embedded earlier in the response
-		forwardSpan.SetAttributes(
-			attribute.Int("execution.attempts", int(resp.Attempts())),
-			attribute.Int("execution.retries", int(resp.Retries())),
-			attribute.Int("execution.hedges", int(resp.Hedges())),
-		)
+		// Per-request execution counters + full upstream-attempt trace.
+		// req.ExecState().Apply emits the standard execution.* attrs AND the
+		// upstreams.* slices (tried, outcomes, reasons, durations, won) so
+		// traces answer "who, what, why" without enumerating child spans.
+		req.ExecState().Apply(forwardSpan)
 
 		n.recordHedgeRaceOutcome(ctx, req, resp, method)
 	}

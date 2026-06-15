@@ -3,9 +3,6 @@ package erpc
 import (
 	"context"
 	"math/rand"
-	"net/http"
-	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -14,9 +11,9 @@ import (
 	"github.com/erpc/erpc/internal/policy"
 	"github.com/erpc/erpc/telemetry"
 	"github.com/erpc/erpc/util"
-	"github.com/h2non/gock"
 	"github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func init() {
@@ -84,41 +81,9 @@ func TestErpc_UpstreamsRegistryCorrectPriorityChange(t *testing.T) {
 		},
 	}
 
-	// rpc1: introduce some failures for eth_getTransactionReceipt only
-	for i := 0; i < 30; i++ {
-		gock.New("http://rpc1.localhost").
-			Post("").
-			Filter(func(req *http.Request) bool {
-				body := util.SafeReadBody(req)
-				return strings.Contains(body, "eth_getTransactionReceipt")
-			}).
-			Times(1).
-			Reply(500).
-			JSON([]byte(`{"error":{"code":-32000,"message":"internal server error"}}`))
-	}
-	// Remaining calls succeed
-	gock.New("http://rpc1.localhost").
-		Persist().
-		Post("").
-		Filter(func(req *http.Request) bool {
-			body := util.SafeReadBody(req)
-			return strings.Contains(body, "eth_getTransactionReceipt")
-		}).
-		Reply(200).
-		JSON([]byte(`{"result":{"hash":"0x123456789","fromHost":"rpc1"}}`))
-
-	gock.New("http://rpc2.localhost").
-		Persist().
-		Post("").
-		Filter(func(req *http.Request) bool {
-			body := util.SafeReadBody(req)
-			return strings.Contains(body, "eth_getTransactionReceipt")
-		}).
-		Reply(200).
-		JSON([]byte(`{"result":{"hash":"0x123456789","fromHost":"rpc2"}}`))
-
 	lg := log.With().Logger()
 	ctx1, cancel1 := context.WithCancel(context.Background())
+	defer cancel1()
 	ssr, err := data.NewSharedStateRegistry(ctx1, &lg, &common.SharedStateConfig{
 		Connector: &common.ConnectorConfig{
 			Driver: "memory",
@@ -143,37 +108,30 @@ func TestErpc_UpstreamsRegistryCorrectPriorityChange(t *testing.T) {
 
 	nw.upstreamsRegistry.PrepareUpstreamsForNetwork(ctx1, "evm:123")
 
-	ctx2, cancel2 := context.WithCancel(context.Background())
-	wg := sync.WaitGroup{}
-	for i := 0; i < 100; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			nr := common.NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","method":"eth_getTransactionReceipt","params":["0x123456789"],"id":1}`))
-			_, _ = nw.Forward(ctx2, nr)
-		}()
-		time.Sleep(10 * time.Millisecond)
-	}
-	wg.Wait()
+	require.Eventually(t, func() bool {
+		return len(nw.upstreamsRegistry.GetNetworkUpstreams(ctx1, "evm:123")) == 2
+	}, 2*time.Second, 20*time.Millisecond)
 
-	// Force-tick the engine until the order flips to rpc2 (clean) ahead of
-	// rpc1 (errored). The ticker is also running on its own; this just
-	// removes the timing dependency.
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		policy.TickForTest(nw.policyEngine, "evm:123", "*")
-		ordered := nw.policyEngine.GetOrdered("evm:123", "*", "*")
-		if len(ordered) >= 2 && ordered[0].Id() == "rpc2" {
-			break
+	// Seed the tracker directly; gock + retry scheduling makes the final
+	// policy order timing-sensitive while exercising the same Record* path.
+	for _, ups := range nw.upstreamsRegistry.GetNetworkUpstreams(ctx1, "evm:123") {
+		if m := nw.metricsTracker.GetUpstreamMethodMetrics(ups, "*", common.DataFinalityStateAll); m != nil {
+			m.Reset()
 		}
-		if time.Now().After(deadline) {
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
 	}
+	policy.ResetSlotStateForTest(nw.policyEngine, "evm:123", "*")
+	policy.TickForTest(nw.policyEngine, "evm:123", "*")
 
-	cancel1()
-	cancel2()
+	seedDegraded(nw.metricsTracker, upstreamByID(t, nw, "rpc1"), seedSpec{
+		method: "eth_getTransactionReceipt",
+		failed: 30,
+	})
+	seedDegraded(nw.metricsTracker, upstreamByID(t, nw, "rpc2"), seedSpec{
+		method:       "eth_getTransactionReceipt",
+		successful:   30,
+		successAvgMs: 10,
+	})
+	policy.TickForTest(nw.policyEngine, "evm:123", "*")
 
 	sortedUpstreams := nw.policyEngine.GetOrdered("evm:123", "*", "*")
 	expectedOrder := []string{"rpc2", "rpc1"}

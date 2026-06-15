@@ -291,6 +291,12 @@ func NewUpstreamsRegistry(
 			if onRegistered == nil {
 				onRegistered = v
 			}
+		default:
+			// The variadic interface{} reconciles two historical signatures;
+			// surface unrecognized args instead of silently dropping them.
+			logger.Warn().
+				Str("type", fmt.Sprintf("%T", v)).
+				Msg("NewUpstreamsRegistry: ignoring unrecognized extra argument (want time.Duration, *ScoringConfig, or func(*Upstream) error)")
 		}
 	}
 
@@ -344,6 +350,11 @@ func (u *UpstreamsRegistry) SetScoreMetricsMode(mode telemetry.ScoreMetricsMode)
 }
 
 func (u *UpstreamsRegistry) Bootstrap(ctx context.Context) {
+	// Drives score-based/rendezvous routing: without this the per-(network,method)
+	// sorted lists are never re-ranked and GetSortedUpstreams serves upstreams in
+	// static registration order. Self-gates on scoreRefreshInterval == 0.
+	u.scheduleScoreCalculationTimers(ctx)
+
 	// Fire-and-forget: register upstreams in background to avoid blocking service startup
 	go func() {
 		if err := u.registerUpstreams(u.appCtx, u.upsCfg...); err != nil {
@@ -628,12 +639,11 @@ func (u *UpstreamsRegistry) GetAllUpstreams() []*Upstream {
 	return u.allUpstreams
 }
 
-// GetSortedUpstreams returns the registered upstreams for `networkId`.
-//
-// Today this is a thin pass-through over `GetNetworkUpstreams` (raw
-// registration order). Phase 7 replaces it with a call into the policy
-// engine's per-(network, method) ordered list. The `method` argument is
-// currently ignored.
+// GetSortedUpstreams returns the per-(network, method) upstream list ordered by
+// the score-based/rendezvous routing computed by the refresh loop
+// (scheduleScoreCalculationTimers, started in Bootstrap). On first access for a
+// (network, method) pair the list is seeded in registration order and then
+// re-ranked on each refresh tick; availability filtering is always applied.
 func (u *UpstreamsRegistry) GetSortedUpstreams(ctx context.Context, networkId, method string) ([]common.Upstream, error) {
 	_, span := common.StartDetailSpan(ctx, "UpstreamsRegistry.GetSortedUpstreams")
 	defer span.End()

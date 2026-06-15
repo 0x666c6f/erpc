@@ -544,6 +544,21 @@ func (b *RateLimiterBudget) doLimitWithTimeout(
 			default:
 			}
 		}
+		// Observe remote-call duration split by outcome (ok / over-limit /
+		// fail-open). Without this only timeout/admission fail-opens were ever
+		// recorded, leaving the ok & over_limit histograms permanently empty.
+		dur := time.Since(start).Seconds()
+		if result.panicErr == nil {
+			if len(result.statuses) > 0 && result.statuses[0].Code == pb.RateLimitResponse_OVER_LIMIT {
+				if b.durationOverlimit != nil {
+					b.durationOverlimit.Observe(dur)
+				}
+			} else if b.durationOK != nil {
+				b.durationOK.Observe(dur)
+			}
+		} else if b.durationFailopen != nil {
+			b.durationFailopen.Observe(dur)
+		}
 		return result.statuses, false, false, result.panicErr
 
 	case <-timer.C:

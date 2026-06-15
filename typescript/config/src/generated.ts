@@ -24,7 +24,7 @@ import type {
  * clamped between min/max" semantics — currently consensus wait caps,
  * with timeout/hedge supporting it as an alternative entry-point.
  * Resolution rules:
- *   final = Base + adaptive
+ * 	final = Base + adaptive
  * where `adaptive` is:
  *   - `qt.GetQuantile(Quantile)` when Quantile > 0 and quantile data exists
  *   - `Min` (the floor) when Quantile > 0 but quantile data is cold (no
@@ -45,10 +45,6 @@ export interface AdaptiveDuration {
   quantile?: number /* float64 */;
   min?: Duration;
   max?: Duration;
-}
-export interface BlockTimeAdaptiveDuration {
-  fallback?: Duration;
-  blockTimeMultiplier?: number /* float64 */;
 }
 
 //////////
@@ -125,6 +121,32 @@ export interface BatchUpstreamSelectionKey {
   upstreamgroup: string;
 }
 export interface BatchUpstreamSelectionCache {
+}
+
+//////////
+// source: blocktime_adaptive_duration.go
+
+/**
+ * BlockTimeAdaptiveDuration is a duration that is either a fixed value or derived from the
+ * network's estimated block time. It's the reusable shape for knobs (e.g. cache
+ * TTLs) that should track each chain's cadence rather than a single constant.
+ * Wire format accepts a scalar shorthand or an object:
+ * 	ttl: 2s                                        # fixed
+ * 	ttl: { blockTimeMultiplier: 1 }                # blockTime * 1 (caller default until known)
+ * 	ttl: { blockTimeMultiplier: 1, fallback: 2s }  # with explicit cold-start fallback
+ * See Resolve for how the value is computed.
+ */
+export interface BlockTimeAdaptiveDuration {
+  /**
+   * Fallback is the fixed value. A scalar shorthand sets it directly; in object
+   * form it's the cold-start floor used until the block time is known.
+   */
+  fallback?: Duration;
+  /**
+   * BlockTimeMultiplier, when > 0, derives the value from the network's
+   * estimated block time (blockTime * multiplier).
+   */
+  blockTimeMultiplier?: number /* float64 */;
 }
 
 //////////
@@ -376,6 +398,13 @@ export interface CachePolicyConfig {
   appliesTo?: 'get' | 'set' | 'both';
   minItemSize?: ByteSize;
   maxItemSize?: ByteSize;
+  /**
+   * TTL is either a fixed duration ("2s") or, in object form, derived from the
+   * network's estimated block time ({ blockTimeMultiplier: 1, fallback: 2s }).
+   * For realtime finality the resolved value is the age limit; the fixed/
+   * fallback component is also used as the cache storage expiry. See
+   * BlockTimeAdaptiveDuration.
+   */
   ttl?: Duration | BlockTimeAdaptiveDuration;
 }
 export type ConnectorDriverType = string;
@@ -522,19 +551,9 @@ export interface ProjectConfig {
   forwardHeaders?: string[];
   ignoreMethods?: string[];
   allowMethods?: string[];
-  /**
-   * ScoreMetricsWindowSize is the tumbling window the per-upstream
-   * health tracker uses for its rolling counters (errorRate, p50/p70/
-   * p95 latency, throttledRate, misbehaviorRate). At each tick the
-   * counters reset and start re-accumulating, so this knob effectively
-   * controls how fast a degraded upstream's metrics start reflecting
-   * the new reality. Short windows (e.g. 30s) react quickly but give
-   * noisier ranking; long windows (5–10m) give stable averages but
-   * hide spikes for longer. Defaults to 10m when zero — production
-   * systems typically leave it default; the eRPC simulator overrides
-   * to 30s so knob changes show up in the UI within seconds.
-   */
-  scoreMetricsWindowSize?: Duration;
+}
+export interface DeprecatedProjectHealthCheckConfig {
+  scoreMetricsWindowSize: Duration;
 }
 /**
  * LegacyProjectFields collects the deprecated project-level scoring +
@@ -624,7 +643,6 @@ export interface UpstreamConfig {
   failsafe?: (FailsafeConfig | undefined)[];
   rateLimitBudget?: string;
   rateLimitAutoTune?: RateLimitAutoTuneConfig;
-  routing?: RoutingConfig;
   capabilities?: string[];
   shadow?: ShadowUpstreamConfig;
   /**
@@ -1221,14 +1239,6 @@ export interface EvmNetworkConfig {
   fallbackFinalityDepth?: number /* int64 */;
   fallbackStatePollerDebounce?: Duration;
   integrity?: EvmIntegrityConfig;
-  /**
-   * ServedTip configures how the network derives the "latest"/"finalized"
-   * block it advertises to clients (and enforces via block-availability).
-   * Nil or disabled selects the default max mode (MAX latest across eligible
-   * upstreams); set Enabled to opt into the cluster-min tip. See
-   * EvmServedTipConfig.
-   */
-  servedTip?: EvmServedTipConfig;
   getLogsMaxAllowedRange?: number /* int64 */;
   getLogsMaxAllowedAddresses?: number /* int64 */;
   getLogsMaxAllowedTopics?: number /* int64 */;
@@ -1310,11 +1320,42 @@ export interface EvmNetworkConfig {
    */
   idempotentTransactionBroadcast?: boolean;
   /**
+   * EmptyResultConfidence sets how confirmed a concrete numeric block must be for an
+   * empty/null point-lookup result to be treated as retryable missing-data.
+   */
+  emptyResultConfidence?: AvailbilityConfidence;
+  /**
    * Multicall3Aggregation configures aggregating eth_call requests into Multicall3.
    * Accepts either a boolean (backward compat) or a full config object.
    * Default: disabled; must be explicitly enabled.
    */
   multicall3Aggregation?: Multicall3AggregationConfig;
+  /**
+   * ServedTip configures how the network derives the "latest"/"finalized"
+   * block it advertises and enforces from its upstreams.
+   */
+  servedTip?: EvmServedTipConfig;
+}
+/**
+ * EvmServedTipConfig controls how the network derives the "latest"/"finalized"
+ * block it advertises from eligible upstreams.
+ */
+export interface EvmServedTipConfig {
+  /**
+   * EnabledFor lists the block tags whose served value uses the majority tip
+   * instead of max. Valid entries: "latest", "finalized", and "safe".
+   */
+  enabledFor?: string[];
+  /**
+   * Deprecated: ClusterDelta configured the former cluster-based picker and
+   * is ignored. Kept so existing configs keep parsing.
+   */
+  clusterDelta?: number /* int64 */;
+  /**
+   * GuaranteedMethods lists method patterns whose supporting-upstream subset
+   * must be able to serve the advertised latest.
+   */
+  guaranteedMethods?: string[];
 }
 /**
  * Multicall3AggregationConfig configures network-level batching of eth_call requests
@@ -1412,77 +1453,33 @@ export interface EvmIntegrityConfig {
   enforceNonNullTaggedBlocks?: boolean;
 }
 /**
- * EvalScope picks the grain at which the selection policy evaluates AND
- * at which the health tracker stores per-upstream metrics. One knob
- * covers what `evalPerMethod` + `evalPerFinality` used to cover as two
- * bools — and pulls the tracker's metric grain in lockstep so a
- * predicate like `errorRateAbove(0.5)` in a (method, finality)-grained
- * slot sees genuinely (method, finality)-specific error rate, not the
- * per-method aggregate.
- * Values are kebab-case strings so they round-trip through YAML / JSON
- * / Go enum literals cleanly. The TS SDK exports the same names in
- * CAPITAL_SNAKE_CASE with these same string values, so `evalScope:
- * NETWORK` in a TS config and `evalScope: network` in a YAML config
- * produce identical Go state.
+ * EvalScope controls selection-policy slot and tracker grain. This is the
+ * canonical enum: legacy evalPerMethod/evalPerFinality keys translate here at
+ * config load.
  */
 export type EvalScope = string;
-/**
- * EvalScopeNetwork — single slot per network. Methods + finalities
- * share. Default. Lowest cardinality + lowest tracker memory.
- */
 export const EvalScopeNetwork: EvalScope = "network";
-/**
- * EvalScopeNetworkMethod — slot per (network, method). Finalities
- * share. Useful when one upstream is fast on `eth_call` but slow on
- * `trace_filter`.
- */
 export const EvalScopeNetworkMethod: EvalScope = "network-method";
-/**
- * EvalScopeNetworkFinality — slot per (network, finality). Methods
- * share. Useful when realtime reads weight freshness differently
- * from finalized reads.
- */
 export const EvalScopeNetworkFinality: EvalScope = "network-finality";
-/**
- * EvalScopeNetworkMethodFinality — slot per (network, method,
- * finality). Most granular routing. Cardinality scales linearly;
- * each slot's ticker only spins up after the first request for
- * that bucket lands.
- */
 export const EvalScopeNetworkMethodFinality: EvalScope = "network-method-finality";
 /**
  * SelectionPolicyConfig declares the per-network upstream selection policy.
- * The eval function is JavaScript that receives `upstreams` and `ctx` and
- * returns the ordered list of upstreams that should serve traffic for the
- * network/method scope. The chainable std-lib (see internal/policy/stdlib)
- * provides the building blocks (sortByScore, removeByLag, stickyPrimary,
- * probeExcluded, etc.) — see specs/selection-policy/feature.md.
  */
 export interface SelectionPolicyConfig {
   evalInterval?: Duration;
-  evalFunction?: SelectionPolicyEvalFunction | undefined;
-  rules?: (SelectionPolicyRuleConfig | undefined)[];
-  evalPerMethod?: boolean;
+  evalScope?: EvalScope | "network" | "network-method" | "network-finality" | "network-method-finality";
+  evalTimeout?: Duration;
+  evalFunc?: SelectionPolicyEvalFunction | string;
+}
+/**
+ * LegacySelectionPolicyFields mirrors deprecated keys that used to live on
+ * SelectionPolicyConfig. None survive translation.
+ */
+export interface LegacySelectionPolicyFields {
+  evalFunction?: string;
   resampleExcluded?: boolean;
   resampleInterval?: Duration;
   resampleCount?: number /* int */;
-}
-export type SelectionPolicyRuleAction = string;
-export const SelectionPolicyRuleActionInclude: SelectionPolicyRuleAction = "include";
-export const SelectionPolicyRuleActionExclude: SelectionPolicyRuleAction = "exclude";
-export interface SelectionPolicyRuleConfig {
-  name?: string;
-  matchMethod?: string;
-  matchUpstreamId?: string;
-  matchUpstreamGroup?: string;
-  maxErrorRate?: number /* float64 */;
-  maxBlockHeadLag?: number /* float64 */;
-  maxFinalizationLag?: number /* float64 */;
-  maxP90ResponseSeconds?: number /* float64 */;
-  maxP95ResponseSeconds?: number /* float64 */;
-  maxP99ResponseSeconds?: number /* float64 */;
-  maxThrottledRate?: number /* float64 */;
-  action?: SelectionPolicyRuleAction;
 }
 export type AuthType = string;
 export const AuthTypeSecret: AuthType = "secret";
