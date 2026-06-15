@@ -36,14 +36,21 @@ func drainResponsesInBackground(responseChan <-chan *execResult, count int) {
 	}
 	go func() {
 		for j := 0; j < count; j++ {
-			er := <-responseChan
-			if er != nil && er.Result != nil {
-				if releasable, ok := any(er.Result).(interface{ Release() }); ok && releasable != nil {
-					releasable.Release()
-				}
-			}
+			releaseExecResult(<-responseChan)
 		}
 	}()
+}
+
+func drainResponses(responseChan <-chan *execResult, count int) {
+	for j := 0; j < count; j++ {
+		releaseExecResult(<-responseChan)
+	}
+}
+
+func releaseExecResult(er *execResult) {
+	if er != nil && er.Result != nil {
+		er.Result.Release()
+	}
 }
 
 type metricsLabels struct {
@@ -555,6 +562,12 @@ func (e *executor) runAnalyzer(
 		markWinningParticipants(originalReq, winner, analysis)
 	}
 	sendOutcomeOnce(consensusOutcome{winner: winner, analysis: analysis, shortCircuited: shortCircuited})
+	if waitCapped {
+		// Caller latency is already unblocked by sendOutcomeOnce above. Keep
+		// the analyzer alive long enough to release late responses produced by
+		// participants that were started before the wait cap fired.
+		drainResponses(responseChan, *startedParticipants-completedParticipants)
+	}
 
 	collectionSpan.SetAttributes(
 		attribute.Bool("short_circuited", shortCircuited),

@@ -3,6 +3,7 @@ package consensus
 import (
 	"context"
 	"errors"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -55,6 +56,61 @@ func TestWaitCap_MaxWaitOnResult_BoundsTailLatency(t *testing.T) {
 	require.NotNil(t, resp)
 	assert.Less(t, elapsed, 800*time.Millisecond,
 		"wait cap must bound elapsed time well below the straggler's 2s")
+}
+
+func TestWaitCap_MaxWaitOnResult_ReleasesLateResponses(t *testing.T) {
+	logger := zerolog.New(zerolog.NewTestWriter(t))
+
+	pol := newBuilder().
+		WithLogger(&logger).
+		WithMaxParticipants(3).
+		WithAgreementThreshold(3).
+		WithLowParticipantsBehavior(common.ConsensusLowParticipantsBehaviorAcceptMostCommonValidResult).
+		WithMaxWaitOnResult(common.NewStaticDuration(50 * time.Millisecond)).
+		Build()
+
+	req := newTestRequest()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var callCount atomic.Int32
+	var slowBodyClosed atomic.Int32
+	slowRelease := make(chan struct{})
+
+	var started sync.WaitGroup
+	started.Add(3)
+	allStarted := make(chan struct{})
+	go func() {
+		started.Wait()
+		close(allStarted)
+	}()
+
+	start := time.Now()
+	resp, err := pol.Run(ctx, req, func(_ context.Context, _ *common.NormalizedRequest) (*common.NormalizedResponse, error) {
+		n := callCount.Add(1)
+		started.Done()
+		<-allStarted
+		switch n {
+		case 1, 2:
+			return validResponseWithValue("0x1"), nil
+		default:
+			<-slowRelease
+			return validResponseWithCloser("0x2", &slowBodyClosed), nil
+		}
+	})
+	elapsed := time.Since(start)
+
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	require.Less(t, elapsed, 500*time.Millisecond,
+		"maxWaitOnResult must return before slow participant finishes")
+	require.Equal(t, int32(0), slowBodyClosed.Load(), "late response should not be released before it exists")
+
+	close(slowRelease)
+
+	require.Eventually(t, func() bool {
+		return slowBodyClosed.Load() == 1
+	}, 5*time.Second, 10*time.Millisecond, "late post-wait-cap response should be released exactly once")
 }
 
 // TestWaitCap_MaxWaitOnEmpty_TighterFloor verifies that when ONLY empty
