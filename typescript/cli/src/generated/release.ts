@@ -2,6 +2,6 @@
 import type { ReleaseInfo } from "../types";
 
 export const RELEASE_INFO: ReleaseInfo = {
-  version: '0.0.82',
-  commitSha: 'ee1e0b5ee85229beb35591d551611b25c59d655a',
+  version: '0.0.83',
+  commitSha: '45ab970e56d3fb89c6553b2260c950518ed118a2',
 };
