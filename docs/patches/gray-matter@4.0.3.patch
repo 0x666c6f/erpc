@@ -1,0 +1,23 @@
+diff --git a/lib/engines.js b/lib/engines.js
+index 38f993db06cf364191ac635a6590c2d29303297d..6d5dc25072814df11c662887d3f468b270e4d55d 100644
+--- a/lib/engines.js
++++ b/lib/engines.js
+@@ -7,14 +7,16 @@ const yaml = require('js-yaml');
+  */
+ 
+ const engines = exports = module.exports;
++const yamlParse = yaml.load || yaml.safeLoad;
++const yamlStringify = yaml.dump || yaml.safeDump;
+ 
+ /**
+  * YAML
+  */
+ 
+ engines.yaml = {
+-  parse: yaml.safeLoad.bind(yaml),
+-  stringify: yaml.safeDump.bind(yaml)
++  parse: yamlParse.bind(yaml),
++  stringify: yamlStringify.bind(yaml)
+ };
+ 
+ /**
