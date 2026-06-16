@@ -6,6 +6,8 @@ settings:
 
 overrides:
   '@ungap/structured-clone': 1.3.1
+  dompurify: 3.4.9
+  mermaid: 10.9.6
 
 importers:
 
@@ -1115,6 +1117,9 @@ packages:
   '@types/react@19.1.8':
     resolution: {integrity: sha512-AwAfQ2Wa5bCx9WP8nZL2uMZWod7J7/JSplxbTmBQ5ms6QpqNYm672H0Vu9ZVKVngQ+ii4R/byguVEUZQyeg44g==}
 
+  '@types/trusted-types@2.0.7':
+    resolution: {integrity: sha512-ScaPdn1dQczgbl0QFTeTOmVHFULt394XJgOQNoyVhZ6r2vLnMLJfBPd53SB52T/3G36VI1/g2MZaX0cwDuXsfw==}
+
   '@types/unist@2.0.11':
     resolution: {integrity: sha512-CmBKiL6NNo/OqgmMn95Fk9Whlp2mtvIv+KNpQKN2F4SjvrEesubTRWGYSg+BnWZOnlCaSTU1sMpsBOzgbYhnsA==}
 
@@ -1435,8 +1440,8 @@ packages:
     resolution: {integrity: sha512-e1U46jVP+w7Iut8Jt8ri1YsPOvFpg46k+K8TpCb0P+zjCkjkPnV7WzfDJzMHy1LnA+wj5pLT1wjO901gLXeEhA==}
     engines: {node: '>=12'}
 
-  dagre-d3-es@7.0.10:
-    resolution: {integrity: sha512-qTCQmEhcynucuaZgY5/+ti3X/rnszKZhEQH/ZdWdtP1tA/y3VoHJzcVrO9pjjJCNpigfscAtoUB5ONcd2wNn0A==}
+  dagre-d3-es@7.0.13:
+    resolution: {integrity: sha512-efEhnxpSuwpYOKRm/L5KbqoZmNNukHa/Flty4Wp62JRvgH2ojwVgPgdYyr4twpieZnyRDdIH7PY2mopX26+j2Q==}
 
   dayjs@1.11.13:
     resolution: {integrity: sha512-oaMBel6gjolK862uaPQOVTA7q3TZhuSvuMQAAglQDOWYO9A91IrAOUJEyKVlqJlHE0vq5p5UXxzdPfMH/x6xNg==}
@@ -1485,8 +1490,8 @@ packages:
     resolution: {integrity: sha512-cgwlv/1iFQiFnU96XXgROh8xTeetsnJiDsTc7TYCLFd9+/WNkIqPTxiM/8pSd8VIrhXGTf1Ny1q1hquVqDJB5w==}
     engines: {node: '>= 4'}
 
-  dompurify@3.1.6:
-    resolution: {integrity: sha512-cTOAhc36AalkjtBpfG6O8JimdTMWNXjiePT2xQH/ppBGi/4uIpmj8eKyIkMJErXWARyINV/sB38yf8JCLF5pbQ==}
+  dompurify@3.4.9:
+    resolution: {integrity: sha512-4dPSRMRDqHvs0V4YDFCsaIZo4if5u0xM+llyxiM2fwuZFdKArUBAF3VtI2+n8NKg9P870WMdYk0UhqQNoWXbfQ==}
 
   domutils@3.2.2:
     resolution: {integrity: sha512-6kZKyUajlDuqlHKVX1w7gyslj9MPIXzIFiz/rGu35uC1wMi+kMhQwGhl4lt9unC9Vb9INnY9Z3/ZA3+FhASLaw==}
@@ -1874,8 +1879,8 @@ packages:
   mdn-data@2.0.30:
     resolution: {integrity: sha512-GaqWWShW4kv/G9IEucWScBx9G1/vsFZZJUO+tD26M8J8z3Kw5RDQjaoZe03YAClgeS/SWPOcb4nkFBTEi5DUEA==}
 
-  mermaid@10.9.3:
-    resolution: {integrity: sha512-V80X1isSEvAewIL3xhmz/rVmc27CVljcsbWxkxlWJWY/1kQa4XOABqpDl2qQLGKzpKm6WbTfUEKImBlUfFYArw==}
+  mermaid@10.9.6:
+    resolution: {integrity: sha512-XRjjRaI4aPCAMpVaOhxIwLYdx3U4Cb6mN0M268ggFAfFRqsvyFW8zxWbEZazN/mPkqsVWThb0oa1UawWK+XMNg==}
 
   micromark-core-commonmark@1.1.0:
     resolution: {integrity: sha512-BgHO1aRbolh2hcrzL2d1La37V0Aoz73ymF8rAcKnohLy93titmv62E0gP8Hrx9PKcKrqCZ1BbLGbP3bEhoXYlw==}
@@ -3615,7 +3620,7 @@ snapshots:
 
   '@theguild/remark-mermaid@0.0.5(react@18.3.1)':
     dependencies:
-      mermaid: 10.9.3
+      mermaid: 10.9.6
       react: 18.3.1
       unist-util-visit: 5.0.0
     transitivePeerDependencies:
@@ -3683,6 +3688,9 @@ snapshots:
   '@types/react@19.1.8':
     dependencies:
       csstype: 3.1.3
+
+  '@types/trusted-types@2.0.7':
+    optional: true
 
   '@types/unist@2.0.11': {}
 
@@ -4019,7 +4027,7 @@ snapshots:
       d3-transition: 3.0.1(d3-selection@3.0.0)
       d3-zoom: 3.0.0
 
-  dagre-d3-es@7.0.10:
+  dagre-d3-es@7.0.13:
     dependencies:
       d3: 7.9.0
       lodash-es: 4.17.21
@@ -4063,7 +4071,9 @@ snapshots:
     dependencies:
       domelementtype: 2.3.0
 
-  dompurify@3.1.6: {}
+  dompurify@3.4.9:
+    optionalDependencies:
+      '@types/trusted-types': 2.0.7
 
   domutils@3.2.2:
     dependencies:
@@ -4592,7 +4602,7 @@ snapshots:
 
   mdn-data@2.0.30: {}
 
-  mermaid@10.9.3:
+  mermaid@10.9.6:
     dependencies:
       '@braintree/sanitize-url': 6.0.4
       '@types/d3-scale': 4.0.9
@@ -4601,9 +4611,9 @@ snapshots:
       cytoscape-cose-bilkent: 4.1.0(cytoscape@3.32.0)
       d3: 7.9.0
       d3-sankey: 0.12.3
-      dagre-d3-es: 7.0.10
+      dagre-d3-es: 7.0.13
       dayjs: 1.11.13
-      dompurify: 3.1.6
+      dompurify: 3.4.9
       elkjs: 0.9.3
       katex: 0.16.22
       khroma: 2.1.0
