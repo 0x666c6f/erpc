@@ -122,6 +122,90 @@ func TestUpstreamPostForward_HyperEVMFiltersSystemTransactions(t *testing.T) {
 		assert.Equal(t, "0x1", block.Transactions[0]["gasPrice"])
 	})
 
+	t.Run("NetworkPostForwardFiltersCachedBlocks", func(t *testing.T) {
+		req, resp := newResponse(t)
+		resp.SetFromCache(true)
+		network := &testNetwork{cfg: &common.NetworkConfig{
+			Architecture: common.ArchitectureEvm,
+			Evm: &common.EvmNetworkConfig{
+				ChainId: 999,
+			},
+		}}
+
+		filteredResp, err := HandleNetworkPostForward(ctx, network, req, resp, nil)
+		require.NoError(t, err)
+
+		jrr, err := filteredResp.JsonRpcResponse(ctx)
+		require.NoError(t, err)
+		var block struct {
+			Transactions []map[string]interface{} `json:"transactions"`
+		}
+		require.NoError(t, common.SonicCfg.Unmarshal(jrr.GetResultBytes(), &block))
+		require.Len(t, block.Transactions, 1)
+		assert.Equal(t, "0xreal", block.Transactions[0]["hash"])
+	})
+
+	t.Run("NetworkPostForwardFiltersBlockByHash", func(t *testing.T) {
+		jrpcResp, err := common.NewJsonRpcResponseFromBytes([]byte(`1`), []byte(blockJSON), nil)
+		require.NoError(t, err)
+		req := common.NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","id":1,"method":"eth_getBlockByHash","params":["0xabc123",true]}`))
+		resp := common.NewNormalizedResponse().
+			WithRequest(req).
+			WithJsonRpcResponse(jrpcResp)
+		network := &testNetwork{cfg: &common.NetworkConfig{
+			Architecture: common.ArchitectureEvm,
+			Evm: &common.EvmNetworkConfig{
+				ChainId: 999,
+			},
+		}}
+
+		filteredResp, err := HandleNetworkPostForward(ctx, network, req, resp, nil)
+		require.NoError(t, err)
+
+		jrr, err := filteredResp.JsonRpcResponse(ctx)
+		require.NoError(t, err)
+		var block struct {
+			Transactions []map[string]interface{} `json:"transactions"`
+		}
+		require.NoError(t, common.SonicCfg.Unmarshal(jrr.GetResultBytes(), &block))
+		require.Len(t, block.Transactions, 1)
+		assert.Equal(t, "0xreal", block.Transactions[0]["hash"])
+	})
+
+	t.Run("PreservesHashOnlyTransactionsOnHyperEVM", func(t *testing.T) {
+		hashOnlyBlockJSON := `{
+			"number": "0x100",
+			"hash": "0xabc123",
+			"transactions": [
+				"0xsystem1",
+				"0xreal"
+			]
+		}`
+		jrpcResp, err := common.NewJsonRpcResponseFromBytes([]byte(`1`), []byte(hashOnlyBlockJSON), nil)
+		require.NoError(t, err)
+		req := common.NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","id":1,"method":"eth_getBlockByNumber","params":["0x100",false]}`))
+		resp := common.NewNormalizedResponse().
+			WithRequest(req).
+			WithJsonRpcResponse(jrpcResp)
+		network := &testNetwork{cfg: &common.NetworkConfig{
+			Architecture: common.ArchitectureEvm,
+			Evm: &common.EvmNetworkConfig{
+				ChainId: 999,
+			},
+		}}
+
+		filteredResp, err := HandleNetworkPostForward(ctx, network, req, resp, nil)
+		require.NoError(t, err)
+
+		jrr, err := filteredResp.JsonRpcResponse(ctx)
+		require.NoError(t, err)
+		var block struct {
+			Transactions []string `json:"transactions"`
+		}
+		require.NoError(t, common.SonicCfg.Unmarshal(jrr.GetResultBytes(), &block))
+		assert.Equal(t, []string{"0xsystem1", "0xreal"}, block.Transactions)
+	})
+
 	t.Run("PreservesGasPriceZeroTransactionsOnOtherChains", func(t *testing.T) {
 		req, resp := newResponse(t)
 		network := &testNetwork{cfg: &common.NetworkConfig{

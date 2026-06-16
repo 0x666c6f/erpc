@@ -72,6 +72,8 @@ func HandleNetworkPostForward(ctx context.Context, network common.Network, nq *c
 	switch strings.ToLower(method) {
 	case "eth_getblockbynumber":
 		return networkPostForward_eth_getBlockByNumber(ctx, network, nq, nr, re)
+	case "eth_getblockbyhash":
+		return networkPostForward_eth_getBlockByHash(ctx, network, nq, nr, re)
 	case "eth_getlogs":
 		return networkPostForward_eth_getLogs(ctx, network, nq, nr, re)
 	case "trace_filter", "arbtrace_filter":
