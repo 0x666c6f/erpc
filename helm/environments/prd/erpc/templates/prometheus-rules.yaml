@@ -1,0 +1,335 @@
+{{- $prodErpcSelector := printf "job=~\"%s/erpc(-dev|-processing|-router|-fallback)?\"" .Release.Namespace }}
+{{- $prodErpcMatcher := printf "{%s}" $prodErpcSelector }}
+{{- $prodErpcActionableFailureMatcher := printf "{%s,error!=\"ErrUpstreamsExhausted\"}" $prodErpcSelector }}
+{{- $prodErpcFallbackMatcher := printf "{job=\"%s/erpc-fallback\"}" .Release.Namespace }}
+{{- $prodErpcFallbackActionableFailureMatcher := printf "{job=\"%s/erpc-fallback\",error!=\"ErrUpstreamsExhausted\"}" .Release.Namespace }}
+{{- $prodErpcPrimaryMatcher := printf "{job=~\"%s/erpc(-processing|-router)?\"}" .Release.Namespace }}
+{{- $prodErpcPodRegex := "(erpc|erpc-dev|erpc-processing|erpc-router|erpc-fallback)-[^-]+-[0-9a-z]{5}" }}
+{{- $prodErpcRuntimeContainerRegex := "erpc(-dev|-processing|-router|-fallback)?" }}
+{{- $fullName := include "erpc-prd.fullname" . }}
+{{- $dropLabels := list "agent_name" "container" "container_id" "endpoint" "host_arch" "host_name" "instance" "k8s_pod_name" "namespace" "net_host_name" "net_host_port" "net_peer_name" "net_peer_port" "otel_scope_version" "pod" "process_command" "process_command_args" "process_executable_name" "process_executable_path" "process_owner" "process_pid" "process_runtime_description" "process_runtime_name" "process_runtime_version" "server_address" "server_port" "service_instance_id" | join ", " }}
+{{- $histogramFamilies := list "erpc_upstream_request_duration_seconds" "erpc_network_request_duration_seconds" "erpc_cache_set_success_duration_seconds" "erpc_cache_set_error_duration_seconds" "erpc_network_hedge_delay_seconds" "erpc_network_timeout_duration_seconds" "erpc_network_upstream_calls_per_request" "erpc_cache_get_error_duration_seconds" "erpc_cache_get_success_miss_duration_seconds" "erpc_cache_get_success_hit_duration_seconds" "erpc_network_evm_get_logs_range_requested" "erpc_consensus_agreement_count" "erpc_consensus_responses_collected" "erpc_x402_facilitator_request_duration_seconds" "erpc_multicall3_batch_wait_ms" "erpc_multicall3_batch_size" "erpc_shared_state_poll_lock_wait_duration_seconds" "erpc_shared_state_poll_lock_fallback_duration_seconds" "erpc_http_ingress_pre_forward_duration_seconds" "erpc_rate_limiter_permit_evaluation_duration_seconds" "erpc_rate_limiter_permit_wait_duration_seconds" "erpc_shared_state_poll_lock_hold_duration_seconds" }}
+{{- $counterMetrics := list "erpc_upstream_request_total" "erpc_network_successful_request_total" "erpc_network_request_received_total" "erpc_cache_set_original_bytes_total" "erpc_cache_set_success_total" "erpc_cache_set_error_total" "erpc_cache_set_compressed_bytes_total" "erpc_cache_get_error_total" "erpc_network_evm_block_range_requested_total" "erpc_network_evm_get_logs_forced_splits_total" "erpc_network_evm_get_logs_split_failure_total" "erpc_network_evm_get_logs_split_success_total" "erpc_network_request_self_rate_limited_total" "erpc_upstream_request_remote_rate_limited_total" "erpc_upstream_request_errors_total" "erpc_upstream_request_missing_data_error_total" "erpc_cache_get_success_miss_total" "erpc_cache_get_success_hit_total" "erpc_upstream_finalized_block_polled_total" "erpc_upstream_latest_block_polled_total" "erpc_upstream_stale_upper_bound_total" "erpc_upstream_stale_lower_bound_total" "erpc_upstream_stale_latest_block_total" "erpc_upstream_stale_finalized_block_total" "erpc_upstream_request_empty_response_total" "erpc_network_hedged_request_total" "erpc_network_hedge_discards_total" "erpc_network_multiplexed_request_total" "erpc_multicall3_user_percall_cache_miss_total" "erpc_network_hedge_lost_total" "erpc_network_failed_request_total" "erpc_network_attempt_reason_total" "erpc_cache_get_age_guard_reject_total" "erpc_multicall3_user_percall_cache_hit_total" "erpc_cache_set_skipped_total" "erpc_upstream_sorted_method_cache_pruned_total" "erpc_multicall3_aggregation_total" "erpc_upstream_wrong_empty_response_total" "erpc_multicall3_batch_percall_cache_miss_total" "erpc_cache_envelope_unwrap_failure_total" "erpc_multicall3_batch_percall_cache_set_total" "erpc_shared_state_poll_lock_total" "erpc_multicall3_cache_hits_total" "erpc_multicall3_cache_misses_total" "erpc_cors_disallowed_origin_total" "erpc_cors_preflight_requests_total" "erpc_cors_requests_total" "erpc_consensus_misbehavior_detected_total" "erpc_consensus_total" "erpc_consensus_short_circuit_total" "erpc_consensus_errors_total" "erpc_consensus_cancellations_total" "erpc_rate_limits_total" "erpc_rate_limiter_failopen_total" "erpc_x402_payment_total" "erpc_x402_facilitator_request_total" "erpc_unexpected_panic_total" "erpc_shadow_response_identical_total" "erpc_shadow_response_mismatch_total" "erpc_shadow_response_error_total" }}
+{{- $gaugeMetrics := list "erpc_upstream_latest_block_number" "erpc_upstream_finalized_block_number" "erpc_upstream_block_head_lag" "erpc_upstream_block_head_large_rollback" "erpc_upstream_finalization_lag" "erpc_upstream_routing_priority" "erpc_upstream_score_overall" "erpc_network_latest_block_timestamp_distance_seconds" "erpc_network_dynamic_block_time_milliseconds" "erpc_network_cache_write_queue_depth" "erpc_multicall3_queue_len" "erpc_http_ingress_inflight" "erpc_rate_limiter_budget_max_count" }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ printf "%s-recording-rules" $fullName | trunc 63 | trimSuffix "-" }}
+  labels:
+    helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" }}
+    app.kubernetes.io/name: {{ .Chart.Name }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    release: prometheus-stack
+spec:
+  groups:
+    - name: erpc.metric-recording.rules
+      interval: 30s
+      limit: 100000
+      rules:
+        {{- range $family := $histogramFamilies }}
+        {{- range $suffix := list "bucket" "sum" "count" }}
+        - record: "erpc:{{ trimPrefix "erpc_" $family }}_{{ $suffix }}:rate5m"
+          expr: |
+            sum without ({{ $dropLabels }}) (
+              rate({{ $family }}_{{ $suffix }}{{ $prodErpcMatcher }}[5m])
+            )
+        {{- end }}
+        {{- end }}
+        {{- range $metric := $counterMetrics }}
+        - record: "erpc:{{ trimPrefix "erpc_" $metric }}:rate5m"
+          expr: |
+            sum without ({{ $dropLabels }}) (
+              rate({{ $metric }}{{ $prodErpcMatcher }}[5m])
+            )
+        {{- end }}
+        {{- range $metric := $gaugeMetrics }}
+        - record: "erpc:{{ trimPrefix "erpc_" $metric }}:max"
+          expr: |
+            max without ({{ $dropLabels }}) (
+              {{ $metric }}{{ $prodErpcMatcher }}
+            )
+        {{- end }}
+
+        - record: erpc:container_memory_working_set:limit_ratio_by_pod
+          expr: |
+            sum by (pod) (
+              container_memory_working_set_bytes{namespace="{{ .Release.Namespace }}",container=~"{{ $prodErpcRuntimeContainerRegex }}",pod=~"{{ $prodErpcPodRegex }}"}
+            )
+            /
+            clamp_min(
+              sum by (pod) (
+                kube_pod_container_resource_limits{namespace="{{ .Release.Namespace }}",container=~"{{ $prodErpcRuntimeContainerRegex }}",resource="memory",pod=~"{{ $prodErpcPodRegex }}"}
+              ),
+              1
+            )
+
+    - name: erpc.controller.rules
+      interval: 5s
+      rules:
+        - record: erpc:network_request_duration_seconds_bucket:rate1m_by_pod
+          expr: |
+            sum by (pod, le) (
+              rate(erpc_network_request_duration_seconds_bucket{{ $prodErpcMatcher }}[1m])
+            )
+
+        - record: erpc:network_request_received_total:rate1m_by_pod
+          expr: |
+            sum by (pod) (
+              rate(erpc_network_request_received_total{{ $prodErpcMatcher }}[1m])
+            )
+
+        - record: erpc:network_failed_request_total:rate1m_by_pod
+          expr: |
+            sum by (pod) (
+              rate(erpc_network_failed_request_total{{ $prodErpcMatcher }}[1m])
+            )
+
+        - record: erpc:network_failed_actionable_request_total:rate1m_by_pod
+          expr: |
+            sum by (pod) (
+              rate(erpc_network_failed_request_total{{ $prodErpcActionableFailureMatcher }}[1m])
+            )
+
+        - record: erpc:go_goroutines:by_pod
+          expr: |
+            max by (pod, instance) (
+              go_goroutines{namespace="{{ .Release.Namespace }}",pod=~"{{ $prodErpcPodRegex }}"}
+            )
+
+        - record: erpc:container_cpu_usage:limit_ratio1m_by_pod
+          expr: |
+            sum by (pod) (
+              rate(container_cpu_usage_seconds_total{namespace="{{ .Release.Namespace }}",container=~"{{ $prodErpcRuntimeContainerRegex }}",pod=~"{{ $prodErpcPodRegex }}"}[1m])
+            )
+            /
+            clamp_min(
+              sum by (pod) (
+                kube_pod_container_resource_limits{namespace="{{ .Release.Namespace }}",container=~"{{ $prodErpcRuntimeContainerRegex }}",resource="cpu",pod=~"{{ $prodErpcPodRegex }}"}
+              ),
+              0.001
+            )
+
+    - name: erpc.fallback-hot-standby.rules
+      interval: 30s
+      rules:
+        - record: erpc:fallback_request_total:rate5m
+          expr: |
+            sum(
+              rate(erpc_network_request_received_total{{ $prodErpcFallbackMatcher }}[5m])
+            )
+
+        - record: erpc:primary_request_total:rate5m
+          expr: |
+            sum(
+              rate(erpc_network_request_received_total{{ $prodErpcPrimaryMatcher }}[5m])
+            )
+
+        - record: erpc:fallback_request_share:ratio5m
+          expr: |
+            (erpc:fallback_request_total:rate5m or on() vector(0))
+            /
+            clamp_min(
+              (erpc:primary_request_total:rate5m or on() vector(0))
+              +
+              (erpc:fallback_request_total:rate5m or on() vector(0)),
+              1
+            )
+
+        - record: erpc:fallback_failed_request_total:rate5m_by_error_network_method
+          expr: |
+            sum by (error, network, method) (
+              rate(erpc_network_failed_request_total{{ $prodErpcFallbackMatcher }}[5m])
+            )
+
+        - record: erpc:fallback_actionable_failed_request_total:rate5m
+          expr: |
+            sum(
+              rate(erpc_network_failed_request_total{{ $prodErpcFallbackActionableFailureMatcher }}[5m])
+            )
+
+        - record: erpc:fallback_actionable_failure_ratio:ratio5m
+          expr: |
+            (erpc:fallback_actionable_failed_request_total:rate5m or on() vector(0))
+            /
+            clamp_min((erpc:fallback_request_total:rate5m or on() vector(0)), 1)
+
+        - record: erpc:haproxy_request_total:rate5m_by_proxy
+          expr: |
+            sum by (proxy) (
+              rate(haproxy_server_http_responses_total{namespace="{{ .Release.Namespace }}",service=~"erpc-erpc.*haproxy",proxy=~"erpc(-processing|-router)?-(backend|fallback-backend)",server=~"erpc(-fallback-direct|-fallback|-processing|-router)?[0-9]+",code=~"2xx|3xx|4xx|5xx"}[5m])
+            )
+
+        - record: erpc:haproxy_request_total:rate5m_by_proxy_target
+          expr: |
+            sum by (proxy, target) (
+              label_replace(
+                rate(haproxy_server_http_responses_total{namespace="{{ .Release.Namespace }}",service=~"erpc-erpc.*haproxy",proxy=~"erpc(-processing|-router)?-(backend|fallback-backend)",server=~"erpc(-fallback-direct|-fallback|-processing|-router)?[0-9]+",code=~"2xx|3xx|4xx|5xx"}[5m]),
+                "target", "$1", "server", "^(erpc-fallback-direct|erpc-fallback|erpc-processing|erpc-router|erpc)[0-9]+$"
+              )
+            )
+
+        - record: erpc:haproxy_fallback_request_total:rate5m_by_proxy
+          expr: |
+            sum by (proxy) (
+              rate(haproxy_server_http_responses_total{namespace="{{ .Release.Namespace }}",service=~"erpc-erpc.*haproxy",proxy=~"erpc(-processing|-router)?-(backend|fallback-backend)",server=~"erpc-fallback.*",code=~"2xx|3xx|4xx|5xx"}[5m])
+            )
+
+        - record: erpc:haproxy_direct_fallback_request_total:rate5m_by_proxy
+          expr: |
+            sum by (proxy) (
+              rate(haproxy_server_http_responses_total{namespace="{{ .Release.Namespace }}",service=~"erpc-erpc.*haproxy",proxy=~"erpc(-processing|-router)?-fallback-backend",server=~"erpc-fallback-direct[0-9]+",code=~"2xx|3xx|4xx|5xx"}[5m])
+            )
+
+        - record: erpc:haproxy_weighted_fallback_request_total:rate5m_by_proxy
+          expr: |
+            sum by (proxy) (
+              rate(haproxy_server_http_responses_total{namespace="{{ .Release.Namespace }}",service=~"erpc-erpc.*haproxy",proxy=~"erpc(-processing|-router)?-backend",server=~"erpc-fallback[0-9]+",code=~"2xx|3xx|4xx|5xx"}[5m])
+            )
+
+        - record: erpc:haproxy_fallback_request_share:ratio5m_by_proxy
+          expr: |
+            (
+              erpc:haproxy_fallback_request_total:rate5m_by_proxy
+              or on(proxy) (0 * erpc:haproxy_request_total:rate5m_by_proxy)
+            )
+            /
+            clamp_min(erpc:haproxy_request_total:rate5m_by_proxy, 1)
+
+        - alert: ErpcFallbackTrafficHigh
+          expr: |
+            erpc:fallback_request_share:ratio5m > 0.2
+            and
+            erpc:fallback_request_total:rate5m > 10
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "eRPC fallback traffic high"
+            description: "Fallback serves more than 20% of eRPC traffic and more than 10 RPS for 5m. Check main/router/processing health and fallback upstream quota."
+
+        - alert: ErpcFallbackTrafficHighByProxy
+          expr: |
+            erpc:haproxy_fallback_request_share:ratio5m_by_proxy > 0.8
+            and
+            erpc:haproxy_fallback_request_total:rate5m_by_proxy > 25
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "eRPC fallback traffic high for {{`{{ $labels.proxy }}`}}"
+            description: "{{`{{ $labels.proxy }}`}} sends more than 80% of its eRPC traffic and more than 25 RPS to fallback for 15m. Check the matching main/router/processing pool and fallback upstream quota."
+
+        - alert: ErpcFallbackActionableFailuresHigh
+          expr: |
+            erpc:fallback_actionable_failure_ratio:ratio5m > 0.05
+            and
+            erpc:fallback_request_total:rate5m > 10
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "eRPC fallback actionable failures high"
+            description: "Fallback actionable failure ratio is above 5% while fallback serves more than 10 RPS for 10m, excluding ErrUpstreamsExhausted. Check fallback upstream health and quotas."
+
+    - name: erpc.latency.rules
+      interval: 1m
+      rules:
+        - record: erpc:upstream_request_duration_seconds:p50:by_network
+          expr: |
+            histogram_quantile(0.5,
+              sum by (network, le) (erpc:upstream_request_duration_seconds_bucket:rate5m)
+            )
+
+        - record: erpc:upstream_request_duration_seconds:p90:by_network
+          expr: |
+            histogram_quantile(0.9,
+              sum by (network, le) (erpc:upstream_request_duration_seconds_bucket:rate5m)
+            )
+
+        - record: erpc:upstream_request_duration_seconds:p50:by_vendor
+          expr: |
+            histogram_quantile(0.5,
+              sum by (vendor, le) (
+                label_replace(
+                  erpc:upstream_request_duration_seconds_bucket:rate5m,
+                  "vendor", "$1", "upstream", "([^-]+)-.*"
+                )
+              )
+            )
+
+        - record: erpc:upstream_request_duration_seconds:p90:by_vendor
+          expr: |
+            histogram_quantile(0.9,
+              sum by (vendor, le) (
+                label_replace(
+                  erpc:upstream_request_duration_seconds_bucket:rate5m,
+                  "vendor", "$1", "upstream", "([^-]+)-.*"
+                )
+              )
+            )
+
+        - record: erpc:upstream_request_duration_seconds:p50
+          expr: |
+            histogram_quantile(0.5,
+              sum by (le) (erpc:upstream_request_duration_seconds_bucket:rate5m)
+            )
+
+        - record: erpc:upstream_request_duration_seconds:p90
+          expr: |
+            histogram_quantile(0.9,
+              sum by (le) (erpc:upstream_request_duration_seconds_bucket:rate5m)
+            )
+
+        - record: erpc:network_request_duration_seconds:p50:by_network
+          expr: |
+            histogram_quantile(0.5,
+              sum by (network, le) (erpc:network_request_duration_seconds_bucket:rate5m)
+            )
+
+        - record: erpc:network_request_duration_seconds:p90:by_network
+          expr: |
+            histogram_quantile(0.9,
+              sum by (network, le) (erpc:network_request_duration_seconds_bucket:rate5m)
+            )
+
+        - record: erpc:cache_get_miss_duration_seconds:p50
+          expr: |
+            histogram_quantile(0.5,
+              sum by (le) (erpc:cache_get_success_miss_duration_seconds_bucket:rate5m)
+            )
+
+        - record: erpc:cache_get_miss_duration_seconds:p90
+          expr: |
+            histogram_quantile(0.9,
+              sum by (le) (erpc:cache_get_success_miss_duration_seconds_bucket:rate5m)
+            )
+
+    - name: erpc.daily.rules
+      interval: 5m
+      rules:
+        - record: erpc:requests:rate5m
+          expr: sum(erpc:network_request_received_total:rate5m)
+
+        - record: erpc:upstream_ratio:rate5m
+          expr: |
+            sum(erpc:upstream_request_total:rate5m)
+            /
+            sum(erpc:network_request_received_total:rate5m)
+
+        - record: erpc:cache_hit_rate:rate5m
+          expr: |
+            sum(erpc:cache_get_success_hit_total:rate5m)
+            /
+            (
+              sum(erpc:cache_get_success_hit_total:rate5m)
+              +
+              sum(erpc:cache_get_success_miss_total:rate5m)
+            )
+
+        - record: erpc:error_rate:rate5m
+          expr: |
+            sum(erpc:upstream_request_errors_total:rate5m)
+            /
+            sum(erpc:upstream_request_total:rate5m)

@@ -1,0 +1,444 @@
+{{- $validationImage := .Values.vault.validationImage | default dict }}
+{{- if and $validationImage.enabled (or (not $validationImage.repository) (not $validationImage.tag)) }}
+{{- fail "vault.validationImage.repository and vault.validationImage.tag are required when vault.validationImage.enabled=true" }}
+{{- end }}
+{{- $useDedicatedValidator := $validationImage.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "erpc.fullname" . }}-vault-config-creator
+  labels:
+    {{- include "erpc.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "1"
+    "helm.sh/hook-delete-policy": hook-succeeded
+    argocd.argoproj.io/sync-wave: "-3"
+    argocd.argoproj.io/sync-options: Force=true,Replace=true
+spec:
+  template:
+    metadata:
+      labels:
+        {{- include "erpc.selectorLabels" . | nindent 8 }}
+        job: vault-config-creator
+      annotations:
+        # Vault Agent annotations for config injection (on pod template)
+        vault.hashicorp.com/agent-inject: "true"
+        vault.hashicorp.com/role: {{ include "erpc.vaultCreatorServiceAccountName" . | quote }}
+        vault.hashicorp.com/agent-inject-secret-erpc-config: {{ .Values.vault.configPath | default "secret/data/erpc/config" | quote }}
+        vault.hashicorp.com/agent-inject-secret-erpc-secrets: {{ .Values.vault.secretsPath | default "secret/data/erpc/secrets" | quote }}
+        vault.hashicorp.com/agent-inject-template-erpc-config: |
+          {{`{{- with secret "`}}{{ .Values.vault.configPath | default "secret/data/erpc/config" }}{{`" -}}
+          {{- .Data.data.config -}}
+          {{- end }}`}}
+        vault.hashicorp.com/agent-inject-template-erpc-secrets: |
+          {{`{{- with secret "`}}{{ .Values.vault.secretsPath | default "secret/data/erpc/secrets" }}{{`" -}}
+          {{- range $key, $value := .Data.data -}}
+          {{ printf "%s=%s\n" $key $value -}}
+          {{- end -}}
+          {{- end }}`}}
+        vault.hashicorp.com/agent-init-first: "true"
+        vault.hashicorp.com/agent-pre-populate-only: "true"
+    spec:
+      serviceAccountName: {{ include "erpc.vaultCreatorServiceAccountName" . }}
+      automountServiceAccountToken: true
+      {{- if .Values.securityHardening.enabled }}
+      securityContext:
+        {{- toYaml .Values.securityHardening.podSecurityContext | nindent 8 }}
+      {{- end }}
+      restartPolicy: OnFailure
+      volumes:
+        - name: rendered-config
+          emptyDir: {}
+        {{- if .Values.securityHardening.enabled }}
+        - name: tmp
+          emptyDir: {}
+        {{- end }}
+      initContainers:
+        - name: config-renderer
+          {{- if .Values.securityHardening.enabled }}
+          securityContext:
+            {{- toYaml .Values.securityHardening.containerSecurityContext | nindent 12 }}
+          {{- end }}
+          image: "{{ .Values.vault.jobImage.repository }}:{{ .Values.vault.jobImage.tag }}"
+          imagePullPolicy: {{ .Values.vault.jobImage.pullPolicy }}
+          resources:
+            {{- toYaml .Values.vault.jobResources | nindent 12 }}
+          {{- if .Values.securityHardening.enabled }}
+          env:
+            - name: HOME
+              value: /tmp
+          {{- end }}
+          volumeMounts:
+            - name: rendered-config
+              mountPath: /work
+            {{- if .Values.securityHardening.enabled }}
+            - name: tmp
+              mountPath: /tmp
+            {{- end }}
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              if (set -o pipefail) 2>/dev/null; then
+                set -o pipefail
+              fi
+
+              echo "Rendering ERPC configuration from vault config and secrets..."
+
+              timeout=60
+              count=0
+              while { [ ! -f /vault/secrets/erpc-config ] || [ ! -f /vault/secrets/erpc-secrets ]; } && [ $count -lt $timeout ]; do
+                echo "Waiting for vault config and secrets files... ($count/$timeout)"
+                sleep 2
+                count=$((count + 2))
+              done
+
+              if [ ! -f /vault/secrets/erpc-config ]; then
+                echo "ERROR: Vault config file not found after $timeout seconds"
+                exit 1
+              fi
+
+              if [ ! -f /vault/secrets/erpc-secrets ]; then
+                echo "ERROR: Vault secrets file not found after $timeout seconds"
+                exit 1
+              fi
+
+              tmp_rendered_config=/tmp/erpc-rendered-config
+              rendered_config=/work/erpc.yaml
+              trap 'rm -f "$tmp_rendered_config"' EXIT
+
+              awk -v secrets_file="/vault/secrets/erpc-secrets" '
+                function yaml_quote(value, quoted) {
+                  quoted = value
+                  gsub(/\\/, "\\\\", quoted)
+                  gsub(/"/, "\\\"", quoted)
+                  gsub(/\r/, "\\r", quoted)
+                  gsub(/\n/, "\\n", quoted)
+                  gsub(/\t/, "\\t", quoted)
+                  return "\"" quoted "\""
+                }
+
+                function metadata_key(key, suffix) {
+                  return key "__" suffix
+                }
+
+                function api_key_base(key, suffix) {
+                  suffix = substr(key, length(key) - 8)
+                  if (suffix ~ /^_[0-9A-Fa-f]{8}$/) {
+                    return substr(key, 1, length(key) - 9)
+                  }
+                  return key
+                }
+
+                function metadata_lookup_key(key, suffix, exact_key, base_key) {
+                  exact_key = metadata_key(key, suffix)
+                  if (exact_key in secrets) {
+                    return exact_key
+                  }
+
+                  base_key = metadata_key(api_key_base(key), suffix)
+                  if (base_key in secrets) {
+                    return base_key
+                  }
+
+                  return ""
+                }
+
+                function api_key_id(key, id, id_key) {
+                  id_key = metadata_lookup_key(key, "ID")
+                  if (id_key != "") {
+                    return secrets[id_key]
+                  }
+
+                  id = substr(api_key_base(key), 9)
+                  id = tolower(id)
+                  gsub(/_+/, "-", id)
+                  return id
+                }
+
+                function trim(value) {
+                  sub(/^[[:space:]]+/, "", value)
+                  sub(/[[:space:]]+$/, "", value)
+                  return value
+                }
+
+                function emit_method_list(indent, methods, parts, count, i, method) {
+                  count = split(methods, parts, ",")
+                  for (i = 1; i <= count; i++) {
+                    method = trim(parts[i])
+                    if (method != "") {
+                      print indent "    - " yaml_quote(method)
+                    }
+                  }
+                }
+
+                function api_key_sort_value(key, order_key) {
+                  order_key = metadata_lookup_key(key, "ORDER")
+                  if (order_key != "" && secrets[order_key] ~ /^[0-9]+$/) {
+                    return sprintf("%09d:%s", secrets[order_key] + 0, key)
+                  }
+                  return "999999999:" key
+                }
+
+                function sort_api_keys(i, j, tmp, left, right) {
+                  if (api_key_order_sorted) {
+                    return
+                  }
+
+                  for (i = 1; i <= api_key_count; i++) {
+                    for (j = i + 1; j <= api_key_count; j++) {
+                      left = api_key_sort_value(api_key_order[i])
+                      right = api_key_sort_value(api_key_order[j])
+                      if (right < left) {
+                        tmp = api_key_order[i]
+                        api_key_order[i] = api_key_order[j]
+                        api_key_order[j] = tmp
+                      }
+                    }
+                  }
+                  api_key_order_sorted = 1
+                }
+
+                function emit_api_key_strategies(indent, i, key, allow_key, budget_key) {
+                  if (api_key_count == 0) {
+                    print "ERROR: __SECRET_API_KEY_STRATEGIES__ used but no API_KEY_* entries exist in Vault secrets" > "/dev/stderr"
+                    exit 1
+                  }
+
+                  sort_api_keys()
+                  for (i = 1; i <= api_key_count; i++) {
+                    key = api_key_order[i]
+                    allow_key = metadata_lookup_key(key, "ALLOW_METHODS")
+                    budget_key = metadata_lookup_key(key, "RATE_LIMIT_BUDGET")
+
+                    print indent "- type: secret"
+                    if (budget_key != "") {
+                      print indent "  rateLimitBudget: " yaml_quote(secrets[budget_key])
+                    }
+                    if (allow_key != "") {
+                      print indent "  ignoreMethods:"
+                      print indent "    - " yaml_quote("*")
+                    }
+                    print indent "  secret:"
+                    print indent "    id: " yaml_quote(api_key_id(key))
+                    print indent "    value: " yaml_quote(secrets[key])
+                    if (allow_key != "") {
+                      print indent "  allowMethods:"
+                      emit_method_list(indent, secrets[allow_key])
+                    }
+                  }
+                }
+
+                BEGIN {
+                  missing_count = 0
+                  invalid_count = 0
+                  api_key_count = 0
+                  api_key_order_sorted = 0
+                  while ((getline line < secrets_file) > 0) {
+                    if (line == "") {
+                      continue
+                    }
+
+                    delimiter = index(line, "=")
+                    if (delimiter == 0) {
+                      print "ERROR: Invalid Vault secret entry without = delimiter" > "/dev/stderr"
+                      invalid_count++
+                      continue
+                    }
+
+                    key = substr(line, 1, delimiter - 1)
+                    value = substr(line, delimiter + 1)
+
+                    if (key !~ /^[A-Za-z_][A-Za-z0-9_]*$/) {
+                      print "ERROR: Invalid Vault secret key " key ". Use [A-Za-z_][A-Za-z0-9_]*." > "/dev/stderr"
+                      invalid_count++
+                      continue
+                    }
+
+                    secrets[key] = value
+                    if (key ~ /^API_KEY_/ && key !~ /__(ALLOW_METHODS|RATE_LIMIT_BUDGET|ID|ORDER)$/) {
+                      api_key_order[++api_key_count] = key
+                    }
+                  }
+                  close(secrets_file)
+
+                  if (invalid_count > 0) {
+                    exit 1
+                  }
+                }
+                {
+                  while (match($0, /"__SECRET_[A-Za-z_][A-Za-z0-9_]*__"/)) {
+                    token = substr($0, RSTART + 1, RLENGTH - 2)
+                    key = substr(token, 10, length(token) - 11)
+
+                    if (key in secrets) {
+                      repl = yaml_quote(secrets[key])
+                    } else {
+                      repl = yaml_quote("")
+                      if (!(token in missing)) {
+                        missing[token] = 1
+                        missing_order[++missing_count] = token
+                      }
+                    }
+
+                    $0 = substr($0, 1, RSTART - 1) repl substr($0, RSTART + RLENGTH)
+                  }
+
+                  while (match($0, /'\''__SECRET_[A-Za-z_][A-Za-z0-9_]*__'\''/)) {
+                    token = substr($0, RSTART + 1, RLENGTH - 2)
+                    key = substr(token, 10, length(token) - 11)
+
+                    if (key in secrets) {
+                      repl = yaml_quote(secrets[key])
+                    } else {
+                      repl = yaml_quote("")
+                      if (!(token in missing)) {
+                        missing[token] = 1
+                        missing_order[++missing_count] = token
+                      }
+                    }
+
+                    $0 = substr($0, 1, RSTART - 1) repl substr($0, RSTART + RLENGTH)
+                  }
+
+                  if (match($0, /^[[:space:]]*-[[:space:]]*__SECRET_API_KEY_STRATEGIES__[[:space:]]*$/)) {
+                    indent = substr($0, 1, index($0, "-") - 1)
+                    emit_api_key_strategies(indent)
+                    next
+                  }
+
+                  if (match($0, /^[[:space:]]*__SECRET_API_KEY_STRATEGIES__[[:space:]]*$/)) {
+                    indent = $0
+                    sub(/__SECRET_API_KEY_STRATEGIES__.*/, "", indent)
+                    emit_api_key_strategies(indent)
+                    next
+                  }
+
+                  out = ""
+                  rest = $0
+                  while (match(rest, /__SECRET_[A-Za-z_][A-Za-z0-9_]*__/)) {
+                    token = substr(rest, RSTART, RLENGTH)
+                    key = substr(token, 10, length(token) - 11)
+
+                    if (key in secrets) {
+                      repl = secrets[key]
+                    } else {
+                      repl = token
+                      if (!(token in missing)) {
+                        missing[token] = 1
+                        missing_order[++missing_count] = token
+                      }
+                    }
+
+                    out = out substr(rest, 1, RSTART - 1) repl
+                    rest = substr(rest, RSTART + RLENGTH)
+                  }
+                  print out rest
+                }
+                END {
+                  if (missing_count > 0) {
+                    print "ERROR: Unresolved ERPC secret placeholders remain in rendered config:" > "/dev/stderr"
+                    for (i = 1; i <= missing_count; i++) {
+                      print missing_order[i] > "/dev/stderr"
+                    }
+                    exit 1
+                  }
+                }
+              ' /vault/secrets/erpc-config > "$tmp_rendered_config"
+              mv "$tmp_rendered_config" "$rendered_config"
+
+              echo "ERPC configuration rendered to $rendered_config"
+        {{- if $useDedicatedValidator }}
+        - name: config-validator
+          {{- if .Values.securityHardening.enabled }}
+          securityContext:
+            {{- toYaml .Values.securityHardening.containerSecurityContext | nindent 12 }}
+          {{- end }}
+          image: "{{ $validationImage.repository }}:{{ $validationImage.tag }}"
+          imagePullPolicy: {{ $validationImage.pullPolicy | default .Values.vault.jobImage.pullPolicy }}
+          {{- if .Values.securityHardening.enabled }}
+          env:
+            - name: HOME
+              value: /tmp
+          {{- end }}
+          volumeMounts:
+            - name: rendered-config
+              mountPath: /work
+            {{- if .Values.securityHardening.enabled }}
+            - name: tmp
+              mountPath: /tmp
+            {{- end }}
+          command:
+            {{- toYaml ($validationImage.command | default (list "erpc")) | nindent 12 }}
+          args:
+            - validate
+            - --config
+            - /work/erpc.yaml
+          resources:
+            {{- toYaml ($validationImage.resources | default .Values.vault.jobResources) | nindent 12 }}
+        {{- end }}
+      containers:
+        - name: config-creator
+          {{- if .Values.securityHardening.enabled }}
+          securityContext:
+            {{- toYaml .Values.securityHardening.containerSecurityContext | nindent 12 }}
+          {{- end }}
+          image: "{{ .Values.vault.jobImage.repository }}:{{ .Values.vault.jobImage.tag }}"
+          imagePullPolicy: {{ .Values.vault.jobImage.pullPolicy }}
+          resources:
+            {{- toYaml .Values.vault.jobResources | nindent 12 }}
+          {{- if .Values.securityHardening.enabled }}
+          env:
+            - name: HOME
+              value: /tmp
+          {{- end }}
+          volumeMounts:
+            - name: rendered-config
+              mountPath: /work
+            {{- if .Values.securityHardening.enabled }}
+            - name: tmp
+              mountPath: /tmp
+            {{- end }}
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              if (set -o pipefail) 2>/dev/null; then
+                set -o pipefail
+              fi
+
+              rendered_config=/work/erpc.yaml
+              echo "Creating Kubernetes Secret from rendered vault config..."
+
+              if [ ! -s "$rendered_config" ]; then
+                echo "ERROR: Rendered ERPC config file not found or empty: $rendered_config"
+                exit 1
+              fi
+
+              {{- if not $useDedicatedValidator }}
+              echo "Validating ERPC configuration..."
+
+              # Validate ERPC configuration using erpc binary
+              if ! erpc validate --config "$rendered_config"; then
+                echo "ERROR: Invalid ERPC configuration"
+                exit 1
+              fi
+
+              echo "ERPC configuration validation passed. Creating Kubernetes Secret..."
+              {{- else }}
+              echo "ERPC configuration validation passed with dedicated runtime image. Creating Kubernetes Secret..."
+              {{- end }}
+
+              # Create secret from rendered vault config file
+              kubectl create secret generic {{ include "erpc.fullname" . }}-vault-config \
+                --namespace={{ .Release.Namespace }} \
+                --from-file=erpc.yaml="$rendered_config" \
+                --dry-run=client -o yaml | kubectl apply -f -
+
+              echo "Secret {{ include "erpc.fullname" . }}-vault-config created successfully"
+
+              # Verify secret was created
+              kubectl get secret {{ include "erpc.fullname" . }}-vault-config -n {{ .Release.Namespace }}

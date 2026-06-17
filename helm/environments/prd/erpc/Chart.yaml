@@ -1,0 +1,50 @@
+apiVersion: v2
+name: erpc-prd
+description: eRPC fault-tolerant EVM RPC proxy - Production Environment
+type: application
+version: 0.1.40
+appVersion: "latest"
+
+dependencies:
+  - name: erpc
+    repository: file://../../../charts/erpc
+    version: 0.1.35
+  - name: erpc
+    alias: erpc-dev
+    condition: erpc-dev.enabled
+    repository: file://../../../charts/erpc
+    version: 0.1.35
+  - name: erpc
+    alias: erpc-processing
+    condition: erpc-processing.enabled
+    repository: file://../../../charts/erpc
+    version: 0.1.35
+  - name: erpc
+    alias: erpc-router
+    condition: erpc-router.enabled
+    repository: file://../../../charts/erpc
+    version: 0.1.35
+  - name: erpc
+    alias: erpc-fallback
+    condition: erpc-fallback.enabled
+    repository: file://../../../charts/erpc
+    version: 0.1.35
+  - name: redis-ha
+    version: "4.35.2"
+    repository: "https://dandydeveloper.github.io/charts"
+  - name: haproxy
+    alias: erpc-haproxy
+    repository: https://haproxytech.github.io/helm-charts
+    version: "1.26.1"
+  - name: haproxy
+    alias: erpc-processing-haproxy
+    repository: https://haproxytech.github.io/helm-charts
+    version: "1.26.1"
+  - name: haproxy
+    alias: erpc-router-haproxy
+    repository: https://haproxytech.github.io/helm-charts
+    version: "1.26.1"
+  - name: prometheus-redis-exporter
+    alias: redis-exporter
+    version: "6.8.0"
+    repository: "https://prometheus-community.github.io/helm-charts"
