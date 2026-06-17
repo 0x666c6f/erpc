@@ -1,0 +1,35 @@
+name: Wiz IaC Scan
+
+on:
+  pull_request:
+    paths:
+      - 'helm/**'
+
+permissions: {}
+
+jobs:
+  wiz-iac-scan:
+    name: Wiz IaC Scan
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: arc-morpho-infra-dev
+    permissions:
+      contents: read
+    env:
+      WIZCLI_VERSION: "1.45.0"
+      WIZCLI_SHA256: "3f25af9edd63dbd7ecd058b71912f8415467be3f0fcb2b28c6914ebc454d368e"
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Download Wiz CLI
+        run: |
+          curl -fsSLo wizcli "https://downloads.wiz.io/v1/wizcli/${WIZCLI_VERSION}/wizcli-linux-amd64"
+          echo "${WIZCLI_SHA256}  wizcli" | sha256sum -c -
+          chmod +x wizcli
+
+      - name: Run Wiz CLI IaC scan
+        env:
+          WIZ_CLIENT_ID: ${{ secrets.WIZ_CLIENT_ID }}
+          WIZ_CLIENT_SECRET: ${{ secrets.WIZ_CLIENT_SECRET }}
+        run: ./wizcli scan dir helm/
