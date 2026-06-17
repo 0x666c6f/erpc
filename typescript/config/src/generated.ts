@@ -1388,14 +1388,7 @@ export interface EvmNetworkConfig {
 }
 /**
  * EvmServedTipConfig controls how the network derives the "latest"/"finalized"
- * block it advertises (and enforces) from its upstreams.
- * In the default max mode the served tip is the MAX latest block across eligible
- * non-syncing upstreams — which can advertise a block only the single most-ahead
- * upstream has, causing "block not found" churn when requests route to a
- * slightly-behind upstream. When a tag is listed in EnabledFor, that tag's
- * served value is instead the freshest block a strict MAJORITY of the eligible
- * upstreams already have, so interpolated requests land on upstreams that can
- * serve the advertised block.
+ * block it advertises from eligible upstreams.
  */
 export interface EvmServedTipConfig {
   /**
@@ -1404,18 +1397,13 @@ export interface EvmServedTipConfig {
    */
   enabledFor?: string[];
   /**
-   * Deprecated: ClusterDelta configured the former cluster-based picker and is
-   * ignored — the majority order statistic needs no tuning. Kept only so
-   * existing configs keep parsing.
+   * Deprecated: ClusterDelta configured the former cluster-based picker and
+   * is ignored. Kept so existing configs keep parsing.
    */
   clusterDelta?: number /* int64 */;
   /**
-   * GuaranteedMethods lists method name patterns (glob; e.g. "trace_*",
-   * "debug_traceBlockByNumber") whose supporting-upstream subset must be able to
-   * serve the advertised latest. For a request on a matching method, "latest"
-   * resolves against the majority of only the upstreams that support it
-   * (membership auto-detected via ShouldHandleMethod — no per-upstream config).
-   * Empty means only the global (all-eligible) majority is computed.
+   * GuaranteedMethods lists method patterns whose supporting-upstream subset
+   * must be able to serve the advertised latest.
    */
   guaranteedMethods?: string[];
 }
