@@ -87,4 +87,9 @@ jobs:
           go-version: '1.25.x'
           cache: false
       - name: Run Gosec Security Scanner
-        run: go run github.com/securego/gosec/v2/cmd/gosec@f1c81de5fcdf7b466b229fb24ca02d1a8406dd09 -exclude=G115 -exclude-dir=test -tests=false ./...
+        run: |
+          docker run --rm \
+            --workdir /github/workspace \
+            -v "$PWD:/github/workspace" \
+            ghcr.io/securego/gosec@sha256:d0859f242774504d57b17442b2dc77d4ffd2f4d30fbdf92c7eb612b2a394f477 \
+            "-exclude=G115 -exclude-dir=test -tests=false ./..."
