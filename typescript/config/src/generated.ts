@@ -460,6 +460,7 @@ export interface RedisConnectorConfig {
   getTimeout?: Duration;
   setTimeout?: Duration;
   lockRetryInterval?: Duration;
+  iamAuth?: RedisIAMAuthConfig;
 }
 export interface DynamoDBConnectorConfig {
   table?: string;
@@ -485,6 +486,7 @@ export interface PostgreSQLConnectorConfig {
   initTimeout?: Duration;
   getTimeout?: Duration;
   setTimeout?: Duration;
+  iamAuth?: PostgreSQLIAMAuthConfig;
 }
 export interface AwsAuthConfig {
   mode: 'file' | 'env' | 'secret'; // "file", "env", "secret"
@@ -492,6 +494,54 @@ export interface AwsAuthConfig {
   profile: string;
   accessKeyID: string;
   secretAccessKey: string;
+}
+/**
+ * RedisIAMAuthConfig enables AWS IAM authentication for ElastiCache (Valkey ≥7.2
+ * or Redis OSS ≥7.0). When enabled, eRPC mints SigV4-presigned auth tokens via
+ * go-redis's CredentialsProviderContext on every new connection. TLS is required
+ * (auto-enabled by SetDefaults). For IAM-enabled ElastiCache users, the user
+ * name and user ID must be identical — supply that single value as UserID.
+ */
+export interface RedisIAMAuthConfig {
+  enabled: boolean;
+  /**
+   * CacheName is the ElastiCache replication-group ID.
+   * Will be lowercased automatically (AWS lowercases cache names at creation time).
+   */
+  cacheName: string;
+  /**
+   * Region is optional — derived from AWS_REGION / instance metadata when omitted.
+   */
+  region?: string;
+  userID: string;
+  /**
+   * Auth selects the AWS credential source (same shape as DynamoDB's auth).
+   * Omit to use the default credential chain (instance role, env vars, …).
+   */
+  auth?: AwsAuthConfig;
+}
+/**
+ * PostgreSQLIAMAuthConfig enables AWS IAM authentication for RDS PostgreSQL.
+ * eRPC mints SigV4-presigned tokens via pgxpool.BeforeConnect on each new pool
+ * connection. SSL is required (auto-enforced via sslmode=require by SetDefaults).
+ */
+export interface PostgreSQLIAMAuthConfig {
+  enabled: boolean;
+  /**
+   * Endpoint is host:port of the RDS instance. If empty, derived from
+   * ConnectionUri at SetDefaults time.
+   */
+  endpoint?: string;
+  /**
+   * Region is optional — derived from AWS_REGION / instance metadata when omitted.
+   */
+  region?: string;
+  /**
+   * DBUser is the database user mapped to the IAM role (must be granted rds_iam
+   * in PostgreSQL). If empty, derived from the user in ConnectionUri.
+   */
+  dbUser?: string;
+  auth?: AwsAuthConfig;
 }
 export interface ProjectConfig {
   id: string;
@@ -1338,7 +1388,14 @@ export interface EvmNetworkConfig {
 }
 /**
  * EvmServedTipConfig controls how the network derives the "latest"/"finalized"
- * block it advertises from eligible upstreams.
+ * block it advertises (and enforces) from its upstreams.
+ * In the default max mode the served tip is the MAX latest block across eligible
+ * non-syncing upstreams — which can advertise a block only the single most-ahead
+ * upstream has, causing "block not found" churn when requests route to a
+ * slightly-behind upstream. When a tag is listed in EnabledFor, that tag's
+ * served value is instead the freshest block a strict MAJORITY of the eligible
+ * upstreams already have, so interpolated requests land on upstreams that can
+ * serve the advertised block.
  */
 export interface EvmServedTipConfig {
   /**
@@ -1347,13 +1404,18 @@ export interface EvmServedTipConfig {
    */
   enabledFor?: string[];
   /**
-   * Deprecated: ClusterDelta configured the former cluster-based picker and
-   * is ignored. Kept so existing configs keep parsing.
+   * Deprecated: ClusterDelta configured the former cluster-based picker and is
+   * ignored — the majority order statistic needs no tuning. Kept only so
+   * existing configs keep parsing.
    */
   clusterDelta?: number /* int64 */;
   /**
-   * GuaranteedMethods lists method patterns whose supporting-upstream subset
-   * must be able to serve the advertised latest.
+   * GuaranteedMethods lists method name patterns (glob; e.g. "trace_*",
+   * "debug_traceBlockByNumber") whose supporting-upstream subset must be able to
+   * serve the advertised latest. For a request on a matching method, "latest"
+   * resolves against the majority of only the upstreams that support it
+   * (membership auto-detected via ShouldHandleMethod — no per-upstream config).
+   * Empty means only the global (all-eligible) majority is computed.
    */
   guaranteedMethods?: string[];
 }
