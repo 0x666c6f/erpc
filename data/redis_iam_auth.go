@@ -41,6 +41,7 @@ func generateElastiCacheIAMToken(sess *session.Session, cfg *common.RedisIAMAuth
 	// already, but be defensive in case the struct is mutated after config load.
 	cacheName := strings.ToLower(cfg.CacheName)
 
+	// noaikido: request is only canonical SigV4 input and is never sent.
 	req, err := http.NewRequest(http.MethodGet, "https://"+cacheName+"/", nil)
 	if err != nil {
 		return "", fmt.Errorf("elasticache iam: build request: %w", err)
