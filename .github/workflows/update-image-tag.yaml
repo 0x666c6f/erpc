@@ -1,0 +1,303 @@
+name: Update chart image tag
+
+permissions: {}
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_repo:
+        description: 'Source repository'
+        required: true
+        type: string
+      commit_sha:
+        description: 'Commit SHA'
+        required: true
+        type: string
+      commit_url:
+        description: 'Commit URL'
+        required: true
+        type: string
+      target_chart:
+        description: 'Target chart override (defaults to inferring from source repo)'
+        required: false
+        type: string
+      environment:
+        description: 'Target environment (prd or main)'
+        required: true
+        type: string
+
+jobs:
+  update-image-tag:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      INPUT_SOURCE_REPO: ${{ inputs.source_repo }}
+      INPUT_COMMIT_SHA: ${{ inputs.commit_sha }}
+      INPUT_COMMIT_URL: ${{ inputs.commit_url }}
+      INPUT_TARGET_CHART: ${{ inputs.target_chart }}
+      INPUT_ENVIRONMENT: ${{ inputs.environment }}
+    steps:
+      - name: Validate environment
+        id: env
+        run: |
+          ENV="$INPUT_ENVIRONMENT"
+          echo "Received environment: $ENV"
+
+          # erpc has prd only; accept 'prd' or 'main' (both resolve to prd)
+          if [[ "$ENV" != "prd" && "$ENV" != "main" ]]; then
+            echo "❌ Invalid environment '$ENV'. Expected 'prd' or 'main'"
+            exit 1
+          fi
+
+          # Normalize 'main' to 'prd' for path resolution
+          if [[ "$ENV" == "main" ]]; then
+            ENV="prd"
+            echo "Normalized 'main' to 'prd' for path resolution"
+          fi
+
+          echo "name=$ENV" >> $GITHUB_OUTPUT
+          echo "Environment set to: $ENV"
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: morpho-main
+          fetch-depth: 0
+
+      - name: Extract repository name
+        id: repo-info
+        run: |
+          REPO_NAME=$(echo "$INPUT_SOURCE_REPO" | cut -d'/' -f2)
+          echo "repo_name=$REPO_NAME" >> $GITHUB_OUTPUT
+          echo "Repository name: $REPO_NAME"
+
+      - name: Determine target chart
+        id: chart-info
+        run: |
+          # Use target_chart if provided, otherwise infer from repo name
+          TARGET_CHART="$INPUT_TARGET_CHART"
+          if [[ -z "$TARGET_CHART" ]]; then
+            TARGET_CHART="${{ steps.repo-info.outputs.repo_name }}"
+            echo "No target_chart provided, using inferred chart: $TARGET_CHART"
+          else
+            echo "Using provided target_chart: $TARGET_CHART"
+          fi
+
+          echo "target_chart=$TARGET_CHART" >> $GITHUB_OUTPUT
+
+      - name: Set update paths
+        id: validate
+        run: |
+          INFRA_ENV="${{ steps.env.outputs.name }}"
+          echo "Using environment: $INFRA_ENV"
+
+          TARGET_CHART="${{ steps.chart-info.outputs.target_chart }}"
+
+          case "$TARGET_CHART" in
+            "erpc")
+              echo "paths<<EOF" >> $GITHUB_OUTPUT
+              echo "helm/environments/${INFRA_ENV}/erpc/values.yaml:erpc.image.tag" >> $GITHUB_OUTPUT
+              echo "EOF" >> $GITHUB_OUTPUT
+              ;;
+            *)
+              echo "❌ Target chart '$TARGET_CHART' is not supported"
+              exit 1
+              ;;
+          esac
+
+      - name: Setup Git Identity
+        run: |
+          git config user.name github-actions
+          git config user.email github-actions@github.com
+
+      - name: Check if chart is in bypass list
+        id: bypass-check
+        run: |
+          TARGET_CHART="${{ steps.chart-info.outputs.target_chart }}"
+
+          # Read bypass list from GitHub variable (comma-separated string)
+          # Configure via: Repository Settings -> Secrets and Variables -> Actions -> Variables -> PR_BYPASS_CHARTS
+          BYPASS_LIST_RAW="${{ vars.PR_BYPASS_CHARTS }}"
+
+          IS_BYPASSED="false"
+
+          if [[ -n "$BYPASS_LIST_RAW" ]]; then
+            IFS=',' read -ra BYPASS_LIST <<< "$BYPASS_LIST_RAW"
+
+            for chart in "${BYPASS_LIST[@]}"; do
+              chart="${chart#"${chart%%[![:space:]]*}"}"
+              chart="${chart%"${chart##*[![:space:]]}"}"
+              if [[ "$TARGET_CHART" == "$chart" ]]; then
+                IS_BYPASSED="true"
+                echo "✅ Chart '$TARGET_CHART' is in bypass list - will auto-merge PR"
+                break
+              fi
+            done
+          fi
+
+          if [[ "$IS_BYPASSED" == "false" ]]; then
+            echo "📋 Chart '$TARGET_CHART' not in bypass list"
+          fi
+
+          echo "is_bypassed=$IS_BYPASSED" >> $GITHUB_OUTPUT
+
+      - name: Create feature branch
+        id: create-branch
+        run: |
+          TARGET_CHART="${{ steps.chart-info.outputs.target_chart }}"
+          INFRA_ENV="${{ steps.env.outputs.name }}"
+
+          PR_BRANCH="update-image-tag/${TARGET_CHART}/${INFRA_ENV}"
+
+          if git ls-remote --heads origin "$PR_BRANCH" | grep -q "$PR_BRANCH"; then
+            echo "Branch $PR_BRANCH exists remotely, deleting it"
+            git push origin --delete "$PR_BRANCH" || true
+          fi
+
+          git checkout -b "$PR_BRANCH"
+
+          echo "pr_branch=$PR_BRANCH" >> $GITHUB_OUTPUT
+
+      - name: Update image tags
+        run: |
+          NEW_VALUE="$INPUT_COMMIT_SHA"
+          echo "Updating files with new image tag: $NEW_VALUE"
+
+          echo "${{ steps.validate.outputs.paths }}" | while IFS=: read -r file property; do
+            echo "Updating $file at $property"
+            # Use yq to update the specific key (no YAML anchors in erpc values)
+            NEW_VALUE="$NEW_VALUE" yq e "$(echo "$property" | sed 's/\./\./g' | awk '{print "." $0 " = strenv(NEW_VALUE)"}') " -i "$file"
+            git diff "$file"
+          done
+
+      - name: Commit and push changes
+        id: commit
+        run: |
+          TARGET_CHART="${{ steps.chart-info.outputs.target_chart }}"
+
+          COMMIT_MSG="[${SOURCE_REPO}] 🤖 Update image tag to ${INPUT_COMMIT_SHA} in production
+
+          Updates the ${TARGET_CHART} chart deployment to use the latest image.
+
+          Files Updated:
+          ${{ steps.validate.outputs.paths }}
+
+          Source Information:
+          - Repository: ${INPUT_SOURCE_REPO}
+          - Target Chart: ${TARGET_CHART}
+          - Commit: ${INPUT_COMMIT_SHA}
+          - Commit URL: ${INPUT_COMMIT_URL}"
+
+          if git diff --quiet; then
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+            echo "No changes to commit"
+          else
+            git add .
+            git commit -m "$COMMIT_MSG"
+            git push -f origin "${{ steps.create-branch.outputs.pr_branch }}"
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+          fi
+        env:
+          SOURCE_REPO: ${{ steps.repo-info.outputs.repo_name }}
+
+      - name: Generate GitHub App Token
+        id: generate-token
+        if: steps.commit.outputs.has_changes == 'true'
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1
+        with:
+          app-id: ${{ secrets.INFRA_DEPLOYER_APP_ID }}
+          private-key: ${{ secrets.INFRA_DEPLOYER_SECRET_KEY }}
+
+      - name: Create or update PR
+        id: create-or-update-pr
+        if: steps.commit.outputs.has_changes == 'true'
+        run: |
+          TARGET_CHART="${{ steps.chart-info.outputs.target_chart }}"
+          PR_BRANCH="${{ steps.create-branch.outputs.pr_branch }}"
+
+          if [[ "${{ steps.bypass-check.outputs.is_bypassed }}" == "true" ]]; then
+            AUTO_MERGE_STATUS="✅ **Auto-merged** - This PR will be automatically merged immediately after creation."
+          else
+            AUTO_MERGE_STATUS="⏸️ **Manual approval required** - This PR requires manual review and approval before merging."
+          fi
+
+          PR_TITLE="[${TARGET_CHART}] Update image tag in production"
+          PR_BODY="## 🤖 Automated Image Update
+
+          This PR updates the ${TARGET_CHART} chart production deployment to use the latest image.
+
+          ### Files Updated
+          ${{ steps.validate.outputs.paths }}
+
+          ### Source Information
+          - Repository: ${INPUT_SOURCE_REPO}
+          - Target Chart: ${TARGET_CHART}
+          - Current Commit: ${INPUT_COMMIT_SHA}
+          - Commit URL: ${INPUT_COMMIT_URL}
+
+          ### Merge Status
+          ${AUTO_MERGE_STATUS}"
+
+          if gh pr list --head "$PR_BRANCH" --json number | grep -q '"number"'; then
+            echo "PR already exists for branch $PR_BRANCH, updating it"
+            PR_NUMBER=$(gh pr list --head "$PR_BRANCH" --json number --jq '.[0].number')
+            echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
+          else
+            PR_URL=$(gh pr create \
+              --title "$PR_TITLE" \
+              --body "$PR_BODY" \
+              --base "morpho-main" \
+              --head "$PR_BRANCH")
+
+            PR_NUMBER=$(echo "$PR_URL" | grep -oE '[0-9]+$')
+            echo "Created new PR #${PR_NUMBER} for branch $PR_BRANCH"
+            echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
+          fi
+        env:
+          GITHUB_TOKEN: ${{ steps.generate-token.outputs.token }}
+
+      - name: Approve and merge PR
+        if: steps.commit.outputs.has_changes == 'true' && steps.bypass-check.outputs.is_bypassed == 'true'
+        run: |
+          PR_NUMBER="${{ steps.create-or-update-pr.outputs.pr_number }}"
+          PR_BRANCH="${{ steps.create-branch.outputs.pr_branch }}"
+
+          if [[ -n "$PR_NUMBER" ]]; then
+            echo "Merging PR #${PR_NUMBER}"
+
+            merge_succeeded=false
+            for attempt in 1 2 3; do
+              merge_output="$(gh pr merge "$PR_NUMBER" --merge --delete-branch --admin 2>&1)" && {
+                echo "$merge_output"
+                merge_succeeded=true
+                break
+              }
+
+              echo "$merge_output" >&2
+
+              if [[ "$merge_output" != *"Base branch was modified"* ]] || [[ "$attempt" -eq 3 ]]; then
+                echo "❌ Merge failed on attempt ${attempt}" >&2
+                exit 1
+              fi
+
+              echo "Base branch moved under PR #${PR_NUMBER}; rebasing ${PR_BRANCH} onto origin/morpho-main and retrying (attempt ${attempt}/3)"
+              git fetch origin morpho-main "$PR_BRANCH"
+              git checkout "$PR_BRANCH"
+              git rebase origin/morpho-main
+              git push --force-with-lease origin "$PR_BRANCH"
+              git checkout morpho-main
+            done
+
+            if [[ "$merge_succeeded" != "true" ]]; then
+              echo "❌ Could not merge PR #${PR_NUMBER} after retries" >&2
+              exit 1
+            fi
+
+            echo "✅ PR #${PR_NUMBER} merged successfully"
+          else
+            echo "❌ Could not find PR number to merge"
+            exit 1
+          fi
+        env:
+          GITHUB_TOKEN: ${{ steps.generate-token.outputs.token }}
