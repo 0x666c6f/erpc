@@ -1,0 +1,49 @@
+name: Slack PR Notification
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [morpho-main]
+
+jobs:
+  notify-slack:
+    if: github.event.pull_request.merged == true && github.event.pull_request.user.login != 'github-actions[bot]' && github.event.pull_request.user.login != 'morpho-infra-deployer[bot]'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Send Slack notification
+        uses: slackapi/slack-github-action@91efab103c0de0a537f72a35f6b8cda0ee76bf0a # v2.1.1
+        with:
+          webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
+          webhook-type: incoming-webhook
+          payload: |
+            {
+              "text": ":rocket: PR merged to Production",
+              "attachments": [
+                {
+                  "color": "#ff6b6b",
+                  "fallback": "PR #${{ github.event.pull_request.number }} merged: ${{ github.event.pull_request.title }}",
+                  "title": ":white_check_mark: PR #${{ github.event.pull_request.number }}: ${{ github.event.pull_request.title }}",
+                  "title_link": "${{ github.event.pull_request.html_url }}",
+                  "fields": [
+                    {
+                      "title": ":busts_in_silhouette: Author",
+                      "value": "${{ github.event.pull_request.user.login }}",
+                      "short": true
+                    },
+                    {
+                      "title": ":earth_americas: Environment",
+                      "value": ":red_circle: Production (morpho-main)",
+                      "short": true
+                    },
+                    {
+                      "title": ":arrow_right: Branch",
+                      "value": "`${{ github.event.pull_request.head.ref }}` → `${{ github.event.pull_request.base.ref }}`",
+                      "short": false
+                    }
+                  ],
+                  "footer": ":octopus: ${{ github.repository }}",
+                  "footer_icon": "https://github.githubassets.com/images/modules/logos_page/GitHub-Mark.png"
+                }
+              ]
+            }

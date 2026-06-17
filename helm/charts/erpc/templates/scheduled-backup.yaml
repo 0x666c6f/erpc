@@ -1,0 +1,20 @@
+{{- if ne (toString .Values.postgresql.enabled) "false" }}
+{{- $snapshotClass := .Values.postgresql.backup.volumeSnapshotClassName | default "" }}
+{{- $backupMethod := .Values.postgresql.backup.method | default (ternary "volumeSnapshot" "barmanObjectStore" (ne $snapshotClass "")) }}
+apiVersion: postgresql.cnpg.io/v1
+kind: ScheduledBackup
+metadata:
+  name: erpc-db-scheduled-backup
+spec:
+  {{- if eq $backupMethod "volumeSnapshot" }}
+  method: volumeSnapshot
+  {{- else if eq $backupMethod "barmanObjectStore" }}
+  method: barmanObjectStore
+  {{- else }}
+  {{- fail (printf "postgresql.backup.method must be \"barmanObjectStore\" or \"volumeSnapshot\", got %q" $backupMethod) }}
+  {{- end }}
+  schedule: "0 0 0 * * *"
+  backupOwnerReference: self
+  cluster:
+    name: erpc-db
+{{- end }}

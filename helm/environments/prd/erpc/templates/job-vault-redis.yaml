@@ -1,0 +1,100 @@
+{{- if index .Values "redis-ha" "enabled" }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-redis-vault-secret-creator
+  labels:
+    app.kubernetes.io/name: {{ .Release.Name }}-redis-vault
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": hook-succeeded,hook-failed
+    argocd.argoproj.io/sync-wave: "-1"
+    argocd.argoproj.io/sync-options: Force=true,Replace=true
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ .Release.Name }}-redis-vault
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        job: redis-vault-secret-creator
+      annotations:
+        vault.hashicorp.com/agent-inject: "true"
+        vault.hashicorp.com/role: erpc
+        vault.hashicorp.com/agent-inject-secret-redis: {{ index .Values "redis-ha" "vault" "secretsPath" | quote }}
+        vault.hashicorp.com/agent-inject-template-redis: |
+          {{`{{- with secret "`}}{{ index .Values "redis-ha" "vault" "secretsPath" }}{{`" -}}
+          {{- .Data.data.password -}}
+          {{- end }}`}}
+        vault.hashicorp.com/agent-pre-populate-only: "true"
+    spec:
+      serviceAccountName: erpc
+      automountServiceAccountToken: true
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      restartPolicy: OnFailure
+      volumes:
+        - name: tmp
+          emptyDir: {}
+      containers:
+        - name: secret-creator
+          image: 537124939463.dkr.ecr.eu-west-3.amazonaws.com/docker-hub/alpine/k8s:1.31.0
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          env:
+            - name: HOME
+              value: /tmp
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          command:
+            - sh
+            - -c
+            - |
+              echo "Creating Redis auth secret from Vault..."
+
+              # Wait for vault agent to complete
+              timeout=60
+              count=0
+              while [ ! -f /vault/secrets/redis ] && [ $count -lt $timeout ]; do
+                echo "Waiting for vault secrets file... (${count}s/${timeout}s)"
+                sleep 1
+                count=$((count + 1))
+              done
+
+              if [ ! -f /vault/secrets/redis ]; then
+                echo "ERROR: Vault secrets file not found after $timeout seconds"
+                exit 1
+              fi
+
+              echo "Vault secrets file found. Creating Kubernetes Secret..."
+
+              # Create secret for redis-ha chart (pipe password directly to avoid shell variable exposure)
+              kubectl create secret generic {{ index .Values "redis-ha" "existingSecret" }} \
+                --namespace={{ .Release.Namespace }} \
+                --from-literal={{ index .Values "redis-ha" "authKey" }}="$(cat /vault/secrets/redis)" \
+                --dry-run=client -o yaml | kubectl apply -f -
+
+              echo "Secret {{ index .Values "redis-ha" "existingSecret" }} created successfully"
+
+              # Verify secret was created
+              kubectl get secret {{ index .Values "redis-ha" "existingSecret" }} -n {{ .Release.Namespace }}
+{{- end }}

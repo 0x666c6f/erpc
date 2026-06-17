@@ -1,0 +1,1972 @@
+# =============================================================================
+# HAProxy Smart Load Balancer for eRPC
+# =============================================================================
+# Provides intelligent traffic distribution based on real-time pod metrics:
+# - Goroutines: Direct measure of concurrent work (weight: 30%)
+# - P99 Latency: Response time degradation detection (weight: 35%)
+# - Request Rate: Actual load distribution (weight: 15%)
+# - CPU utilization: Resource pressure indicator (weight: 20%)
+#
+# Traffic flow: Client -> erpc-haproxy:4000 -> erpc pods (via headless service)
+# Auto fallback: erpc-fallback servers stay at weight 0 until Prometheus shows
+# sustained degradation on any public eRPC pool, then the matching HAProxy ramps
+# limited traffic to the upstream-image hot standby pool.
+# =============================================================================
+# Custom HPA for erpc-haproxy (overrides upstream chart HPA which uses metrics-server)
+erpc-haproxy-hpa:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 100
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+
+erpc-processing-haproxy-hpa:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 100
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+
+erpc-router-haproxy-hpa:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 100
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+
+erpc-haproxy:
+  image:
+    repository: 537124939463.dkr.ecr.eu-west-3.amazonaws.com/docker-hub/haproxytech/haproxy-alpine
+
+  rbac:
+    create: true
+
+  serviceMonitor:
+    enabled: true
+    extraLabels:
+      release: prometheus
+    endpoints:
+      - port: prometheus
+        path: /metrics
+        scheme: http
+        interval: 15s
+
+  # HAProxy configuration for HTTP RPC load balancing
+  config: |
+    global
+        stats socket /var/run/haproxy/admin.sock mode 660 level admin expose-fd listeners
+        stats timeout 30s
+        maxconn 500000
+        spread-checks 5
+        log stdout format raw local0 info
+        # Raise file descriptor limit to hard limit (was soft=65536, hard=1048576)
+        ulimit-n 1048576
+
+        # Performance tuning - maximized for throughput
+        # tune.bufsize: larger buffer for big JSON-RPC payloads (eth_call responses can be huge)
+        tune.bufsize 131072
+        # tune.maxrewrite: space for header rewriting
+        tune.maxrewrite 8192
+        # tune.http.maxhdr: max headers
+        tune.http.maxhdr 128
+        # tune.recv_enough: receive enough data before processing
+        tune.recv_enough 16384
+        # tune.runqueue-depth: scheduler queue depth for better throughput
+        tune.runqueue-depth 512
+
+    defaults
+        mode http
+        log global
+        option httplog
+        option dontlognull
+        option http-server-close
+        option forwardfor except 127.0.0.0/8
+
+        # Timeouts tuned for blockchain RPC (some calls can be slow)
+        timeout connect 5s
+        timeout client 60s
+        timeout server 60s
+        timeout http-request 30s
+        timeout http-keep-alive 30s
+        # Queue timeout: how long to wait for a server slot
+        timeout queue 120s
+        timeout check 15s
+
+        retries 3
+        option redispatch
+        retry-on conn-failure empty-response response-timeout 503
+
+    # Main frontend - accepts client connections
+    frontend erpc-frontend
+        bind *:4000
+        # Frontend maxconn: match global maxconn (no restriction)
+        maxconn 500000
+
+        # Add request ID for tracing
+        unique-id-format %{+X}o\ %ci:%cp_%fi:%fp_%Ts_%rt:%pid
+        unique-id-header X-Request-ID
+
+        # If every main eRPC server is down, bypass the metric debounce and
+        # route straight to fallback. The controller still handles gradual
+        # degraded-performance activation through erpc-backend weights.
+        use_backend erpc-fallback-backend if { nbsrv(erpc-main-health-backend) eq 0 }
+
+        # Route health through the serving backend so fallback only counts
+        # after activation or total main outage.
+        default_backend erpc-backend
+
+    # Main-only health backend for instant total-outage detection.
+    backend erpc-main-health-backend
+        balance roundrobin
+        option httpchk GET /healthcheck
+        http-check expect status 200
+        default-server inter 2s fastinter 1s downinter 2s rise 2 fall 3 check
+        server-template erpc-main-health 100 erpc-headless.morpho-prd.svc.cluster.local:4000 check resolvers k8s init-addr none
+
+    # Main backend - smart load balancing with dynamic weights
+    backend erpc-backend
+        # Weighted round-robin caps fallback traffic by configured weight.
+        # Controller adjusts weights based on Goroutines/Latency/RequestRate/CPU
+        balance roundrobin
+
+        # HTTP health check on application endpoint
+        option httpchk GET /healthcheck
+        http-check expect status 200
+
+        # Connection reuse for efficiency
+        http-reuse safe
+
+        # Aggressive health monitoring
+        # inter=2s: check every 2 seconds
+        # fastinter=1s: check every 1s when transitioning
+        # rise=2: 2 successes to mark healthy
+        # fall=3: 3 failures to mark unhealthy
+        # maxconn=5000: max connections per backend server (100 pods × 5000 = 500K total)
+        default-server inter 2s fastinter 1s downinter 2s rise 2 fall 3 maxconn 5000 check
+
+        # DNS-based service discovery via headless service
+        server-template erpc 100 erpc-headless.morpho-prd.svc.cluster.local:4000 check resolvers k8s init-addr none
+        # Weighted fallback is intentionally capped below fallback HPA max so
+        # partial fallback traffic cannot grow with scaled-out fallback pods.
+        server-template erpc-fallback 3 erpc-fallback-headless.morpho-prd.svc.cluster.local:4000 weight 0 check resolvers k8s init-addr none
+
+    # Direct fallback backend for sudden total main outage.
+    backend erpc-fallback-backend
+        balance leastconn
+        option httpchk GET /healthcheck
+        http-check expect status 200
+        http-reuse safe
+        default-server inter 2s fastinter 1s downinter 2s rise 2 fall 3 maxconn 5000 check
+        server-template erpc-fallback-direct 40 erpc-fallback-headless.morpho-prd.svc.cluster.local:4000 check resolvers k8s init-addr none
+
+    # Kubernetes DNS resolver
+    resolvers k8s
+        nameserver dns kube-dns.kube-system.svc.cluster.local:53
+        accepted_payload_size 8192
+        hold valid 5s
+        hold nx 5s
+        resolve_retries 3
+        timeout resolve 1s
+        timeout retry 1s
+
+    # Stats/metrics frontend
+    frontend stats
+        mode http
+        bind *:8404
+        http-request use-service prometheus-exporter if { path /metrics }
+        stats enable
+        stats uri /stats
+        stats refresh 10s
+        stats show-legends
+        stats show-node
+
+  # Weight controller sidecar - dynamically adjusts backend weights
+  # Uses 4 metrics: Goroutines, P99 Latency, Request Rate, CPU
+  sidecarContainers:
+    - name: weight-controller
+      image: 537124939463.dkr.ecr.eu-west-3.amazonaws.com/docker-hub/morphoorg/haproxy-controller-erpc:v1.2.2
+      imagePullPolicy: IfNotPresent
+      env:
+        - name: PROMETHEUS_URL
+          value: "http://prometheus-stack-kube-prom-prometheus.monitoring.svc.cluster.local:9090"
+        # Goroutine query - direct count per pod
+        - name: GOROUTINE_QUERY
+          value: 'erpc:go_goroutines:by_pod{pod=~"erpc-[0-9a-f]{9,10}-[0-9a-z]{5}"}'
+        # P99 Latency query - in milliseconds
+        - name: LATENCY_QUERY
+          value: 'histogram_quantile(0.99, erpc:network_request_duration_seconds_bucket:rate1m_by_pod{pod=~"erpc-[0-9a-f]{9,10}-[0-9a-z]{5}"}) * 1000'
+        # Request rate query - requests per second
+        - name: REQUEST_RATE_QUERY
+          value: 'erpc:network_request_received_total:rate1m_by_pod{pod=~"erpc-[0-9a-f]{9,10}-[0-9a-z]{5}"}'
+        # CPU query - percentage of limit
+        - name: CPU_QUERY
+          value: '100 * erpc:container_cpu_usage:limit_ratio1m_by_pod{pod=~"erpc-[0-9a-f]{9,10}-[0-9a-z]{5}"}'
+        # Target thresholds - traffic shifts when exceeded
+        - name: TARGET_GOROUTINES
+          value: "400"
+        - name: TARGET_LATENCY_MS
+          value: "500"
+        - name: TARGET_REQUEST_RATE
+          value: "50"
+        - name: TARGET_CPU
+          value: "60"
+        # Metric weights (sum to 1.0)
+        # Latency has highest weight as it directly measures user impact
+        - name: WEIGHT_GOROUTINES
+          value: "0.30"
+        - name: WEIGHT_LATENCY
+          value: "0.35"
+        - name: WEIGHT_REQUEST_RATE
+          value: "0.15"
+        - name: WEIGHT_CPU
+          value: "0.20"
+        # Backend name must match HAProxy config
+        - name: BACKEND_NAME
+          value: "erpc-backend"
+        # Pod namespace for Kubernetes API lookups
+        - name: POD_NAMESPACE
+          value: "morpho-prd"
+        # Fast updates for responsive load balancing (matches pod scrape)
+        - name: UPDATE_INTERVAL
+          value: "5s"
+        # Weight range
+        - name: MIN_WEIGHT
+          value: "10"
+        - name: MAX_WEIGHT
+          value: "50"
+        - name: HAPROXY_SOCKET
+          value: "/var/run/haproxy/admin.sock"
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: [ALL]
+        readOnlyRootFilesystem: true
+      resources:
+        requests:
+          cpu: "100m"
+          memory: "128Mi"
+        limits:
+          cpu: "500m"
+          memory: "256Mi"
+      livenessProbe:
+        exec:
+          command:
+            - /bin/sh
+            - -c
+            - pgrep -f "controller.sh" > /dev/null
+        initialDelaySeconds: 10
+        periodSeconds: 30
+        failureThreshold: 3
+      readinessProbe:
+        exec:
+          command:
+            - /bin/sh
+            - -c
+            - test -S "$HAPROXY_SOCKET"
+        initialDelaySeconds: 5
+        periodSeconds: 10
+        failureThreshold: 3
+      volumeMounts:
+        - name: haproxy-socket
+          mountPath: /var/run/haproxy
+        - name: controller-tmp
+          mountPath: /tmp
+    - &erpcFallbackController
+      name: fallback-controller
+      image: 537124939463.dkr.ecr.eu-west-3.amazonaws.com/docker-hub/morphoorg/haproxy-controller-erpc:v1.2.2
+      imagePullPolicy: IfNotPresent
+      env:
+        - name: PROMETHEUS_URL
+          value: "http://prometheus-stack-kube-prom-prometheus.monitoring.svc.cluster.local:9090"
+        - name: BACKEND_NAME
+          value: "erpc-backend"
+        - name: MAIN_HEALTH_BACKEND_NAME
+          value: "erpc-main-health-backend"
+        - name: MAIN_HEALTH_SERVER_PREFIX
+          value: "erpc-main-health"
+        - name: FALLBACK_SERVER_PREFIX
+          value: "erpc-fallback"
+        - name: HAPROXY_SOCKET
+          value: "/var/run/haproxy/admin.sock"
+        - name: UPDATE_INTERVAL_SECONDS
+          value: "30"
+        - name: ENABLE_AFTER_FAILURES
+          value: "6"
+        - name: RECOVER_AFTER_SUCCESSES
+          value: "20"
+        - name: DEGRADED_P99_MS
+          value: "25000"
+        - name: RECOVERED_P99_MS
+          value: "10000"
+        - name: DEGRADED_ERROR_RATE_PERCENT
+          value: "1"
+        - name: RECOVERED_ERROR_RATE_PERCENT
+          value: "0.5"
+        - name: FALLBACK_ACTIVE_WEIGHT
+          value: "1"
+        - name: FALLBACK_IDLE_WEIGHT
+          value: "0"
+        - name: MIN_TRAFFIC_RPS
+          value: "10"
+        - name: REQUEST_RATE_QUERY
+          value: 'sum(erpc:network_request_received_total:rate1m_by_pod{pod=~"erpc-[0-9a-f]{9,10}-[0-9a-z]{5}"})'
+        - name: LATENCY_QUERY
+          value: 'histogram_quantile(0.99, sum by (le) (erpc:network_request_duration_seconds_bucket:rate1m_by_pod{pod=~"erpc-[0-9a-f]{9,10}-[0-9a-z]{5}"})) * 1000'
+        - name: ERROR_RATE_QUERY
+          value: '100 * (sum(erpc:network_failed_actionable_request_total:rate1m_by_pod{pod=~"erpc-[0-9a-f]{9,10}-[0-9a-z]{5}"}) or on() vector(0)) / clamp_min(sum(erpc:network_request_received_total:rate1m_by_pod{pod=~"erpc-[0-9a-f]{9,10}-[0-9a-z]{5}"}), 1)'
+      command:
+        - /bin/sh
+        - -ec
+      args:
+        - |
+          log() {
+            echo "$(date '+%Y-%m-%d %H:%M:%S') [$(hostname)] fallback-controller - $*"
+          }
+
+          url_encode() {
+            echo "$1" | sed \
+              -e 's/%/%25/g' \
+              -e 's/ /%20/g' \
+              -e 's/{/%7B/g' \
+              -e 's/}/%7D/g' \
+              -e 's/\[/%5B/g' \
+              -e 's/\]/%5D/g' \
+              -e 's/=/%3D/g' \
+              -e 's/,/%2C/g' \
+              -e 's/>/%3E/g' \
+              -e 's/</%3C/g' \
+              -e 's/"/%22/g' \
+              -e 's/+/%2B/g' \
+              -e 's#/#%2F#g' \
+              -e 's/(/%28/g' \
+              -e 's/)/%29/g'
+          }
+
+          query_prometheus_value() {
+            query="$1"
+            encoded_query="$(url_encode "$query")"
+            response="$(wget -qO- --timeout=10 "${PROMETHEUS_URL}/api/v1/query?query=${encoded_query}" 2>/dev/null || true)"
+
+            if [ -z "$response" ] || echo "$response" | grep -q '"status":"error"'; then
+              log "Prometheus query failed: $query"
+              return 1
+            fi
+
+            value="$(echo "$response" | sed -n 's/.*"value":\[[^,]*,"\([^"]*\)".*/\1/p' | head -1)"
+            case "$value" in
+              ""|NaN|nan|Inf|+Inf|-Inf)
+                log "Prometheus query returned no usable value: $query"
+                return 1
+                ;;
+            esac
+            echo "$value"
+          }
+
+          fallback_servers() {
+            echo "show servers state ${BACKEND_NAME}" | socat stdio "unix-connect:${HAPROXY_SOCKET}" 2>/dev/null | awk -v backend="$BACKEND_NAME" -v prefix="$FALLBACK_SERVER_PREFIX" '
+              $2 == backend && index($4, prefix) == 1 && $5 != "-" { print $4 }
+            '
+          }
+
+          set_fallback_weight() {
+            weight="$1"
+            servers="$(fallback_servers || true)"
+            if [ -z "$servers" ]; then
+              log "No fallback servers currently resolved"
+              return 1
+            fi
+
+            for server in $servers; do
+              command="set server ${BACKEND_NAME}/${server} weight ${weight}"
+              if echo "$command" | socat stdio "unix-connect:${HAPROXY_SOCKET}" >/dev/null 2>&1; then
+                log "Set ${BACKEND_NAME}/${server} weight=${weight}"
+              else
+                log "Failed to set ${BACKEND_NAME}/${server} weight=${weight}"
+              fi
+            done
+          }
+
+          is_gt() {
+            awk -v a="$1" -v b="$2" 'BEGIN { exit !(a > b) }'
+          }
+
+          is_lt() {
+            awk -v a="$1" -v b="$2" 'BEGIN { exit !(a < b) }'
+          }
+
+          fallback_has_active_weight() {
+            echo "show stat" | socat stdio "unix-connect:${HAPROXY_SOCKET}" 2>/dev/null | awk -F, -v backend="$BACKEND_NAME" -v prefix="$FALLBACK_SERVER_PREFIX" -v idle="$FALLBACK_IDLE_WEIGHT" '
+              $1 == backend && index($2, prefix) == 1 && ($19 + 0) > (idle + 0) { found=1 }
+              END { exit !found }
+            '
+          }
+
+          main_health_counts() {
+            stats="$(echo "show stat" | socat stdio "unix-connect:${HAPROXY_SOCKET}" 2>/dev/null)" || return 1
+            echo "$stats" | awk -F, -v backend="$MAIN_HEALTH_BACKEND_NAME" -v prefix="$MAIN_HEALTH_SERVER_PREFIX" '
+              $1 == backend && index($2, prefix) == 1 {
+                if ($18 !~ /^MAINT/) resolved++
+                if ($18 == "UP") up++
+              }
+              END { print (up + 0) ":" (resolved + 0) }
+            '
+          }
+
+          keep_fallback_active_for_direct_outage() {
+            main_health_counts="$(main_health_counts || echo "")"
+            main_healthy_count="${main_health_counts%%:*}"
+            main_resolved_count="${main_health_counts##*:}"
+            if [ -z "$main_health_counts" ] || [ "$main_resolved_count" = "0" ]; then
+              direct_outage_count=0
+              if [ "$main_seen_healthy" -eq 1 ]; then
+                direct_outage_seen=1
+                log "No resolved main eRPC health servers; direct fallback handles outage until main DNS/health recovers"
+                if [ "$active" -eq 1 ]; then
+                  set_fallback_weight "${FALLBACK_ACTIVE_WEIGHT}" || true
+                fi
+                return 0
+              fi
+              direct_outage_seen=0
+              log "No resolved main eRPC health servers yet; skipping direct-outage fallback activation"
+              return 1
+            fi
+            if [ "$main_healthy_count" = "0" ]; then
+              direct_outage_count=$((direct_outage_count + 1))
+              if [ "$main_seen_healthy" -eq 1 ]; then
+                direct_outage_seen=1
+              fi
+              if [ "$active" -eq 1 ]; then
+                log "No healthy main eRPC servers; preserving weighted fallback recovery handoff"
+                set_fallback_weight "${FALLBACK_ACTIVE_WEIGHT}" || true
+                return 0
+              fi
+              if [ "$direct_outage_count" -lt "$ENABLE_AFTER_FAILURES" ]; then
+                log "No healthy main eRPC servers; direct fallback handles outage while weighted recovery handoff waits direct_outage_count=${direct_outage_count}/${ENABLE_AFTER_FAILURES}"
+                return 0
+              fi
+              missing_metrics_count=0
+              degraded_count=0
+              recovered_count=0
+              log "No healthy main eRPC servers for ${direct_outage_count} intervals; keeping direct-outage fallback recovery handoff active"
+              set_fallback_weight "${FALLBACK_ACTIVE_WEIGHT}" || true
+              active=1
+              return 0
+            fi
+            main_seen_healthy=1
+            if [ "$direct_outage_seen" -eq 1 ]; then
+              direct_outage_count=0
+              direct_outage_seen=0
+              missing_metrics_count=0
+              degraded_count=0
+              recovered_count=0
+              log "Main eRPC servers recovered after total outage; enabling weighted fallback recovery handoff"
+              set_fallback_weight "${FALLBACK_ACTIVE_WEIGHT}" && active=1
+              return 0
+            fi
+            direct_outage_count=0
+            return 1
+          }
+
+          sync_startup_state() {
+            if keep_fallback_active_for_direct_outage; then
+              return
+            fi
+
+            startup_request_rate="$(query_prometheus_value "$REQUEST_RATE_QUERY" || echo "")"
+
+            if [ -n "$startup_request_rate" ] && ! is_gt "$startup_request_rate" "$MIN_TRAFFIC_RPS"; then
+              if fallback_has_active_weight; then
+                active=1
+                log "Main eRPC traffic below gate at startup; preserving active fallback weights"
+              else
+                log "Main eRPC traffic below gate at startup; preserving idle fallback weights"
+              fi
+              return
+            fi
+
+            startup_p99_ms="$(query_prometheus_value "$LATENCY_QUERY" || echo "")"
+            startup_error_rate="$(query_prometheus_value "$ERROR_RATE_QUERY" || echo "")"
+
+            if [ -z "$startup_request_rate" ] || [ -z "$startup_p99_ms" ] || [ -z "$startup_error_rate" ]; then
+              if fallback_has_active_weight; then
+                active=1
+                log "Metrics unavailable at startup; preserving active fallback weights"
+              else
+                log "Metrics unavailable at startup; preserving idle fallback weights"
+              fi
+              return
+            fi
+
+            if is_gt "$startup_p99_ms" "$DEGRADED_P99_MS" || is_gt "$startup_error_rate" "$DEGRADED_ERROR_RATE_PERCENT"; then
+              log "Main eRPC already degraded at startup; enabling fallback weight=${FALLBACK_ACTIVE_WEIGHT}"
+              set_fallback_weight "${FALLBACK_ACTIVE_WEIGHT}" && active=1
+            elif is_lt "$startup_p99_ms" "$RECOVERED_P99_MS" && is_lt "$startup_error_rate" "$RECOVERED_ERROR_RATE_PERCENT"; then
+              log "Main eRPC healthy at startup; disabling fallback weight=${FALLBACK_IDLE_WEIGHT}"
+              set_fallback_weight "${FALLBACK_IDLE_WEIGHT}" && active=0
+            elif fallback_has_active_weight; then
+              active=1
+              log "Startup metrics between thresholds; preserving active fallback weights"
+            else
+              log "Startup metrics between thresholds; preserving idle fallback weights"
+            fi
+          }
+
+          active=0
+          degraded_count=0
+          recovered_count=0
+          missing_metrics_count=0
+          direct_outage_count=0
+          direct_outage_seen=0
+          main_seen_healthy=0
+
+          log "Starting auto fallback controller: traffic gate>${MIN_TRAFFIC_RPS}rps; degrade p99>${DEGRADED_P99_MS}ms or failures>${DEGRADED_ERROR_RATE_PERCENT}% for ${ENABLE_AFTER_FAILURES} intervals; recover p99<${RECOVERED_P99_MS}ms and failures<${RECOVERED_ERROR_RATE_PERCENT}% for ${RECOVER_AFTER_SUCCESSES} intervals"
+          date +%s > /tmp/fallback-controller.heartbeat
+          sync_startup_state || true
+
+          while true; do
+            date +%s > /tmp/fallback-controller.heartbeat
+            if keep_fallback_active_for_direct_outage; then
+              sleep "${UPDATE_INTERVAL_SECONDS}"
+              continue
+            fi
+
+            request_rate="$(query_prometheus_value "$REQUEST_RATE_QUERY" || echo "")"
+
+            if [ -n "$request_rate" ] && ! is_gt "$request_rate" "$MIN_TRAFFIC_RPS"; then
+              missing_metrics_count=0
+              degraded_count=0
+              recovered_count=0
+              log "Traffic below gate; holding fallback state active=${active} request_rate=${request_rate}"
+              if [ "$active" -eq 1 ]; then
+                set_fallback_weight "${FALLBACK_ACTIVE_WEIGHT}" || true
+              else
+                set_fallback_weight "${FALLBACK_IDLE_WEIGHT}" || true
+              fi
+              sleep "${UPDATE_INTERVAL_SECONDS}"
+              continue
+            fi
+
+            p99_ms="$(query_prometheus_value "$LATENCY_QUERY" || echo "")"
+            error_rate="$(query_prometheus_value "$ERROR_RATE_QUERY" || echo "")"
+
+            if [ -z "$request_rate" ] || [ -z "$p99_ms" ] || [ -z "$error_rate" ]; then
+              missing_metrics_count=$((missing_metrics_count + 1))
+              degraded_count=0
+              recovered_count=0
+              log "Metrics unavailable; active=${active} missing_metrics_count=${missing_metrics_count}"
+              if [ "$active" -eq 0 ] && [ "$missing_metrics_count" -ge "$ENABLE_AFTER_FAILURES" ]; then
+                log "Main eRPC metrics unavailable; enabling fallback weight=${FALLBACK_ACTIVE_WEIGHT}"
+                set_fallback_weight "${FALLBACK_ACTIVE_WEIGHT}" && active=1
+              elif [ "$active" -eq 1 ]; then
+                set_fallback_weight "${FALLBACK_ACTIVE_WEIGHT}" || true
+              fi
+              sleep "${UPDATE_INTERVAL_SECONDS}"
+              continue
+            fi
+
+            missing_metrics_count=0
+            degraded=0
+            recovered=0
+            if is_gt "$p99_ms" "$DEGRADED_P99_MS" || is_gt "$error_rate" "$DEGRADED_ERROR_RATE_PERCENT"; then
+              degraded=1
+            fi
+            if is_lt "$p99_ms" "$RECOVERED_P99_MS" && is_lt "$error_rate" "$RECOVERED_ERROR_RATE_PERCENT"; then
+              recovered=1
+            fi
+
+            if [ "$degraded" -eq 1 ]; then
+              degraded_count=$((degraded_count + 1))
+              recovered_count=0
+            elif [ "$recovered" -eq 1 ]; then
+              recovered_count=$((recovered_count + 1))
+              degraded_count=0
+            else
+              degraded_count=0
+              recovered_count=0
+            fi
+
+            log "request_rate=${request_rate} p99_ms=${p99_ms} failure_rate_percent=${error_rate} active=${active} degraded_count=${degraded_count} recovered_count=${recovered_count}"
+
+            if [ "$active" -eq 0 ] && [ "$degraded_count" -ge "$ENABLE_AFTER_FAILURES" ]; then
+              log "Main eRPC degraded; enabling fallback weight=${FALLBACK_ACTIVE_WEIGHT}"
+              set_fallback_weight "${FALLBACK_ACTIVE_WEIGHT}" && active=1
+            elif [ "$active" -eq 1 ] && [ "$recovered_count" -ge "$RECOVER_AFTER_SUCCESSES" ]; then
+              log "Main eRPC recovered; disabling fallback weight=${FALLBACK_IDLE_WEIGHT}"
+              set_fallback_weight "${FALLBACK_IDLE_WEIGHT}" && active=0
+            elif [ "$active" -eq 1 ]; then
+              set_fallback_weight "${FALLBACK_ACTIVE_WEIGHT}" || true
+            else
+              set_fallback_weight "${FALLBACK_IDLE_WEIGHT}" || true
+            fi
+
+            sleep "${UPDATE_INTERVAL_SECONDS}"
+          done
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: [ALL]
+        readOnlyRootFilesystem: true
+      resources:
+        requests:
+          cpu: "50m"
+          memory: "64Mi"
+        limits:
+          cpu: "200m"
+          memory: "128Mi"
+      readinessProbe:
+        exec:
+          command:
+            - /bin/sh
+            - -c
+            - test -S "$HAPROXY_SOCKET"
+        initialDelaySeconds: 5
+        periodSeconds: 10
+        failureThreshold: 3
+      livenessProbe:
+        exec:
+          command:
+            - /bin/sh
+            - -c
+            - test -f /tmp/fallback-controller.heartbeat && [ $(( $(date +%s) - $(cat /tmp/fallback-controller.heartbeat) )) -lt 180 ]
+        initialDelaySeconds: 60
+        periodSeconds: 30
+        failureThreshold: 3
+      volumeMounts:
+        - name: haproxy-socket
+          mountPath: /var/run/haproxy
+        - name: controller-tmp
+          mountPath: /tmp
+
+  extraVolumes:
+    - name: haproxy-socket
+      emptyDir: {}
+    - name: controller-tmp
+      emptyDir: {}
+
+  extraVolumeMounts:
+    - name: haproxy-socket
+      mountPath: /var/run/haproxy
+
+  containerPorts:
+    http: 4000
+    prometheus: 8404
+
+  service:
+    type: ClusterIP
+
+  replicaCount: 3
+
+  resources:
+    requests:
+      cpu: "1"
+      memory: "512Mi"
+    limits:
+      cpu: "4"
+      memory: "2Gi"
+
+  # Disable upstream chart's HPA (uses metrics-server which isn't installed)
+  # Custom HPA is created via erpc-haproxy-hpa values above
+  autoscaling:
+    enabled: false
+
+  # Enable the HAProxy chart's actual PDB key. The previous lower-case
+  # podDisruptionBudget block was ignored by upstream chart 1.26.1.
+  PodDisruptionBudget:
+    enable: true
+    minAvailable: 2
+
+  # Pin the public CloudFront edge proxy to the on-demand node pool. Spot
+  # interruption of a single node previously removed all public HAProxy
+  # replicas at once and caused rpc.morpho.dev CloudFront 504s.
+  nodeSelector:
+    purpose: on-demand
+  tolerations:
+    - key: dedicated
+      operator: Equal
+      value: on-demand
+      effect: NoSchedule
+
+  # Keep the public CloudFront edge proxy off voluntary Karpenter disruption
+  # paths; this protects rpc.morpho.dev while still allowing HPA rollouts.
+  podAnnotations:
+    karpenter.sh/do-not-disrupt: "true"
+
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    fsGroup: 1000
+    seccompProfile:
+      type: RuntimeDefault
+
+  affinity:
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchLabels:
+              app.kubernetes.io/instance: erpc
+              app.kubernetes.io/name: erpc-haproxy
+          topologyKey: kubernetes.io/hostname
+
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: topology.kubernetes.io/zone
+      whenUnsatisfiable: DoNotSchedule
+      labelSelector:
+        matchLabels:
+          app.kubernetes.io/instance: erpc
+          app.kubernetes.io/name: erpc-haproxy
+
+erpc-processing-haproxy:
+  image:
+    repository: 537124939463.dkr.ecr.eu-west-3.amazonaws.com/docker-hub/haproxytech/haproxy-alpine
+
+  rbac:
+    create: true
+
+  serviceMonitor:
+    enabled: true
+    extraLabels:
+      release: prometheus
+    endpoints:
+      - port: prometheus
+        path: /metrics
+        scheme: http
+
+  config: |
+    global
+        stats socket /var/run/haproxy/admin.sock mode 660 level admin expose-fd listeners
+        stats timeout 30s
+        maxconn 500000
+        spread-checks 5
+        log stdout format raw local0 info
+        ulimit-n 1048576
+        tune.bufsize 131072
+        tune.maxrewrite 8192
+        tune.http.maxhdr 128
+        tune.recv_enough 16384
+        tune.runqueue-depth 512
+
+    defaults
+        mode http
+        log global
+        option httplog
+        option dontlognull
+        option http-server-close
+        option forwardfor except 127.0.0.0/8
+        timeout connect 5s
+        timeout client 60s
+        timeout server 60s
+        timeout http-request 30s
+        timeout http-keep-alive 30s
+        timeout queue 120s
+        timeout check 15s
+        retries 3
+        option redispatch
+        retry-on conn-failure empty-response response-timeout 503
+
+    frontend erpc-processing-frontend
+        bind *:4000
+        maxconn 500000
+        unique-id-format %{+X}o\ %ci:%cp_%fi:%fp_%Ts_%rt:%pid
+        unique-id-header X-Request-ID
+
+        # Direct fallback handles a total processing outage. The default backend
+        # also has metrics-driven weighted fallback for processing-side eRPC degradation.
+        use_backend erpc-processing-fallback-backend if { nbsrv(erpc-processing-main-health-backend) eq 0 }
+
+        default_backend erpc-processing-backend
+
+    backend erpc-processing-main-health-backend
+        balance roundrobin
+        option httpchk GET /healthcheck
+        http-check expect status 200
+        default-server inter 2s fastinter 1s downinter 2s rise 2 fall 3 check
+        server-template erpc-processing-main-health 100 erpc-processing-headless.morpho-prd.svc.cluster.local:4000 check resolvers k8s init-addr none
+
+    backend erpc-processing-backend
+        # Weighted round-robin keeps processing pods balanced by the existing
+        # weight-controller and lets fallback stay idle at weight 0 until the
+        # processing-specific fallback-controller activates it.
+        balance roundrobin
+        option httpchk GET /healthcheck
+        http-check expect status 200
+        http-reuse safe
+        default-server inter 2s fastinter 1s downinter 2s rise 2 fall 3 maxconn 5000 check
+        server-template erpc-processing 100 erpc-processing-headless.morpho-prd.svc.cluster.local:4000 check resolvers k8s init-addr none
+        # Weighted fallback is intentionally capped below fallback HPA max so
+        # partial fallback traffic cannot grow with scaled-out fallback pods.
+        server-template erpc-fallback 3 erpc-fallback-headless.morpho-prd.svc.cluster.local:4000 weight 0 check resolvers k8s init-addr none
+
+    backend erpc-processing-fallback-backend
+        balance leastconn
+        option httpchk GET /healthcheck
+        http-check expect status 200
+        http-reuse safe
+        default-server inter 2s fastinter 1s downinter 2s rise 2 fall 3 maxconn 5000 check
+        server-template erpc-fallback-direct 40 erpc-fallback-headless.morpho-prd.svc.cluster.local:4000 check resolvers k8s init-addr none
+
+    resolvers k8s
+        nameserver dns kube-dns.kube-system.svc.cluster.local:53
+        accepted_payload_size 8192
+        hold valid 5s
+        hold nx 5s
+        resolve_retries 3
+        timeout resolve 1s
+        timeout retry 1s
+
+    frontend stats
+        mode http
+        bind *:8404
+        http-request use-service prometheus-exporter if { path /metrics }
+        stats enable
+        stats uri /stats
+        stats refresh 10s
+        stats show-legends
+        stats show-node
+
+  sidecarContainers:
+    - name: weight-controller
+      image: 537124939463.dkr.ecr.eu-west-3.amazonaws.com/docker-hub/morphoorg/haproxy-controller-erpc:v1.2.2
+      imagePullPolicy: IfNotPresent
+      env:
+        - name: PROMETHEUS_URL
+          value: "http://prometheus-stack-kube-prom-prometheus.monitoring.svc.cluster.local:9090"
+        - name: GOROUTINE_QUERY
+          value: 'erpc:go_goroutines:by_pod{pod=~"erpc-processing-[0-9a-f]{9,10}-[0-9a-z]{5}"}'
+        - name: LATENCY_QUERY
+          value: 'histogram_quantile(0.99, erpc:network_request_duration_seconds_bucket:rate1m_by_pod{pod=~"erpc-processing-[0-9a-f]{9,10}-[0-9a-z]{5}"}) * 1000'
+        - name: REQUEST_RATE_QUERY
+          value: 'erpc:network_request_received_total:rate1m_by_pod{pod=~"erpc-processing-[0-9a-f]{9,10}-[0-9a-z]{5}"}'
+        - name: CPU_QUERY
+          value: '100 * erpc:container_cpu_usage:limit_ratio1m_by_pod{pod=~"erpc-processing-[0-9a-f]{9,10}-[0-9a-z]{5}"}'
+        - name: TARGET_GOROUTINES
+          value: "400"
+        - name: TARGET_LATENCY_MS
+          value: "500"
+        - name: TARGET_REQUEST_RATE
+          value: "50"
+        - name: TARGET_CPU
+          value: "60"
+        - name: WEIGHT_GOROUTINES
+          value: "0.30"
+        - name: WEIGHT_LATENCY
+          value: "0.35"
+        - name: WEIGHT_REQUEST_RATE
+          value: "0.15"
+        - name: WEIGHT_CPU
+          value: "0.20"
+        - name: BACKEND_NAME
+          value: "erpc-processing-backend"
+        - name: POD_NAMESPACE
+          value: "morpho-prd"
+        - name: UPDATE_INTERVAL
+          value: "5s"
+        - name: MIN_WEIGHT
+          value: "10"
+        - name: MAX_WEIGHT
+          value: "50"
+        - name: HAPROXY_SOCKET
+          value: "/var/run/haproxy/admin.sock"
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: [ALL]
+        readOnlyRootFilesystem: true
+      resources:
+        requests:
+          cpu: "100m"
+          memory: "128Mi"
+        limits:
+          cpu: "500m"
+          memory: "256Mi"
+      livenessProbe:
+        exec:
+          command:
+            - /bin/sh
+            - -c
+            - pgrep -f "controller.sh" > /dev/null
+        initialDelaySeconds: 10
+        periodSeconds: 30
+        failureThreshold: 3
+      readinessProbe:
+        exec:
+          command:
+            - /bin/sh
+            - -c
+            - test -S "$HAPROXY_SOCKET"
+        initialDelaySeconds: 5
+        periodSeconds: 10
+        failureThreshold: 3
+      volumeMounts:
+        - name: haproxy-socket
+          mountPath: /var/run/haproxy
+        - name: controller-tmp
+          mountPath: /tmp
+    - <<: *erpcFallbackController
+      env:
+        - name: PROMETHEUS_URL
+          value: "http://prometheus-stack-kube-prom-prometheus.monitoring.svc.cluster.local:9090"
+        - name: BACKEND_NAME
+          value: "erpc-processing-backend"
+        - name: MAIN_HEALTH_BACKEND_NAME
+          value: "erpc-processing-main-health-backend"
+        - name: MAIN_HEALTH_SERVER_PREFIX
+          value: "erpc-processing-main-health"
+        - name: FALLBACK_SERVER_PREFIX
+          value: "erpc-fallback"
+        - name: HAPROXY_SOCKET
+          value: "/var/run/haproxy/admin.sock"
+        - name: UPDATE_INTERVAL_SECONDS
+          value: "30"
+        - name: ENABLE_AFTER_FAILURES
+          value: "6"
+        - name: RECOVER_AFTER_SUCCESSES
+          value: "20"
+        - name: DEGRADED_P99_MS
+          value: "25000"
+        - name: RECOVERED_P99_MS
+          value: "5000"
+        - name: DEGRADED_ERROR_RATE_PERCENT
+          value: "2"
+        - name: RECOVERED_ERROR_RATE_PERCENT
+          value: "0.5"
+        - name: FALLBACK_ACTIVE_WEIGHT
+          value: "1"
+        - name: FALLBACK_IDLE_WEIGHT
+          value: "0"
+        - name: MIN_TRAFFIC_RPS
+          value: "50"
+        - name: REQUEST_RATE_QUERY
+          value: 'sum(erpc:network_request_received_total:rate1m_by_pod{pod=~"erpc-processing-[0-9a-f]{9,10}-[0-9a-z]{5}"})'
+        - name: LATENCY_QUERY
+          value: 'histogram_quantile(0.99, sum by (le) (erpc:network_request_duration_seconds_bucket:rate1m_by_pod{pod=~"erpc-processing-[0-9a-f]{9,10}-[0-9a-z]{5}"})) * 1000'
+        - name: ERROR_RATE_QUERY
+          value: '100 * (sum(erpc:network_failed_actionable_request_total:rate1m_by_pod{pod=~"erpc-processing-[0-9a-f]{9,10}-[0-9a-z]{5}"}) or on() vector(0)) / clamp_min(sum(erpc:network_request_received_total:rate1m_by_pod{pod=~"erpc-processing-[0-9a-f]{9,10}-[0-9a-z]{5}"}), 1)'
+  extraVolumes:
+    - name: haproxy-socket
+      emptyDir: {}
+    - name: controller-tmp
+      emptyDir: {}
+
+  extraVolumeMounts:
+    - name: haproxy-socket
+      mountPath: /var/run/haproxy
+
+  containerPorts:
+    http: 4000
+    prometheus: 8404
+
+  service:
+    type: ClusterIP
+
+  replicaCount: 3
+
+  resources:
+    requests:
+      cpu: "1"
+      memory: "512Mi"
+    limits:
+      cpu: "4"
+      memory: "2Gi"
+
+  autoscaling:
+    enabled: false
+
+  # Enable the HAProxy chart's actual PDB key. The previous lower-case
+  # podDisruptionBudget block was ignored by upstream chart 1.26.1.
+  PodDisruptionBudget:
+    enable: true
+    minAvailable: 2
+
+  # Pin HAProxy pods to the on-demand node pool so edge/proxy capacity is not
+  # removed by abrupt spot interruptions.
+  nodeSelector:
+    purpose: on-demand
+  tolerations:
+    - key: dedicated
+      operator: Equal
+      value: on-demand
+      effect: NoSchedule
+
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    fsGroup: 1000
+    seccompProfile:
+      type: RuntimeDefault
+
+  affinity:
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchLabels:
+              app.kubernetes.io/instance: erpc
+              app.kubernetes.io/name: erpc-processing-haproxy
+          topologyKey: kubernetes.io/hostname
+
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: topology.kubernetes.io/zone
+      whenUnsatisfiable: DoNotSchedule
+      labelSelector:
+        matchLabels:
+          app.kubernetes.io/instance: erpc
+          app.kubernetes.io/name: erpc-processing-haproxy
+
+erpc-router-haproxy:
+  image:
+    repository: 537124939463.dkr.ecr.eu-west-3.amazonaws.com/docker-hub/haproxytech/haproxy-alpine
+
+  rbac:
+    create: true
+
+  serviceMonitor:
+    enabled: true
+    extraLabels:
+      release: prometheus
+    endpoints:
+      - port: prometheus
+        path: /metrics
+        scheme: http
+
+  config: |
+    global
+        stats socket /var/run/haproxy/admin.sock mode 660 level admin expose-fd listeners
+        stats timeout 30s
+        maxconn 500000
+        spread-checks 5
+        log stdout format raw local0 info
+        ulimit-n 1048576
+        tune.bufsize 131072
+        tune.maxrewrite 8192
+        tune.http.maxhdr 128
+        tune.recv_enough 16384
+        tune.runqueue-depth 512
+
+    defaults
+        mode http
+        log global
+        option httplog
+        option dontlognull
+        option http-server-close
+        option forwardfor except 127.0.0.0/8
+        timeout connect 5s
+        timeout client 60s
+        timeout server 60s
+        timeout http-request 30s
+        timeout http-keep-alive 30s
+        timeout queue 120s
+        timeout check 15s
+        retries 3
+        option redispatch
+        retry-on conn-failure empty-response response-timeout 503
+
+    frontend erpc-router-frontend
+        bind *:4000
+        maxconn 500000
+        unique-id-format %{+X}o\ %ci:%cp_%fi:%fp_%Ts_%rt:%pid
+        unique-id-header X-Request-ID
+
+        # If every router eRPC server is down, bypass the metric debounce and
+        # route straight to fallback. The controller still handles gradual
+        # degraded-performance activation through erpc-router-backend weights.
+        use_backend erpc-router-fallback-backend if { nbsrv(erpc-router-main-health-backend) eq 0 }
+
+        default_backend erpc-router-backend
+
+    backend erpc-router-main-health-backend
+        balance roundrobin
+        option httpchk GET /healthcheck
+        http-check expect status 200
+        default-server inter 2s fastinter 1s downinter 2s rise 2 fall 3 check
+        server-template erpc-router-main-health 100 erpc-router-headless.morpho-prd.svc.cluster.local:4000 check resolvers k8s init-addr none
+
+    backend erpc-router-backend
+        # Weighted round-robin caps fallback traffic by configured weight.
+        balance roundrobin
+        option httpchk GET /healthcheck
+        http-check expect status 200
+        http-reuse safe
+        default-server inter 2s fastinter 1s downinter 2s rise 2 fall 3 maxconn 5000 check
+        server-template erpc-router 100 erpc-router-headless.morpho-prd.svc.cluster.local:4000 check resolvers k8s init-addr none
+        # Weighted fallback is intentionally capped below fallback HPA max so
+        # partial fallback traffic cannot grow with scaled-out fallback pods.
+        server-template erpc-fallback 3 erpc-fallback-headless.morpho-prd.svc.cluster.local:4000 weight 0 check resolvers k8s init-addr none
+
+    backend erpc-router-fallback-backend
+        balance leastconn
+        option httpchk GET /healthcheck
+        http-check expect status 200
+        http-reuse safe
+        default-server inter 2s fastinter 1s downinter 2s rise 2 fall 3 maxconn 5000 check
+        server-template erpc-fallback-direct 40 erpc-fallback-headless.morpho-prd.svc.cluster.local:4000 check resolvers k8s init-addr none
+
+    resolvers k8s
+        nameserver dns kube-dns.kube-system.svc.cluster.local:53
+        accepted_payload_size 8192
+        hold valid 5s
+        hold nx 5s
+        resolve_retries 3
+        timeout resolve 1s
+        timeout retry 1s
+
+    frontend stats
+        mode http
+        bind *:8404
+        http-request use-service prometheus-exporter if { path /metrics }
+        stats enable
+        stats uri /stats
+        stats refresh 10s
+        stats show-legends
+        stats show-node
+
+  sidecarContainers:
+    - name: weight-controller
+      image: 537124939463.dkr.ecr.eu-west-3.amazonaws.com/docker-hub/morphoorg/haproxy-controller-erpc:v1.2.2
+      imagePullPolicy: IfNotPresent
+      env:
+        - name: PROMETHEUS_URL
+          value: "http://prometheus-stack-kube-prom-prometheus.monitoring.svc.cluster.local:9090"
+        - name: GOROUTINE_QUERY
+          value: 'erpc:go_goroutines:by_pod{pod=~"erpc-router-[0-9a-f]{9,10}-[0-9a-z]{5}"}'
+        - name: LATENCY_QUERY
+          value: 'histogram_quantile(0.99, erpc:network_request_duration_seconds_bucket:rate1m_by_pod{pod=~"erpc-router-[0-9a-f]{9,10}-[0-9a-z]{5}"}) * 1000'
+        - name: REQUEST_RATE_QUERY
+          value: 'erpc:network_request_received_total:rate1m_by_pod{pod=~"erpc-router-[0-9a-f]{9,10}-[0-9a-z]{5}"}'
+        - name: CPU_QUERY
+          value: '100 * erpc:container_cpu_usage:limit_ratio1m_by_pod{pod=~"erpc-router-[0-9a-f]{9,10}-[0-9a-z]{5}"}'
+        - name: TARGET_GOROUTINES
+          value: "400"
+        - name: TARGET_LATENCY_MS
+          value: "500"
+        - name: TARGET_REQUEST_RATE
+          value: "50"
+        - name: TARGET_CPU
+          value: "60"
+        - name: WEIGHT_GOROUTINES
+          value: "0.30"
+        - name: WEIGHT_LATENCY
+          value: "0.35"
+        - name: WEIGHT_REQUEST_RATE
+          value: "0.15"
+        - name: WEIGHT_CPU
+          value: "0.20"
+        - name: BACKEND_NAME
+          value: "erpc-router-backend"
+        - name: POD_NAMESPACE
+          value: "morpho-prd"
+        - name: UPDATE_INTERVAL
+          value: "5s"
+        - name: MIN_WEIGHT
+          value: "10"
+        - name: MAX_WEIGHT
+          value: "50"
+        - name: HAPROXY_SOCKET
+          value: "/var/run/haproxy/admin.sock"
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: [ALL]
+        readOnlyRootFilesystem: true
+      resources:
+        requests:
+          cpu: "100m"
+          memory: "128Mi"
+        limits:
+          cpu: "500m"
+          memory: "256Mi"
+      livenessProbe:
+        exec:
+          command:
+            - /bin/sh
+            - -c
+            - pgrep -f "controller.sh" > /dev/null
+        initialDelaySeconds: 10
+        periodSeconds: 30
+        failureThreshold: 3
+      readinessProbe:
+        exec:
+          command:
+            - /bin/sh
+            - -c
+            - test -S "$HAPROXY_SOCKET"
+        initialDelaySeconds: 5
+        periodSeconds: 10
+        failureThreshold: 3
+      volumeMounts:
+        - name: haproxy-socket
+          mountPath: /var/run/haproxy
+        - name: controller-tmp
+          mountPath: /tmp
+    - <<: *erpcFallbackController
+      env:
+        - name: PROMETHEUS_URL
+          value: "http://prometheus-stack-kube-prom-prometheus.monitoring.svc.cluster.local:9090"
+        - name: BACKEND_NAME
+          value: "erpc-router-backend"
+        - name: MAIN_HEALTH_BACKEND_NAME
+          value: "erpc-router-main-health-backend"
+        - name: MAIN_HEALTH_SERVER_PREFIX
+          value: "erpc-router-main-health"
+        - name: FALLBACK_SERVER_PREFIX
+          value: "erpc-fallback"
+        - name: HAPROXY_SOCKET
+          value: "/var/run/haproxy/admin.sock"
+        - name: UPDATE_INTERVAL_SECONDS
+          value: "30"
+        - name: ENABLE_AFTER_FAILURES
+          value: "6"
+        - name: RECOVER_AFTER_SUCCESSES
+          value: "20"
+        - name: DEGRADED_P99_MS
+          value: "25000"
+        - name: RECOVERED_P99_MS
+          value: "10000"
+        - name: DEGRADED_ERROR_RATE_PERCENT
+          value: "1"
+        - name: RECOVERED_ERROR_RATE_PERCENT
+          value: "0.5"
+        - name: FALLBACK_ACTIVE_WEIGHT
+          value: "1"
+        - name: FALLBACK_IDLE_WEIGHT
+          value: "0"
+        - name: MIN_TRAFFIC_RPS
+          value: "10"
+        - name: REQUEST_RATE_QUERY
+          value: 'sum(erpc:network_request_received_total:rate1m_by_pod{pod=~"erpc-router-[0-9a-f]{9,10}-[0-9a-z]{5}"})'
+        - name: LATENCY_QUERY
+          value: 'histogram_quantile(0.99, sum by (le) (erpc:network_request_duration_seconds_bucket:rate1m_by_pod{pod=~"erpc-router-[0-9a-f]{9,10}-[0-9a-z]{5}"})) * 1000'
+        - name: ERROR_RATE_QUERY
+          value: '100 * (sum(erpc:network_failed_actionable_request_total:rate1m_by_pod{pod=~"erpc-router-[0-9a-f]{9,10}-[0-9a-z]{5}"}) or on() vector(0)) / clamp_min(sum(erpc:network_request_received_total:rate1m_by_pod{pod=~"erpc-router-[0-9a-f]{9,10}-[0-9a-z]{5}"}), 1)'
+
+  extraVolumes:
+    - name: haproxy-socket
+      emptyDir: {}
+    - name: controller-tmp
+      emptyDir: {}
+
+  extraVolumeMounts:
+    - name: haproxy-socket
+      mountPath: /var/run/haproxy
+
+  containerPorts:
+    http: 4000
+    prometheus: 8404
+
+  service:
+    type: ClusterIP
+
+  replicaCount: 3
+
+  resources:
+    requests:
+      cpu: "1"
+      memory: "512Mi"
+    limits:
+      cpu: "4"
+      memory: "2Gi"
+
+  autoscaling:
+    enabled: false
+
+  # Enable the HAProxy chart's actual PDB key. The previous lower-case
+  # podDisruptionBudget block was ignored by upstream chart 1.26.1.
+  PodDisruptionBudget:
+    enable: true
+    minAvailable: 2
+
+  # Pin HAProxy pods to the on-demand node pool so edge/proxy capacity is not
+  # removed by abrupt spot interruptions.
+  nodeSelector:
+    purpose: on-demand
+  tolerations:
+    - key: dedicated
+      operator: Equal
+      value: on-demand
+      effect: NoSchedule
+
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    fsGroup: 1000
+    seccompProfile:
+      type: RuntimeDefault
+
+  affinity:
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchLabels:
+              app.kubernetes.io/instance: erpc
+              app.kubernetes.io/name: erpc-router-haproxy
+          topologyKey: kubernetes.io/hostname
+
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: topology.kubernetes.io/zone
+      whenUnsatisfiable: DoNotSchedule
+      labelSelector:
+        matchLabels:
+          app.kubernetes.io/instance: erpc
+          app.kubernetes.io/name: erpc-router-haproxy
+
+# =============================================================================
+# eRPC Application Configuration
+# =============================================================================
+erpc:
+  fullnameOverride: "erpc"
+
+  serviceAccount:
+    runtimeName: "erpc-runtime"
+    vaultCreator:
+      create: false
+      name: "erpc"
+
+  # PLA-1360: enable Pod Security Standards "restricted" hardening on the
+  # main erpc prd instance after dev validation. The erpc-dev alias is
+  # already opted in via PR 7536.
+  securityHardening:
+    enabled: true
+
+  image:
+    repository: 537124939463.dkr.ecr.eu-west-3.amazonaws.com/erpc
+    tag: "0.1.2"
+
+  postgresql:
+    backup:
+      method: volumeSnapshot
+      volumeSnapshotClassName: "csi-aws-vsc"
+      retentionPolicy: "7d"
+      destinationPath: "s3://prd-morpho-database-backup/erpc-backups"
+    # PLA-1112: right-sized from gp3-db-burst (16000/1000) — CloudWatch peak was
+    # only ~339 IOPS / ~8 MB/s, ~50x under burst. gp3-db-standard (3000/125)
+    # leaves ample headroom.
+    storageClass: gp3-db-standard
+    volumeAttributesClassName: gp3-db-standard
+    # Primary currently uses ~693Gi; 500Gi chart default would block replica re-bootstrap
+    storage: "1Ti"
+    # PLA-1112: 8 CPU / 32Gi forced m8g.4xlarge (capped at 8/32 — paying for a
+    # 64Gi/16-vCPU node). 7d peak is only ~0.6 CPU cores and ~0.48Gi RSS.
+    # 7400m/28Gi still rounds up to m8g.4xlarge (both sit at ~98-99% of m8g.2xlarge
+    # allocatable once DaemonSets are counted), so trim to 6800m / 26Gi to land
+    # cleanly on m8g.2xlarge with headroom — half the node, ~26Gi cache for the
+    # ~700GB latency-sensitive DB.
+    resources:
+      requests:
+        cpu: "6800m"
+        memory: "26Gi"
+      limits:
+        cpu: "6800m"
+        memory: "26Gi"
+    # Enforce 1-pod-per-node across all CNPG instances (cross-cluster).
+    affinity:
+      additionalPodAntiAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchExpressions:
+                - key: cnpg.io/podRole
+                  operator: In
+                  values: [instance]
+            topologyKey: kubernetes.io/hostname
+    sharedBuffers: "8GB"
+    effectiveCacheSize: "24GB"
+    maintenanceWorkMem: "1GB"
+    workMem: "8MB"
+    maxWorkerProcesses: "4"
+    maxParallelWorkers: "4"
+    maxParallelWorkersPerGather: "2"
+    maxParallelMaintenanceWorkers: "2"
+    autovacuumMaxWorkers: "4"
+
+  vault:
+    jobImage:
+      repository: 537124939463.dkr.ecr.eu-west-3.amazonaws.com/erpc-validator
+      tag: "0.1.2"
+
+  headlessService:
+    enabled: true
+
+  replicaCount: 10
+
+  autoscaling:
+    enabled: true
+    minReplicas: 10
+    maxReplicas: 20
+    targetCPUUtilizationPercentage: 80
+    targetMemoryUtilizationPercentage: 80
+
+  extraEnvVars:
+    - name: GOMEMLIMIT
+      value: "6GiB"
+    - name: GOGC
+      value: "25"
+
+  resources:
+    requests:
+      cpu: "750m"
+      memory: "4Gi"
+    limits:
+      cpu: "1500m"
+      memory: "8Gi"
+
+  startupProbe:
+    initialDelaySeconds: 10
+    periodSeconds: 5
+    timeoutSeconds: 5
+    failureThreshold: 6
+
+  livenessProbe:
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+
+  readinessProbe:
+    path: /healthcheck
+    periodSeconds: 5
+    timeoutSeconds: 5
+    failureThreshold: 2
+
+  monitoring:
+    podMonitor:
+      enabled: true
+      additionalLabels:
+        release: prometheus
+      interval: 5s
+      scrapeTimeout: 4s
+
+# =============================================================================
+# eRPC Dev Instance - Single pod, no HPA, no database
+# =============================================================================
+erpc-dev:
+  enabled: true
+  fullnameOverride: "erpc-dev"
+
+  # PLA-1360: validate Pod Security Standards "restricted" hardening on the
+  # erpc dev instance (distroless image) before flipping in the other prd
+  # erpc instances.
+  securityHardening:
+    enabled: true
+
+  image:
+    repository: 537124939463.dkr.ecr.eu-west-3.amazonaws.com/erpc
+    tag: "0.1.2"
+
+  replicaCount: 1
+
+  autoscaling:
+    enabled: false
+    minReplicas: 1
+
+  # Disable PostgreSQL (shares the production database via Vault config)
+  postgresql:
+    enabled: false
+
+  # Reuse the existing erpc Vault creator identity only for secret materialization;
+  # runtime pods use erpc-dev-runtime and have no Secret RBAC.
+  serviceAccount:
+    runtimeName: "erpc-dev-runtime"
+    vaultCreator:
+      create: false
+      name: "erpc"
+
+  # Dev config path in Vault. Keep this source cache/state-isolated from prod:
+  # Redis DB/cluster key are dev-only and PostgreSQL cache connector is disabled.
+  vault:
+    configPath: "secret/data/erpc/config-dev"
+    jobImage:
+      repository: 537124939463.dkr.ecr.eu-west-3.amazonaws.com/erpc-validator
+      tag: "0.1.2"
+      pullPolicy: IfNotPresent
+
+  # Public ingress for erpc-dev is managed in morpho-infra via CloudFront and
+  # a Terraform-owned internal NLB.
+  service:
+    type: ClusterIP
+
+  extraEnvVars:
+    - name: GOMEMLIMIT
+      value: "640MiB"
+    - name: GOGC
+      value: "50"
+
+  resources:
+    requests:
+      cpu: "250m"
+      memory: "384Mi"
+    limits:
+      cpu: "1200m"
+      memory: "768Mi"
+
+  startupProbe:
+    initialDelaySeconds: 10
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 6
+
+  livenessProbe:
+    initialDelaySeconds: 30
+    periodSeconds: 10
+    timeoutSeconds: 1
+    failureThreshold: 3
+
+  readinessProbe:
+    path: /healthcheck
+    initialDelaySeconds: 10
+    periodSeconds: 5
+    timeoutSeconds: 5
+    failureThreshold: 2
+
+  monitoring:
+    podMonitor:
+      enabled: true
+      additionalLabels:
+        release: prometheus
+      interval: 5s
+      scrapeTimeout: 4s
+
+# =============================================================================
+# eRPC Fallback Instance - Hot standby upstream-image pool for incident traffic
+# =============================================================================
+erpc-fallback:
+  enabled: true
+  fullnameOverride: "erpc-fallback"
+
+  securityHardening:
+    enabled: true
+
+  image:
+    # Keep the upstream eRPC image for incident fallback, but pin the digest so
+    # pod restarts cannot drift to a new upstream build without review.
+    repository: ghcr.io/erpc/erpc
+    tag: "0.1.0@sha256:f8a292d5e867cf878e5fad1c3b0702531bbf86f3f1d7db1af18e34cbcd5b5a6e"
+    pullPolicy: IfNotPresent
+
+  autoscaling:
+    enabled: true
+    # Keep fallback cheap while idle, but let it burst to full failover capacity
+    # as soon as real traffic or resource pressure appears.
+    minReplicas: 3
+    maxReplicas: 40
+    targetCPUUtilizationPercentage: 50
+    targetMemoryUtilizationPercentage: 70
+    behavior:
+      scaleUp:
+        stabilizationWindowSeconds: 0
+        policies:
+          - type: Percent
+            value: 200
+            periodSeconds: 15
+          - type: Pods
+            value: 16
+            periodSeconds: 15
+        selectPolicy: Max
+      scaleDown:
+        stabilizationWindowSeconds: 300
+        policies:
+          - type: Percent
+            value: 50
+            periodSeconds: 60
+          - type: Pods
+            value: 8
+            periodSeconds: 60
+        selectPolicy: Max
+
+  postgresql:
+    enabled: false
+
+  serviceAccount:
+    runtimeName: "erpc-fallback-runtime"
+    vaultCreator:
+      create: false
+      name: "erpc"
+
+  vault:
+    configPath: "secret/data/erpc/config-fallback"
+    secretsPath: "secret/data/erpc/secrets"
+    jobImage:
+      repository: 537124939463.dkr.ecr.eu-west-3.amazonaws.com/erpc-validator
+      tag: "0.0.83"
+      pullPolicy: IfNotPresent
+    validationImage:
+      enabled: true
+      repository: ghcr.io/erpc/erpc
+      tag: "0.1.0@sha256:f8a292d5e867cf878e5fad1c3b0702531bbf86f3f1d7db1af18e34cbcd5b5a6e"
+      pullPolicy: IfNotPresent
+      command:
+        - /erpc-server
+
+  headlessService:
+    enabled: true
+
+  extraEnvVars:
+    - name: GOMEMLIMIT
+      value: "6GiB"
+    - name: GOGC
+      value: "25"
+
+  resources:
+    requests:
+      cpu: "250m"
+      memory: "1Gi"
+    limits:
+      cpu: "1500m"
+      memory: "8Gi"
+
+  lifecycle:
+    enabled: false
+
+  startupProbe:
+    initialDelaySeconds: 10
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 6
+
+  livenessProbe:
+    initialDelaySeconds: 30
+    periodSeconds: 10
+    timeoutSeconds: 1
+    failureThreshold: 3
+
+  readinessProbe:
+    path: /healthcheck
+    initialDelaySeconds: 10
+    periodSeconds: 5
+    timeoutSeconds: 5
+    failureThreshold: 2
+
+  monitoring:
+    podMonitor:
+      enabled: true
+      additionalLabels:
+        release: prometheus
+      interval: 5s
+      scrapeTimeout: 4s
+
+# =============================================================================
+# eRPC Processing Instance - Dedicated pool for heavier workloads
+# =============================================================================
+erpc-processing:
+  enabled: true
+  fullnameOverride: "erpc-processing"
+
+  # PLA-1360: enable Pod Security Standards "restricted" hardening after
+  # dev validation.
+  securityHardening:
+    enabled: true
+
+  image:
+    repository: 537124939463.dkr.ecr.eu-west-3.amazonaws.com/erpc
+    tag: "0.1.2"
+
+  replicaCount: 3
+
+  autoscaling:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 8
+    targetCPUUtilizationPercentage: 80
+    targetMemoryUtilizationPercentage: 80
+
+  # Disable PostgreSQL (shares the production database via Vault config)
+  postgresql:
+    enabled: false
+
+  # Reuse the existing erpc Vault creator identity only for secret materialization;
+  # runtime pods use erpc-processing-runtime and have no Secret RBAC.
+  serviceAccount:
+    runtimeName: "erpc-processing-runtime"
+    vaultCreator:
+      create: false
+      name: "erpc"
+
+  # Dedicated processing config path in Vault
+  vault:
+    configPath: "secret/data/erpc/config-processing"
+    jobImage:
+      repository: 537124939463.dkr.ecr.eu-west-3.amazonaws.com/erpc-validator
+      tag: "0.1.2"
+      pullPolicy: IfNotPresent
+
+  extraEnvVars:
+    - name: GOMEMLIMIT
+      value: "768MiB"
+    - name: GOGC
+      value: "25"
+
+  resources:
+    requests:
+      cpu: "750m"
+      memory: "512Mi"
+    limits:
+      cpu: "1500m"
+      memory: "1Gi"
+
+  headlessService:
+    enabled: true
+
+  startupProbe:
+    initialDelaySeconds: 10
+    periodSeconds: 5
+    timeoutSeconds: 5
+    failureThreshold: 6
+
+  livenessProbe:
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+
+  readinessProbe:
+    path: /healthcheck
+    periodSeconds: 5
+    timeoutSeconds: 5
+    failureThreshold: 2
+
+  monitoring:
+    podMonitor:
+      enabled: true
+      additionalLabels:
+        release: prometheus
+      interval: 5s
+      scrapeTimeout: 4s
+
+# =============================================================================
+# eRPC Router Instance - Dedicated pool for router workloads
+# =============================================================================
+erpc-router:
+  enabled: true
+  fullnameOverride: "erpc-router"
+
+  # PLA-1360: enable Pod Security Standards "restricted" hardening after
+  # dev validation.
+  securityHardening:
+    enabled: true
+
+  image:
+    repository: 537124939463.dkr.ecr.eu-west-3.amazonaws.com/erpc
+    tag: "0.1.2"
+
+  replicaCount: 3
+
+  autoscaling:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 8
+    targetCPUUtilizationPercentage: 80
+    targetMemoryUtilizationPercentage: 80
+
+  # Disable PostgreSQL (shares the production database via Vault config)
+  postgresql:
+    enabled: false
+
+  # Reuse the existing erpc Vault creator identity only for secret materialization;
+  # runtime pods use erpc-router-runtime and have no Secret RBAC.
+  serviceAccount:
+    runtimeName: "erpc-router-runtime"
+    vaultCreator:
+      create: false
+      name: "erpc"
+
+  # Dedicated router config path in Vault
+  vault:
+    configPath: "secret/data/erpc/config-router"
+    jobImage:
+      repository: 537124939463.dkr.ecr.eu-west-3.amazonaws.com/erpc-validator
+      tag: "0.1.2"
+      pullPolicy: IfNotPresent
+
+  extraEnvVars:
+    - name: GOMEMLIMIT
+      value: "768MiB"
+    - name: GOGC
+      value: "25"
+
+  resources:
+    requests:
+      cpu: "750m"
+      memory: "512Mi"
+    limits:
+      cpu: "1500m"
+      memory: "1Gi"
+
+  headlessService:
+    enabled: true
+
+  startupProbe:
+    initialDelaySeconds: 10
+    periodSeconds: 5
+    timeoutSeconds: 5
+    failureThreshold: 6
+
+  livenessProbe:
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+
+  readinessProbe:
+    path: /healthcheck
+    periodSeconds: 5
+    timeoutSeconds: 5
+    failureThreshold: 2
+
+  monitoring:
+    podMonitor:
+      enabled: true
+      additionalLabels:
+        release: prometheus
+      interval: 5s
+      scrapeTimeout: 4s
+
+redis-ha:
+  enabled: true
+  fullnameOverride: "erpc-redis"
+  replicas: 3
+
+  image:
+    repository: 537124939463.dkr.ecr.eu-west-3.amazonaws.com/docker-hub/library/redis
+    tag: 8.4.0-alpine
+
+  configmapTest:
+    image:
+      repository: 537124939463.dkr.ecr.eu-west-3.amazonaws.com/docker-hub/koalaman/shellcheck
+
+  # Authentication - uses existing secret created from Vault
+  auth: true
+  existingSecret: "erpc-redis-auth"
+  authKey: "password"
+
+  # Vault configuration for Redis password
+  vault:
+    secretsPath: "secret/data/erpc/redis"
+
+  # PodDisruptionBudget - Prevent simultaneous eviction during node scaling
+  podDisruptionBudget:
+    minAvailable: 2  # Always keep at least 2 of 3 Redis pods running
+
+  # Hard anti-affinity ensures pods spread across nodes
+  hardAntiAffinity: true
+
+  # Graceful shutdown - ensure Redis has time to sync before termination
+  terminationGracePeriodSeconds: 60
+
+  # Increase replication backlog for faster resync after restarts
+  redis:
+    # Custom Redis configuration
+    # Larger replication backlog prevents full resync after short disconnections
+    # Default is 1MB, we increase to 256MB to handle longer network partitions
+    config:
+      repl-backlog-size: "256mb"
+      repl-backlog-ttl: "3600"
+      # Reduce replication timeout for faster failover detection
+      repl-timeout: "60"
+      # Ensure RDB persistence for faster recovery
+      save: "900 1 300 10 60 10000"
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "512Mi"
+      limits:
+        cpu: "1"
+        memory: "1Gi"
+    # PreStopHook for graceful failover
+    # Note: The redis-ha chart has a default trigger-failover-if-master.sh script
+    # We add BGSAVE before the failover to ensure data is persisted
+    lifecycle:
+      preStop:
+        exec:
+          command:
+            - /bin/sh
+            - -c
+            - |
+              # Use REDISCLI_AUTH to avoid password in process args
+              timeout 10 sh -c 'REDISCLI_AUTH="$AUTH" redis-cli BGSAVE' 2>/dev/null || true
+              sleep 2
+              if [ -f /readonly-config/trigger-failover-if-master.sh ]; then
+                /bin/sh /readonly-config/trigger-failover-if-master.sh
+              else
+                echo "Warning: trigger-failover-if-master.sh not found, skipping failover"
+              fi
+
+  haproxy:
+    enabled: true
+    image:
+      repository: 537124939463.dkr.ecr.eu-west-3.amazonaws.com/docker-hub/library/haproxy
+    # Enable Prometheus Redis monitoring via annotation-based discovery
+    service:
+      annotations:
+        prometheus.io/redis-scrape: "true"
+        prometheus.io/redis-port: "6379"
+    resources:
+      requests:
+        cpu: "50m"
+        memory: "128Mi"
+      limits:
+        cpu: "500m"
+        memory: "512Mi"
+
+  sentinel:
+    resources:
+      requests:
+        cpu: "10m"
+        memory: "32Mi"
+      limits:
+        cpu: "100m"
+        memory: "64Mi"
+
+  persistentVolume:
+    enabled: true
+    size: 1Gi
+    storageClass: "gp3"
+
+  securityContext:
+    runAsUser: 1000
+    fsGroup: 1000
+    runAsNonRoot: true
+
+  # Explicit on-demand node placement
+  nodeSelector:
+    nodegroup: on-demand-nodes
+
+  tolerations:
+    - key: dedicated
+      operator: Equal
+      value: on-demand
+      effect: NoSchedule
+
+# =============================================================================
+# Redis Exporter for Prometheus monitoring
+# =============================================================================
+redis-exporter:
+  image:
+    repository: 537124939463.dkr.ecr.eu-west-3.amazonaws.com/docker-hub/oliver006/redis_exporter
+
+  # Connect to redis-ha via HAProxy
+  redisAddress: redis://erpc-redis-haproxy:6379
+
+  # Use existing secret created by Vault job
+  auth:
+    enabled: true
+    secret:
+      name: erpc-redis-auth
+      key: password
+
+  # Enable ServiceMonitor for Prometheus
+  serviceMonitor:
+    enabled: true
+    labels:
+      release: prometheus-stack
+    # Add redis_instance label for Grafana dashboard compatibility
+    metricRelabelings:
+      - action: replace
+        sourceLabels: [service]
+        targetLabel: redis_instance
+        regex: (.*)
+        replacement: erpc-redis
+
+  # Resources
+  resources:
+    limits:
+      cpu: 100m
+      memory: 128Mi
+    requests:
+      cpu: 25m
+      memory: 32Mi
