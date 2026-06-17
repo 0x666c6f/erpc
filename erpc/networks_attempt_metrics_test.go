@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/erpc/erpc/common"
+	"github.com/erpc/erpc/internal/policy"
 	"github.com/erpc/erpc/telemetry"
 	"github.com/erpc/erpc/util"
 	"github.com/h2non/gock"
@@ -171,8 +172,6 @@ func TestNetwork_RecordHedgeRaceOutcome_UsesWinningExecutionType(t *testing.T) {
 func TestNetworkForward_UpstreamCallsMetric_SelectionPolicySkipDoesNotCountAsCall(t *testing.T) {
 	util.ResetGock()
 	defer util.ResetGock()
-	util.SetupMocksForEvmStatePoller()
-	defer util.AssertNoPendingMocks(t, 0)
 
 	telemetry.MetricNetworkUpstreamCallsPerRequest.Reset()
 	telemetry.ResetHandleCache()
@@ -180,31 +179,19 @@ func TestNetworkForward_UpstreamCallsMetric_SelectionPolicySkipDoesNotCountAsCal
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	evalFn, err := common.CompileFunction(`() => []`)
-	require.NoError(t, err)
-	network := setupTestNetworkSimple(t, ctx,
-		&common.UpstreamConfig{
+	network := setupSelectionPolicyNetworkWithEval(t, ctx,
+		[]*common.UpstreamConfig{{
 			Type:     common.UpstreamTypeEvm,
 			Id:       "rpc1",
 			Endpoint: "http://rpc1.localhost",
 			Evm: &common.EvmUpstreamConfig{
 				ChainId: 123,
 			},
-		},
-		&common.NetworkConfig{
-			Architecture: common.ArchitectureEvm,
-			Evm: &common.EvmNetworkConfig{
-				ChainId: 123,
-			},
-			SelectionPolicy: &common.SelectionPolicyConfig{
-				EvalInterval: common.Duration(20 * time.Millisecond),
-				EvalFunction: evalFn,
-			},
-		},
+		}},
+		`() => []`,
 	)
 
-	// Allow selection policy evaluator to apply rules.
-	time.Sleep(120 * time.Millisecond)
+	policy.TickForTest(network.policyEngine, network.networkId, "*")
 
 	method := "eth_getBalance"
 	hLabels := []string{
@@ -220,6 +207,7 @@ func TestNetworkForward_UpstreamCallsMetric_SelectionPolicySkipDoesNotCountAsCal
 	resp, err := network.Forward(ctx, req)
 	require.Error(t, err)
 	require.Nil(t, resp)
+	require.Equal(t, 0, gockHits("http://rpc1.localhost"))
 
 	afterCount, afterSum := histogramCountAndSum(t, hLabels...)
 	require.GreaterOrEqual(t, afterCount, beforeCount)

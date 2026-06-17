@@ -132,7 +132,8 @@ func (t *BootstrapTask) Wait(ctx context.Context) error {
 				if TaskState(t.state.Load()) == TaskFailed {
 					wr, _ := t.lastErr.Load().(wrappedError)
 					if wr.err == nil {
-						t.lastErr.Store(wrappedError{err: errors.New("task failed without specific error")})
+						wr.err = errors.New("task failed without specific error")
+						t.lastErr.Store(wr)
 					}
 					return wr.err
 				}
@@ -233,8 +234,10 @@ func (i *Initializer) waitForTasks(ctx context.Context, tasks ...*BootstrapTask)
 		}
 		// If task is failed, record that error
 		state := TaskState(task.state.Load())
-		if state == TaskFailed && task.Error() != nil {
-			errs = append(errs, task.Error().Err)
+		if state == TaskFailed {
+			if taskErr := task.Error(); taskErr != nil && taskErr.Err != nil {
+				errs = append(errs, taskErr.Err)
+			}
 		}
 	}
 	if len(errs) > 0 {
@@ -404,8 +407,8 @@ func (i *Initializer) Errors() error {
 	var errs []error
 	i.tasks.Range(func(key, value interface{}) bool {
 		t := value.(*BootstrapTask)
-		if t.Error() != nil {
-			errs = append(errs, t.Error().Err)
+		if taskErr := t.Error(); taskErr != nil && taskErr.Err != nil {
+			errs = append(errs, taskErr.Err)
 		}
 		return true
 	})
@@ -498,6 +501,23 @@ func (i *Initializer) tasksStatus() []TaskStatus {
 		return true
 	})
 	return statuses
+}
+
+// RangeTaskStates calls fn(name, state) for each registered task. Return
+// false from fn to stop iteration early.
+//
+// Allocation-free streaming alternative to `Status().Tasks` for callers
+// that only need (name, state) and don't want to materialize the full
+// `[]TaskStatus`. Pprof on prod showed `tasksStatus`'s growslice +
+// per-task TaskStatus allocs at ~10% CPU during the bootstrap-wait
+// window, where `summarizeNetworkTasks` was calling Status() every
+// 200ms and immediately throwing away the Err / LastAttempt / Attempts
+// fields it didn't need.
+func (i *Initializer) RangeTaskStates(fn func(name string, state TaskState) bool) {
+	i.tasks.Range(func(_, value any) bool {
+		t := value.(*BootstrapTask)
+		return fn(t.Name, TaskState(t.state.Load()))
+	})
 }
 
 type InitializerStatus struct {

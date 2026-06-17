@@ -1,4 +1,4 @@
-import type { DynamoDBConnectorConfig, EvmNetworkConfig, AuthStrategyConfig as GenAuthStrategyConfig, JwtStrategyConfig, MemoryConnectorConfig, NetworkStrategyConfig, PostgreSQLConnectorConfig, RedisConnectorConfig, SecretStrategyConfig, SiweStrategyConfig } from "../generated";
+import type { DynamoDBConnectorConfig, EvmNetworkConfig, GrpcConnectorConfig, AuthStrategyConfig as GenAuthStrategyConfig, JwtStrategyConfig, MemoryConnectorConfig, NetworkStrategyConfig, PostgreSQLConnectorConfig, RedisConnectorConfig, SecretStrategyConfig, SiweStrategyConfig } from "../generated";
 /**
  * Possible log level configuration
  */
@@ -19,7 +19,7 @@ export type NetworkArchitecture = "evm";
 /**
  * Supported connector driver type overide
  */
-export type ConnectorDriverType = "memory" | "redis" | "postgresql" | "dynamodb";
+export type ConnectorDriverType = "memory" | "redis" | "postgresql" | "dynamodb" | "grpc";
 /**
  * Connector config depending on the upstream type
  */
@@ -39,11 +39,15 @@ export type ConnectorConfig = {
     id: string;
     driver: "postgresql";
     postgresql: PostgreSQLConnectorConfig;
+} | {
+    id: string;
+    driver: "grpc";
+    grpc: GrpcConnectorConfig;
 };
 /**
  * Supported upstream type
  */
-export type UpstreamType = "evm" | "evm+alchemy" | "evm+blastapi" | "evm+conduit" | "evm+drpc" | "evm+dwellir" | "evm+envio" | "evm+etherspot" | "evm+infura" | "evm+pimlico" | "evm+quicknode" | "evm+llama" | "evm+thirdweb" | "evm+repository" | "evm+superchain" | "evm+chainstack" | "evm+tenderly" | "evm+onfinality" | "evm+erpc" | "evm+blockpi" | "evm+ankr" | "evm+routemesh";
+export type UpstreamType = "evm" | "evm+goldsky" | "evm+alchemy" | "evm+blastapi" | "evm+conduit" | "evm+drpc" | "evm+dwellir" | "evm+envio" | "evm+etherspot" | "evm+infura" | "evm+pimlico" | "evm+quicknode" | "evm+llama" | "evm+thirdweb" | "evm+repository" | "evm+superchain" | "evm+chainstack" | "evm+tenderly" | "evm+onfinality" | "evm+erpc" | "evm+blockpi" | "evm+ankr" | "evm+routemesh";
 /**
  * Supported auth type
  */

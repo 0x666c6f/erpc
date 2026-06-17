@@ -18,6 +18,7 @@ import (
 	"github.com/rs/zerolog"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/propagation"
+	semconv "go.opentelemetry.io/otel/semconv/v1.17.0"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -101,9 +102,13 @@ func NewGenericHttpJsonRpcClient(
 		errorExtractor:  extractor,
 	}
 
-	// Default fallback transport (no proxy)
-	// Optimized for high-latency, high-RPS scenarios to prevent connection churn
+	// Default fallback transport (no proxy). Optimized for high-latency,
+	// high-RPS scenarios to prevent connection churn. DialContext via
+	// util.DefaultOutboundDialer enables kernel-level TCP keepalive so
+	// wedged outbound flows are detected within ~45s (3 missed probes)
+	// instead of the OS default tcp_keepalive_time of 2h on Linux.
 	transport := &http.Transport{
+		DialContext:           util.DefaultOutboundDialer().DialContext,
 		MaxIdleConns:          1024,
 		MaxIdleConnsPerHost:   256,
 		MaxConnsPerHost:       0, // Unlimited active connections (prevents bottleneck)
@@ -454,8 +459,28 @@ func (c *GenericHttpJsonRpcClient) processBatch(alreadyLocked bool) {
 		// ErrDynamicTimeoutExceeded), while the shared batch ctx only has the
 		// earliest-deadline plain DeadlineExceeded. Prefer the per-request cause
 		// so the sentinel survives upstream-level error classification.
+		batchTimedOut := errors.Is(err, context.DeadlineExceeded)
 		for _, req := range requests {
 			reqErr := err
+			// Race fix: batchCtx and the per-request failsafe ctx are
+			// driven by independent Go runtime timers that both target the
+			// same nominal deadline (e.g. upstream-level timeout policy).
+			// If batchCtx's timer fires a few microseconds before the
+			// failsafe library's timer, context.Cause(req.ctx) is still
+			// nil here and the typed sentinel (ErrDynamicTimeoutExceeded)
+			// is lost — we'd then emit a generic
+			// ErrEndpointRequestTimeout and the upstream-level classifier
+			// would NOT promote it to ErrFailsafeTimeoutExceeded. Give
+			// req.ctx a brief settle window so its policy-attached cause
+			// becomes observable. Once req.ctx.Done() closes, Cause() is
+			// stable and reflects the policy sentinel set via
+			// context.WithCancelCause / WithTimeoutCause.
+			if batchTimedOut {
+				select {
+				case <-req.ctx.Done():
+				case <-time.After(5 * time.Millisecond):
+				}
+			}
 			if rc := context.Cause(req.ctx); rc != nil {
 				reqErr = rc
 			}
@@ -692,9 +717,11 @@ func getJsonRpcResponseFromNode(rootNode ast.Node) (*common.JsonRpcResponse, err
 
 func (c *GenericHttpJsonRpcClient) sendSingleRequest(ctx context.Context, req *common.NormalizedRequest) (*common.NormalizedResponse, error) {
 	ctx, span := common.StartSpan(ctx, "HttpJsonRpcClient.sendSingleRequest",
+		trace.WithSpanKind(trace.SpanKindClient),
 		trace.WithAttributes(
 			attribute.String("network.id", req.NetworkId()),
 			attribute.String("upstream.id", c.upstream.Id()),
+			semconv.PeerServiceKey.String(c.Url.Hostname()),
 		),
 	)
 	defer span.End()

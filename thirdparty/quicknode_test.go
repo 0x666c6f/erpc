@@ -45,14 +45,16 @@ func TestQuicknodeFilterParams(t *testing.T) {
 
 func TestQuicknodeGenerateConfigs(t *testing.T) {
 	vendor := CreateQuicknodeVendor().(*QuicknodeVendor)
-	vendor.remoteData["test-key"] = []*QuicknodeEndpoint{
-		{
-			ID:      "589650",
-			HttpUrl: "https://example-hyperevm.quiknode.pro/secret/evm",
-			ChainID: 999,
-		},
-	}
-	vendor.remoteDataLastFetchedAt["test-key"] = time.Now()
+	vendor.cache.snapshot.Store(&remoteCacheSnapshot[[]*QuicknodeEndpoint]{
+		values: map[string][]*QuicknodeEndpoint{"test-key": {
+			{
+				ID:      "589650",
+				HttpUrl: "https://example-hyperevm.quiknode.pro/secret/evm",
+				ChainID: 999,
+			},
+		}},
+		fetchedAt: map[string]time.Time{"test-key": time.Now()},
+	})
 
 	upstream := &common.UpstreamConfig{
 		Id:   "quicknode-evm:999",

@@ -14,8 +14,10 @@ import (
 
 func seedAlchemyVendorWithDefaultNetworks() *AlchemyVendor {
 	vendor := CreateAlchemyVendor().(*AlchemyVendor)
-	vendor.remoteData[alchemyApiUrl] = defaultAlchemyNetworkSubdomains
-	vendor.remoteDataLastFetchedAt[alchemyApiUrl] = time.Now()
+	vendor.cache.snapshot.Store(&remoteCacheSnapshot[map[int64]string]{
+		values:    map[string]map[int64]string{alchemyApiUrl: defaultAlchemyNetworkSubdomains},
+		fetchedAt: map[string]time.Time{alchemyApiUrl: time.Now()},
+	})
 	return vendor
 }
 

@@ -64,7 +64,7 @@ func (u *queryTestUpstream) Logger() *zerolog.Logger {
 }
 func (u *queryTestUpstream) Vendor() common.Vendor         { return nil }
 func (u *queryTestUpstream) Tracker() common.HealthTracker { return nil }
-func (u *queryTestUpstream) Forward(ctx context.Context, nq *common.NormalizedRequest, byPassMethodExclusion bool) (*common.NormalizedResponse, error) {
+func (u *queryTestUpstream) Forward(ctx context.Context, nq *common.NormalizedRequest, byPassMethodExclusion bool, isHedgeAttempt bool) (*common.NormalizedResponse, error) {
 	return nil, nil
 }
 func (u *queryTestUpstream) Cordon(method string, reason string)   {}
@@ -89,12 +89,15 @@ func (u *queryTestConfigUpstream) Logger() *zerolog.Logger {
 }
 func (u *queryTestConfigUpstream) Vendor() common.Vendor         { return nil }
 func (u *queryTestConfigUpstream) Tracker() common.HealthTracker { return nil }
-func (u *queryTestConfigUpstream) Forward(ctx context.Context, nq *common.NormalizedRequest, byPassMethodExclusion bool) (*common.NormalizedResponse, error) {
+func (u *queryTestConfigUpstream) Forward(ctx context.Context, nq *common.NormalizedRequest, byPassMethodExclusion bool, isHedgeAttempt bool) (*common.NormalizedResponse, error) {
 	return nil, nil
 }
 func (u *queryTestConfigUpstream) Cordon(method string, reason string)   {}
 func (u *queryTestConfigUpstream) Uncordon(method string, reason string) {}
 func (u *queryTestConfigUpstream) IgnoreMethod(method string)            {}
+func (u *queryTestConfigUpstream) ShouldHandleMethod(method string) (bool, error) {
+	return true, nil
+}
 
 func TestParseQueryRequest_ResolvesCursorAndSelections(t *testing.T) {
 	network := &queryTestNetwork{

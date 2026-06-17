@@ -12,7 +12,6 @@ import (
 )
 
 func TestGenerateValidationReport_ExplainIncludesPolicyAndProfilePath(t *testing.T) {
-	maxErrorRate := 0.6
 	cfg := &common.Config{
 		Metrics: &common.MetricsConfig{},
 		Projects: []*common.ProjectConfig{
@@ -26,12 +25,8 @@ func TestGenerateValidationReport_ExplainIncludesPolicyAndProfilePath(t *testing
 						},
 						SelectionPolicy: &common.SelectionPolicyConfig{
 							EvalInterval: common.Duration(1 * time.Minute),
-							Rules: []*common.SelectionPolicyRuleConfig{
-								{
-									MaxErrorRate: &maxErrorRate,
-									Action:       common.SelectionPolicyRuleActionInclude,
-								},
-							},
+							EvalScope:    common.EvalScopeNetwork,
+							EvalFunc:     "(ups, ctx) => ups",
 						},
 						Methods: &common.MethodsConfig{
 							Profiles: map[string]*common.MethodWorkloadProfileConfig{
@@ -60,7 +55,7 @@ func TestGenerateValidationReport_ExplainIncludesPolicyAndProfilePath(t *testing
 	assert.NotEmpty(t, report.Explain)
 
 	joined := strings.Join(report.Explain, "\n")
-	assert.Contains(t, joined, "selectionPolicy.path=selectionPolicy.rules")
+	assert.Contains(t, joined, "selectionPolicy.path=selectionPolicy.evalFunc")
 	assert.Contains(t, joined, "profile.path=methods.definitions.eth_call.profile->methods.profiles.reads")
 	assert.Contains(t, joined, "components=cache,multiplex")
 }

@@ -1,50 +1,120 @@
 ---
-description: Failsafe policies are defined on network/upstream level to help with intermittent issues and increase general resiliency...
+title: Failsafe
+description: Six composable failsafe policies that keep every RPC request succeeding — even when upstreams are slow, wrong, or temporarily down.
 ---
 
-import { Callout, Tabs, Tab } from "nextra/components";
+import { LLMsTxtLink, AISection, CapabilityGrid, ConfigTabs, SourceLink, PromptExample } from "../../components";
+
+<LLMsTxtLink />
 
 # Failsafe
 
-Failsafe policies help with intermittent issues and increase resiliency. They can be configured at both [Network](/config/projects/networks) and [Upstream](/config/projects/upstreams) levels, with support for **per-method** configuration.
+A broken upstream becomes invisible to your callers. eRPC wraps every request in six
+independently tunable policies — retry, hedge, timeout, circuit breaker, consensus, and
+integrity — that run in a fixed, deterministic chain. Configure once per method or finality
+tier; let eRPC handle the rest.
 
-## Available policies
+<CapabilityGrid
+  columns={3}
+  items={[
+    {
+      title: "Timeout",
+      href: "/config/failsafe/timeout",
+      summary: "Bound how long a request may take — static or quantile-adaptive, at the network lifecycle or single-upstream level.",
+      icon: "⏱"
+    },
+    {
+      title: "Retry",
+      href: "/config/failsafe/retry",
+      summary: "Replay transient failures with exponential backoff and jitter. Separate knobs for hard errors vs. data-unavailability conditions.",
+      icon: "🔁"
+    },
+    {
+      title: "Hedge",
+      href: "/config/failsafe/hedge",
+      summary: "Race a speculative duplicate request to a second upstream when the primary is slow — quantile-adaptive delay with min/max guardrails.",
+      icon: "🏎"
+    },
+    {
+      title: "Circuit breaker",
+      href: "/config/failsafe/circuit-breaker",
+      summary: "Per-upstream state machine that stops routing to a failing endpoint after a rolling-window failure threshold, then self-heals.",
+      icon: "⚡"
+    },
+    {
+      title: "Consensus",
+      href: "/config/failsafe/consensus",
+      summary: "Fan out to N upstreams, group identical responses by canonical hash, and select a winner — with misbehavior tracking and punishment.",
+      icon: "🗳"
+    },
+    {
+      title: "Integrity",
+      href: "/config/failsafe/integrity",
+      summary: "Layered EVM response-validation rules that discard stale, malformed, or logically inconsistent upstream responses before they reach callers.",
+      icon: "🔍"
+    }
+  ]}
+/>
 
-- [`timeout:`](/config/failsafe#timeout-policy) prevents requests from hanging indefinitely
-- [`retry:`](/config/failsafe#retry-policy) recovers from transient failures
-- [`hedge:`](/config/failsafe#hedge-policy) runs parallel requests when upstreams are slow
-- [`circuitBreaker:`](/config/failsafe#circuitbreaker-policy) temporarily removes failing upstreams
-- [`consensus:`](/config/failsafe/consensus) verifies multiple upstreams agree on results
-- [Integrity](/config/failsafe/integrity) increases data quality for specific methods
+## Agent reference
 
-## Per-method configuration
+Copy one of these prompts into your AI agent session (Claude Code, Cursor, …) — each one
+points the agent at this page's machine-readable reference so it can do the work correctly:
 
-Failsafe policies can optionally be configured per-method using `matchMethod` and `matchFinality` fields. This allows fine-tuned behavior for different RPC methods and different block finality states.
+<PromptExample
+	n={1}
+	title="make my RPC survive provider outages"
+	defaultOpen
+	prompt={`My app uses a single RPC provider and goes down when it has an outage. Configure eRPC's
+failsafe layer in my eRPC config — retry, hedge, timeout, and circuit breaker — so requests
+automatically route around failures without my callers noticing. Read the full reference:
+https://docs.erpc.cloud/config/failsafe.llms.txt`}
+/>
 
-- `matchMethod`: Pattern to match RPC methods (a [matcher](/config/matchers) supports wildcards `*` and OR operator `|`)
-- `matchFinality`: Array of finality states to match
+<PromptExample
+	n={2}
+	title="tune failsafe policies for a latency-sensitive workload"
+	prompt={`My frontend makes a lot of eth_call and eth_getLogs requests and I want to minimize p99
+latency while still having retry coverage for transient errors. Tune the failsafe entries
+in my eRPC config — including per-method matchMethod and matchFinality — so realtime calls
+get short timeouts and archival calls get longer budgets. Reference:
+https://docs.erpc.cloud/config/failsafe.llms.txt`}
+/>
 
-When multiple failsafe configs are defined, they are evaluated in order and the first matching config is used.
+<PromptExample
+	n={3}
+	title="debug ErrFailsafeConfiguration at startup"
+	prompt={`eRPC is crashing at startup with ErrFailsafeConfiguration. Inspect my eRPC config and find
+any circuit breaker blocks placed at network scope or consensus blocks placed at upstream
+scope — these are the two scope mismatch errors that cause this. Fix each one and explain
+why the scope restriction exists. Reference:
+https://docs.erpc.cloud/config/failsafe.llms.txt`}
+/>
 
-### Finality States
+<PromptExample
+	n={4}
+	title="add alerts for failsafe effectiveness"
+	prompt={`I want Prometheus alerts to catch when eRPC's failsafe layer is under stress: high retry
+rates, frequent circuit-breaker trips, or hedge fire rates spiking. Using the metrics in
+my eRPC config's Prometheus output, write PromQL alert expressions for each condition and
+explain the thresholds. Reference: https://docs.erpc.cloud/config/failsafe.llms.txt`}
+/>
 
-The `matchFinality` field can match against these data finality states:
+<AISection title="Resilience — full agent reference">
 
-- **`finalized`**: Data from blocks that are confirmed as finalized and safe from reorgs. This is determined by comparing the block number with the upstream's finalized block.
-  - Example methods: `eth_getBlockByNumber` (for old blocks), `eth_getLogs` (for finalized ranges)
-  - Use case: Can have relaxed failsafe policies since data won't change
+### How it works
 
-- **`unfinalized`**: Data from recent blocks that could still be reorganized. Also includes any data from pending blocks.
-  - Example methods: `eth_getBlockByNumber("latest")`, `eth_call` with recent blocks
-  - Use case: May need more aggressive retries and shorter timeouts
+**Executor composition.** The non-consensus executor chain is `retry(hedge(runUpstreamSweep))`; with consensus active it becomes `consensus(retry(hedge(tryOneUpstream)))`. The network-scope timeout wraps the entire `networkExecutor.Run` call — so it bounds ALL retries and hedges, not individual attempts. (<SourceLink file="erpc/network_executor.go" lines="183-203" />)
 
-- **`realtime`**: Data that changes frequently, typically with every new block.
-  - Example methods: `eth_blockNumber`, `eth_gasPrice`, `eth_maxPriorityFeePerGas`, `net_peerCount`
-  - Use case: Often needs fast timeouts and may benefit from hedging
+**Scope restrictions.**
+- Circuit breakers are **upstream-scope only**. Placing a `circuitBreaker` block in a network-level `failsafe` entry causes startup failure with `ErrFailsafeConfiguration`. (<SourceLink file="erpc/network_executor.go" lines="68-73" />)
+- Consensus is **network-scope only**. Placing a `consensus` block in an upstream-level `failsafe` entry causes startup failure. (<SourceLink file="upstream/upstream_executor.go" lines="46-53" />)
 
-- **`unknown`**: When the block number cannot be determined from the request/response.
-  - Example methods: `eth_getTransactionByHash`, `trace_transaction`, `debug_traceTransaction`
-  - Use case: Data is typically immutable once included, but block context is unknown
+**Failsafe entry matching (`matchMethod` + `matchFinality`).** Each `failsafe[]` entry is matched top-to-bottom by a 4-tier priority (`SelectExecutor` in `common/match.go`):
+1. Specific method + specific finality (highest priority)
+2. Specific method, any finality
+3. Wildcard method (`"*"`), specific finality
+4. Wildcard method, any finality — catch-all (lowest priority)
 
 <Tabs items={["yaml", "typescript"]} defaultIndex={0} storageKey="GlobalConfigTypeTabIndex">
   <Tabs.Tab>
@@ -89,54 +159,17 @@ projects:
 ```ts filename="erpc.ts"
 import { createConfig } from "@erpc-cloud/config";
 
-export default createConfig({
-  projects: [{
-    id: "main",
-    upstreams: [{
-      id: "my-upstream",
-      failsafe: [
-        // Default policy for all methods
-        {
-          matchMethod: "*",        // matches any method (default if omitted)
-          timeout: { duration: "30s" },
-          retry: { maxAttempts: 3 }
-        },
-        // Fast timeout for simple queries
-        {
-          matchMethod: "eth_getBlock*|eth_getTransaction*",
-          timeout: { duration: "5s" },
-          retry: { maxAttempts: 2, delay: "100ms" }
-        },
-        // Longer timeout for heavy trace methods
-        {
-          matchMethod: "trace_*|debug_*",
-          timeout: { duration: "60s" },
-          retry: { maxAttempts: 1 }    // expensive operations, minimize retries
-        },
-        // Different policy for finalized vs unfinalized data
-        {
-          matchMethod: "eth_call|eth_estimateGas",
-          matchFinality: ["unfinalized", "realtime"],
-          timeout: { duration: "10s" },
-          retry: { maxAttempts: 5 }    // unfinalized data changes frequently, retry more
-        }
-      ]
-    }]
-  }]
-});
-```
-  </Tabs.Tab>
-</Tabs>
+**`matchFinality` valid values.** `finalized`, `unfinalized`, `realtime`, `unknown`. A value like `"latest"` is not a valid finality token and silently never matches any request.
 
-## `timeout` policy
+**Defaults merge algorithm.** When a network has its own `failsafe` array AND `networkDefaults.failsafe` is also set, each entry in the network array is matched against the defaults array using the same `WildcardMatch + MatchFinalities` algorithm. When a match is found, unset sub-fields (retry, hedge, timeout, etc.) inherit from the matched default entry. A catch-all default (`matchMethod: "*"`) acts as a universal base for all network-specific entries. If the network has no `failsafe` entries but the defaults do, the entire defaults array is cloned. (<SourceLink file="common/defaults.go" lines="1793-1832" />)
 
-Sets a timeout for requests. Network-level timeout applies to the entire request lifecycle (including retries), while upstream-level timeout applies to each individual attempt.
+**Network-scope timeout is lifecycle-scoped, not per-attempt.** A 500ms network timeout with `maxAttempts: 3` has a 500ms total budget shared across all 3 retry rounds. There is no per-attempt timeout at the network scope.
 
-Timeout supports two modes: **fixed** (static duration) and **dynamic** (quantile-based, adapts to real latency).
+**`retryEmpty` directive is the master gate** for all empty/missing-data retries. When off (`false`, the default), neither the network scope nor the upstream scope retries empty/missing-data results, and the empty-as-error conversion hook is also suppressed. (<SourceLink file="erpc/network_executor.go" lines="401-404" />)
 
-### Fixed timeout
+### Worked examples
 
-The simplest configuration — a static duration that applies to all requests matching the policy.
+**1. Standard production failsafe — latency-sensitive workload.** Adaptive p70 hedge fires after the method's p70 latency; network retries up to 5 times on errors; network timeout bounds the entire request lifecycle:
 
 <Tabs items={["yaml", "typescript"]} defaultIndex={0} storageKey="GlobalConfigTypeTabIndex">
   <Tabs.Tab>
@@ -619,7 +652,6 @@ export default createConfig({
 failsafe:
   # Finalized data: relaxed policies
   - matchMethod: "*"
-    matchFinality: ["finalized"]
     timeout:
       duration: 30s
     retry:
@@ -648,57 +680,32 @@ failsafe:
   - matchMethod: "*"
     matchFinality: ["unknown"]
     timeout:
-      duration: 15s
+      duration: 60s
     retry:
-      maxAttempts: 3
-```
-  </Tabs.Tab>
-  <Tabs.Tab>
-```ts filename="erpc.ts"
-failsafe: [
-  // Finalized data: relaxed policies
+      maxAttempts: 5
+  - matchMethod: "*"
+    matchFinality: [finalized]
+    timeout:
+      duration: 10s
+    retry:
+      maxAttempts: 3`}
+  ts={`failsafe: [
+  {
+    matchMethod: "eth_getLogs",
+    matchFinality: ["finalized"],
+    timeout: { duration: "60s" },
+    retry: { maxAttempts: 5 },
+  },
   {
     matchMethod: "*",
     matchFinality: ["finalized"],
-    timeout: { duration: "30s" },
-    retry: {
-      maxAttempts: 5,
-      backoffFactor: 2
-    }
+    timeout: { duration: "10s" },
+    retry: { maxAttempts: 3 },
   },
-  // Unfinalized data: aggressive timeouts
-  {
-    matchMethod: "*",
-    matchFinality: ["unfinalized"],
-    timeout: { duration: "5s" },
-    retry: {
-      maxAttempts: 2,
-      delay: "100ms"
-    }
-  },
-  // Realtime data: fast with hedging
-  {
-    matchMethod: "*",
-    matchFinality: ["realtime"],
-    timeout: { duration: "2s" },
-    hedge: {
-      delay: "500ms",
-      maxCount: 1
-    }
-  },
-  // Unknown finality: moderate settings
-  {
-    matchMethod: "*",
-    matchFinality: ["unknown"],
-    timeout: { duration: "15s" },
-    retry: { maxAttempts: 3 }
-  }
-]
-```
-  </Tabs.Tab>
-</Tabs>
+]`}
+/>
 
-### Indexer Configuration
+**3. Upstream-scope circuit breaker.** Upstream-level failsafe adds an auto-healing circuit breaker; the network-level failsafe above still applies for retries and hedging:
 
 <Tabs items={["yaml", "typescript"]} defaultIndex={0} storageKey="GlobalConfigTypeTabIndex">
   <Tabs.Tab>
@@ -773,17 +780,77 @@ To disable any policy, set it to `null` or `~` (YAML):
 ```yaml filename="erpc.yaml"
 failsafe:
   - matchMethod: "*"
-    hedge: ~              # Disable hedging
-    circuitBreaker: ~     # Disable circuit breaker
-```
-  </Tabs.Tab>
-  <Tabs.Tab>
-```ts filename="erpc.ts"
-failsafe: [{
+    circuitBreaker:
+      failureThresholdCount: 20
+      failureThresholdCapacity: 80
+      halfOpenAfter: 5m
+      successThresholdCount: 8
+      successThresholdCapacity: 200`}
+  ts={`failsafe: [{
   matchMethod: "*",
-  hedge: null,           // Disable hedging
-  circuitBreaker: null   // Disable circuit breaker
-}]
-```
-  </Tabs.Tab>
-</Tabs>
+  circuitBreaker: {
+    failureThresholdCount: 20,
+    failureThresholdCapacity: 80,
+    halfOpenAfter: "5m",
+    successThresholdCount: 8,
+    successThresholdCapacity: 200,
+  },
+}]`}
+/>
+
+### Best practices
+
+- Place **circuit breakers at upstream scope only**; placing them at network scope causes `ErrFailsafeConfiguration` at startup.
+- Place **consensus at network scope only**; placing it at upstream scope also causes `ErrFailsafeConfiguration` at startup.
+- Always use a **catch-all defaults entry** (`matchMethod: "*"`) in `networkDefaults.failsafe` so method-specific entries inherit the base policy without repeating every field.
+- The **network-scope timeout** wraps all retries and hedges — always set it shorter than `server.maxTimeout` (default 150s), or it will never fire on its own.
+- Stacking `upstreams[].failsafe[].retry.maxAttempts: 3` with `networks[].failsafe[].retry.maxAttempts: 3` can produce up to 9 upstream calls per request — size budgets accordingly.
+- `emptyResultMaxAttempts` (default 2) is a **shared counter across ALL network retry rounds**, not per-round. With default `maxAttempts=5`, empty-type retries are capped at 1 extra call total.
+- Enable `retryEmpty: true` in `directiveDefaults` (or per-request via `X-ERPC-Retry-Empty: true`) if you need missing-data retries — it is off by default.
+
+### Edge cases & gotchas
+
+1. `matchFinality: ["latest"]` silently never matches. Valid values: `finalized`, `unfinalized`, `realtime`, `unknown`.
+2. Stacking upstream retry (`maxAttempts: 3`) with network retry (`maxAttempts: 3`) can produce up to 9 upstream calls per request.
+3. Write methods (`eth_sendTransaction`, filter-creation methods) are excluded from hedging. `eth_sendRawTransaction` is intentionally NOT excluded — it supports idempotent broadcast.
+4. `emptyResultMaxAttempts` is a shared counter across all network retry rounds, not per-round. With the default value of 2, one original attempt plus one empty-type retry fires — at most 1 empty-type retry across the entire request lifetime.
+5. Consensus `ignoreFields` is a set-replacement, not a merge. Setting any entry replaces the entire built-in default map (which suppresses `blockTimestamp` disagreements for `eth_getLogs` and receipts methods).
+6. The circuit breaker's rolling window must fill to `failureThresholdCapacity` (default 80) before it can trip — early-startup behavior is Closed regardless of error rate.
+7. `ErrFailsafeConfiguration` is startup-only — any scope mismatch (circuit breaker at network, consensus at upstream) aborts before any request is served.
+8. Failsafe defaults merge uses **wildcard method matching**, not exact match. A default entry with `matchMethod: "eth_*"` will provide defaults for any network entry whose method starts with `eth_`. A catch-all `matchMethod: "*"` is required to cover all entries uniformly.
+
+### Observability
+
+| Metric | Type | When it fires |
+|--------|------|---------------|
+| `erpc_network_request_received_total` | counter | Every inbound request reaching the network executor |
+| `erpc_network_timeout_fired_total` | counter | Network-scope or upstream-scope failsafe timeout exceeded |
+| `erpc_network_retry_attempt_total` | counter | Every network-scope retry round that fires |
+| `erpc_network_hedged_request_total` | counter | Each hedge attempt fired |
+| `erpc_network_hedge_discards_total` | counter | Losing hedge response cancelled |
+| `erpc_upstream_breaker_state_change_total` | counter | Circuit breaker state transition (Closed/Open/HalfOpen) |
+| `erpc_consensus_misbehavior_detected_total` | counter | Upstream response differed from consensus group |
+
+### Source code entry points
+
+- [`erpc/network_executor.go:L183-L203`](https://github.com/erpc/erpc/blob/main/erpc/network_executor.go#L183-L203) — executor composition: consensus / retry / hedge / sweep wiring
+- [`common/match.go:L18-L78`](https://github.com/erpc/erpc/blob/main/common/match.go#L18-L78) — `SelectExecutor` 4-tier failsafe entry selection by (matchMethod, matchFinality)
+- [`common/defaults.go:L1793-L1832`](https://github.com/erpc/erpc/blob/main/common/defaults.go#L1793-L1832) — failsafe entry merge algorithm (network scope)
+- [`common/defaults.go:L1621-L1672`](https://github.com/erpc/erpc/blob/main/common/defaults.go#L1621-L1672) — failsafe entry merge algorithm (upstream scope)
+- [`erpc/network_executor.go:L68-L73`](https://github.com/erpc/erpc/blob/main/erpc/network_executor.go#L68-L73) — circuit breaker network-scope rejection at startup
+- [`upstream/upstream_executor.go:L46-L53`](https://github.com/erpc/erpc/blob/main/upstream/upstream_executor.go#L46-L53) — consensus upstream-scope rejection at startup
+- [`common/errors.go:L1573-L1584`](https://github.com/erpc/erpc/blob/main/common/errors.go#L1573-L1584) — `ErrFailsafeConfiguration` type (startup-only)
+
+### Related pages
+
+- [Retry](/config/failsafe/retry) — rotate across upstreams with exponential backoff and jitter.
+- [Hedge](/config/failsafe/hedge) — speculative racing to cut tail latency.
+- [Timeout](/config/failsafe/timeout) — lifecycle-scoped and per-upstream time budgets.
+- [Circuit breaker](/config/failsafe/circuit-breaker) — automatic upstream quarantine with self-healing.
+- [Consensus](/config/failsafe/consensus) — multi-upstream agreement with misbehavior punishment.
+- [Integrity](/config/failsafe/integrity) — EVM response validation to discard stale or malformed data.
+- [Rate limiters](/config/rate-limiters) — cap hedge and retry cost on expensive vendors.
+- [Selection & scoring](/config/projects/selection-policies) — controls which upstream each failsafe attempt targets.
+- [Survive provider outages](/use-cases/survive-provider-outages) — the outcome this layer serves.
+
+</AISection>

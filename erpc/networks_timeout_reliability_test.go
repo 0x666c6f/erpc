@@ -43,7 +43,7 @@ func TestNetwork_Forward_TimeoutClassificationDeterministic(t *testing.T) {
 		Failsafe: []*common.FailsafeConfig{
 			{
 				Timeout: &common.TimeoutPolicyConfig{
-					Duration: common.Duration(40 * time.Millisecond),
+					Duration: common.NewStaticDuration(40 * time.Millisecond),
 				},
 			},
 		},

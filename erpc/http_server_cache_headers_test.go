@@ -22,7 +22,7 @@ func TestSetResponseHeaders_CacheAgeHeaders(t *testing.T) {
 		cachedAt := time.Now().Add(-5 * time.Second).Unix()
 		resp.SetCacheStoredAtUnix(cachedAt)
 
-		setResponseHeaders(ctx, resp, w)
+		setResponseHeaders(ctx, resp, w, common.ExecutionHeadersAll)
 
 		headers := w.Result().Header
 		require.Equal(t, "HIT", headers.Get("X-ERPC-Cache"))
@@ -40,7 +40,7 @@ func TestSetResponseHeaders_CacheAgeHeaders(t *testing.T) {
 		resp := common.NewNormalizedResponse()
 		resp.SetFromCache(true)
 
-		setResponseHeaders(ctx, resp, w)
+		setResponseHeaders(ctx, resp, w, common.ExecutionHeadersAll)
 
 		headers := w.Result().Header
 		require.Equal(t, "HIT", headers.Get("X-ERPC-Cache"))
@@ -53,7 +53,7 @@ func TestSetResponseHeaders_CacheAgeHeaders(t *testing.T) {
 		resp := common.NewNormalizedResponse()
 		resp.SetCacheStoredAtUnix(time.Now().Add(-10 * time.Second).Unix())
 
-		setResponseHeaders(ctx, resp, w)
+		setResponseHeaders(ctx, resp, w, common.ExecutionHeadersAll)
 
 		headers := w.Result().Header
 		require.Equal(t, "MISS", headers.Get("X-ERPC-Cache"))
@@ -68,7 +68,7 @@ func TestSetResponseHeaders_CacheAgeHeaders(t *testing.T) {
 		cachedAt := time.Now().Add(5 * time.Minute).Unix()
 		resp.SetCacheStoredAtUnix(cachedAt)
 
-		setResponseHeaders(ctx, resp, w)
+		setResponseHeaders(ctx, resp, w, common.ExecutionHeadersAll)
 
 		headers := w.Result().Header
 		require.Equal(t, "HIT", headers.Get("X-ERPC-Cache"))

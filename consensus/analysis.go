@@ -1,11 +1,11 @@
 package consensus
 
 import (
+	"context"
 	"errors"
 	"fmt"
 
 	"github.com/erpc/erpc/common"
-	"github.com/failsafe-go/failsafe-go"
 	"github.com/rs/zerolog"
 )
 
@@ -62,7 +62,18 @@ type consensusAnalysis struct {
 	cachedValidGroups  []*responseGroup
 }
 
-func newConsensusAnalysis(lg *zerolog.Logger, exec failsafe.Execution[*common.NormalizedResponse], config *config, responses []*execResult) *consensusAnalysis {
+func contextFrom(ctxOrExec any) context.Context {
+	if c, ok := ctxOrExec.(context.Context); ok && c != nil {
+		return c
+	}
+	if exec, ok := ctxOrExec.(interface{ Context() context.Context }); ok && exec.Context() != nil {
+		return exec.Context()
+	}
+	return context.Background()
+}
+
+func newConsensusAnalysis(lg *zerolog.Logger, ctxOrExec any, config *config, responses []*execResult) *consensusAnalysis {
+	ctx := contextFrom(ctxOrExec)
 	analysis := &consensusAnalysis{
 		config:            config,
 		groups:            make(map[string]*responseGroup),
@@ -70,20 +81,20 @@ func newConsensusAnalysis(lg *zerolog.Logger, exec failsafe.Execution[*common.No
 	}
 
 	// Try to extract original request and compute leader upstream once
-	if req, ok := exec.Context().Value(common.RequestContextKey).(*common.NormalizedRequest); ok && req != nil {
+	if req, ok := ctx.Value(common.RequestContextKey).(*common.NormalizedRequest); ok && req != nil {
 		analysis.originalRequest = req
 		if method, err := req.Method(); err == nil {
 			analysis.method = method
 		}
 		if net := req.Network(); net != nil && net.Architecture() == common.ArchitectureEvm {
 			// Use the executor context; leader selection is read-only and fast
-			analysis.leaderUpstream = net.EvmLeaderUpstream(exec.Context())
+			analysis.leaderUpstream = net.EvmLeaderUpstream(ctx)
 		}
 	}
 
 	// Classify, hash, and group all responses
 	for _, r := range responses {
-		classifyAndHashResponse(r, exec, config)
+		classifyAndHashResponse(r, ctx, config)
 
 		if r.CachedResponseType != ResponseTypeInfrastructureError {
 			analysis.validParticipants++
@@ -363,19 +374,21 @@ func errorToConsensusHash(err error) string {
 }
 
 // resultToJsonRpcResponse safely converts a result to a JsonRpcResponse.
-func resultToJsonRpcResponse(result *common.NormalizedResponse, exec failsafe.Execution[*common.NormalizedResponse]) *common.JsonRpcResponse {
+func resultToJsonRpcResponse(result *common.NormalizedResponse, ctxOrExec any) *common.JsonRpcResponse {
 	if result == nil {
 		return nil
 	}
-	jr, _ := result.JsonRpcResponse(exec.Context())
+	ctx := contextFrom(ctxOrExec)
+	jr, _ := result.JsonRpcResponse(ctx)
 	return jr
 }
 
 // classifyAndHashResponse computes and caches the response type, hash, and size for a result.
-func classifyAndHashResponse(r *execResult, exec failsafe.Execution[*common.NormalizedResponse], config *config) {
+func classifyAndHashResponse(r *execResult, ctxOrExec any, config *config) {
 	if responseAnalysisCached(r) {
 		return
 	}
+	ctx := contextFrom(ctxOrExec)
 
 	if r.Err != nil {
 		// ErrUpstreamsExhausted means no upstream was reachable — always infrastructure.
@@ -397,7 +410,7 @@ func classifyAndHashResponse(r *execResult, exec failsafe.Execution[*common.Norm
 		} else {
 			r.CachedResponseType = ResponseTypeInfrastructureError
 		}
-		r.CachedHash, _ = resultOrErrorToHash(r, exec, config)
+		r.CachedHash, _ = resultOrErrorToHash(r, ctx, config)
 		if r.CachedHash == "" {
 			r.CachedHash = cachedHashGenericError
 		}
@@ -406,7 +419,7 @@ func classifyAndHashResponse(r *execResult, exec failsafe.Execution[*common.Norm
 	}
 
 	// Successful response
-	jr := resultToJsonRpcResponse(r.Result, exec)
+	jr := resultToJsonRpcResponse(r.Result, ctx)
 	if jr == nil {
 		r.CachedResponseType = ResponseTypeInfrastructureError
 		r.CachedHash = cachedHashGenericError
@@ -414,17 +427,17 @@ func classifyAndHashResponse(r *execResult, exec failsafe.Execution[*common.Norm
 	}
 
 	// Use NormalizedResponse-aware emptyish check to capture method-specific semantics (e.g., EVM logs)
-	if r.Result != nil && r.Result.IsResultEmptyish(exec.Context()) {
+	if r.Result != nil && r.Result.IsResultEmptyish(ctx) {
 		r.CachedResponseType = ResponseTypeEmpty
 	} else {
 		r.CachedResponseType = ResponseTypeNonEmpty
 	}
 
-	if size, err := jr.Size(exec.Context()); err == nil {
+	if size, err := jr.Size(ctx); err == nil {
 		r.CachedResponseSize = size
 	}
 
-	r.CachedHash, _ = resultOrErrorToHash(r, exec, config)
+	r.CachedHash, _ = resultOrErrorToHash(r, ctx, config)
 	if r.CachedHash == "" {
 		r.CachedResponseType = ResponseTypeInfrastructureError
 		r.CachedHash = cachedHashGenericError
@@ -451,7 +464,8 @@ func responseAnalysisCached(r *execResult) bool {
 }
 
 // resultOrErrorToHash computes a hash for a result, considering both success and error cases.
-func resultOrErrorToHash(r *execResult, exec failsafe.Execution[*common.NormalizedResponse], config *config) (string, error) {
+func resultOrErrorToHash(r *execResult, ctxOrExec any, config *config) (string, error) {
+	ctx := contextFrom(ctxOrExec)
 	if r.Err != nil {
 		if isConsensusValidError(r.Err) || isAgreedUponError(r.Err) {
 			return errorToConsensusHash(r.Err), nil
@@ -460,16 +474,16 @@ func resultOrErrorToHash(r *execResult, exec failsafe.Execution[*common.Normaliz
 	}
 
 	// Successful result
-	jr := resultToJsonRpcResponse(r.Result, exec)
+	jr := resultToJsonRpcResponse(r.Result, ctx)
 	if jr == nil {
 		return "", errNoJsonRpcResponse
 	}
 
 	if config.ignoreFields != nil {
-		if originalReq, ok := exec.Context().Value(common.RequestContextKey).(*common.NormalizedRequest); ok {
+		if originalReq, ok := ctx.Value(common.RequestContextKey).(*common.NormalizedRequest); ok {
 			if method, err := originalReq.Method(); err == nil {
 				if fields, ok := config.ignoreFields[method]; ok {
-					return jr.CanonicalHashWithIgnoredFields(fields, exec.Context())
+					return jr.CanonicalHashWithIgnoredFields(fields, ctx)
 				}
 			}
 		}

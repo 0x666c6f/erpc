@@ -1539,7 +1539,7 @@ func TestConsensusPolicy(t *testing.T) {
 		},
 		{
 			name:        "retry_on_error_and_success_on_next_upstream",
-			description: "Retry enabled; second upstream errors; first and third succeed, reaching 2/3 consensus. Retry policy retries the erroring upstream once (MaxAttempts:2).",
+			description: "Retry enabled; second upstream errors; first and third succeed, reaching 2/3 consensus. Retry policy retries the erroring upstream once and consensus escalation can select it again after the retryable error releases it.",
 			upstreams:   createTestUpstreams(3),
 			consensusConfig: &common.ConsensusPolicyConfig{
 				MaxParticipants:         3,
@@ -1557,7 +1557,7 @@ func TestConsensusPolicy(t *testing.T) {
 				{status: 200, body: jsonRpcError(-32000, "cannot query unfinalized data")},
 				{status: 200, body: jsonRpcSuccess("0x7a")},
 			},
-			expectedCalls: []int{1, 2, 1}, // upstream 2 is retried once due to MaxAttempts:2
+			expectedCalls: []int{1, 3, 1}, // upstream 2 is retried and then re-selected by consensus escalation after retryable release
 			expectedResult: &expectedResult{
 				jsonRpcResult: `"0x7a"`,
 			},
@@ -3004,9 +3004,20 @@ func setupNetworkForConsensusTest(t *testing.T, ctx context.Context, tc consensu
 
 	upsReg := upstream.NewUpstreamsRegistry(
 		ctx, &log.Logger, "prjA", tc.upstreams,
-		ssr, nil, vr, pr, nil, mt, 1*time.Second, nil, nil,
+		ssr, nil, vr, pr, nil, mt, nil,
 	)
 
+	// These tests pre-date the adaptive wait-cap defaults and assert
+	// "wait for every participant" timing. Suppress the production
+	// defaults by injecting empty (disabled) caps when the test
+	// doesn't set them explicitly. Wait-cap behavior has its own
+	// dedicated tests in consensus/wait_cap_test.go.
+	if tc.consensusConfig.MaxWaitOnResult == nil {
+		tc.consensusConfig.MaxWaitOnResult = &common.AdaptiveDuration{}
+	}
+	if tc.consensusConfig.MaxWaitOnEmpty == nil {
+		tc.consensusConfig.MaxWaitOnEmpty = &common.AdaptiveDuration{}
+	}
 	if err := tc.consensusConfig.SetDefaults(); err != nil {
 		t.Fatalf("failed to set defaults on consensus config: %v", err)
 	}
@@ -3028,6 +3039,7 @@ func setupNetworkForConsensusTest(t *testing.T, ctx context.Context, tc consensu
 			},
 		},
 		nil, upsReg, mt,
+		nil,
 	)
 	require.NoError(t, err)
 
@@ -3035,8 +3047,8 @@ func setupNetworkForConsensusTest(t *testing.T, ctx context.Context, tc consensu
 	time.Sleep(25 * time.Millisecond)
 	err = upsReg.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123))
 	require.NoError(t, err)
-	upstream.ReorderUpstreams(upsReg)
-
+	// TODO(phase-10): migrate to policy.OverrideAllForTest(<engine>); was: upstream.ReorderUpstreams(upsReg)
+	upsReg.OverrideOrderForTest(util.EvmNetworkId(123))
 	return ntw, upsReg
 }
 

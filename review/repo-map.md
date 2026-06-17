@@ -10,6 +10,7 @@ Top-level
 - .github
 - .gitignore
 - .goreleaser.yaml
+- .maestrorc.json
 - .pre-commit-config.yaml
 - .semrelrc
 - .vscode
@@ -40,10 +41,12 @@ Top-level
 - erpc
 - erpc.dist.ts
 - erpc.dist.yaml
+- failsafe
 - funding.json
 - go.mod
 - go.sum
 - health
+- internal
 - kube
 - monitoring
 - package.json
@@ -53,6 +56,7 @@ Top-level
 - review
 - scripts
 - scylla
+- specs
 - telemetry
 - test
 - thirdparty
@@ -64,6 +68,7 @@ Top-level
 
 Go entrypoints
 - cmd/erpc
+- cmd/erpc-simulator
 
 Core packages
 - erpc/
