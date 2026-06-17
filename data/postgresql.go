@@ -310,10 +310,9 @@ func (p *PostgreSQLConnector) applySchema(ctx context.Context, conn *pgxpool.Poo
 			return fmt.Errorf("failed to add temporary column: %w", err)
 		}
 
-		// noaikido: p.table is pgx.Identifier.Sanitize output; runtime values use pgx parameters.
-		if _, err := conn.Exec(ctx, fmt.Sprintf(`
-				UPDATE %s SET value_new = value::bytea WHERE value IS NOT NULL
-			`, p.table)); err != nil {
+		// p.table is pgx.Identifier.Sanitize output; runtime values use pgx parameters.
+		updateValueQuery := fmt.Sprintf("UPDATE %s SET value_new = value::bytea WHERE value IS NOT NULL", p.table) // noaikido
+		if _, err := conn.Exec(ctx, updateValueQuery); err != nil {
 			return fmt.Errorf("failed to migrate data: %w", err)
 		}
 
