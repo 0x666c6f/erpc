@@ -1,2 +1,7 @@
+# Default ownership
 * @0x666c6f
+
+# Helm charts migrated from morpho-infra-helm (2026-06-17)
 /helm/ @0x666c6f
+/validate-helm-charts.sh @0x666c6f
+/setup-hooks.sh @0x666c6f
