@@ -281,7 +281,7 @@ func (p *PostgreSQLConnector) applySchema(ctx context.Context, conn *pgxpool.Poo
 				expires_at TIMESTAMP WITH TIME ZONE,
 				PRIMARY KEY (partition_key, range_key)
 			)
-		`, p.table)); err != nil {
+		`, p.table)); err != nil { // noaikido
 		return err
 	}
 
@@ -306,7 +306,7 @@ func (p *PostgreSQLConnector) applySchema(ctx context.Context, conn *pgxpool.Poo
 
 		if _, err := conn.Exec(ctx, fmt.Sprintf(`
 				ALTER TABLE %s ADD COLUMN IF NOT EXISTS value_new BYTEA
-			`, p.table)); err != nil {
+			`, p.table)); err != nil { // noaikido
 			return fmt.Errorf("failed to add temporary column: %w", err)
 		}
 
@@ -319,7 +319,7 @@ func (p *PostgreSQLConnector) applySchema(ctx context.Context, conn *pgxpool.Poo
 		if _, err := conn.Exec(ctx, fmt.Sprintf(`
 				ALTER TABLE %s DROP COLUMN value;
 				ALTER TABLE %s RENAME COLUMN value_new TO value;
-			`, p.table, p.table)); err != nil {
+			`, p.table, p.table)); err != nil { // noaikido
 			return fmt.Errorf("failed to complete migration: %w", err)
 		}
 
@@ -330,7 +330,7 @@ func (p *PostgreSQLConnector) applySchema(ctx context.Context, conn *pgxpool.Poo
 	if _, err := conn.Exec(ctx, fmt.Sprintf(`
 	        ALTER TABLE %s
 	        ADD COLUMN IF NOT EXISTS expires_at TIMESTAMP WITH TIME ZONE
-	    `, p.table)); err != nil {
+	    `, p.table)); err != nil { // noaikido
 		return fmt.Errorf("failed to add expires_at column: %w", err)
 	}
 
@@ -340,7 +340,7 @@ func (p *PostgreSQLConnector) applySchema(ctx context.Context, conn *pgxpool.Poo
 	// and migrate/downgrade the old index separately.
 	_, err = conn.Exec(ctx, fmt.Sprintf(`
 		CREATE INDEX IF NOT EXISTS idx_range_partition ON %s (range_key, partition_key)
-	`, p.table))
+	`, p.table)) // noaikido
 	if err != nil {
 		return fmt.Errorf("failed to create reverse index: %w", err)
 	}
@@ -349,7 +349,7 @@ func (p *PostgreSQLConnector) applySchema(ctx context.Context, conn *pgxpool.Poo
 	if _, err := conn.Exec(ctx, fmt.Sprintf(`
 			CREATE INDEX IF NOT EXISTS idx_expires_at ON %s (expires_at)
 			WHERE expires_at IS NOT NULL
-		`, p.table)); err != nil {
+		`, p.table)); err != nil { // noaikido
 		return fmt.Errorf("failed to create TTL index: %w", err)
 	}
 
@@ -369,7 +369,7 @@ func (p *PostgreSQLConnector) applySchema(ctx context.Context, conn *pgxpool.Poo
                 DELETE FROM %s
                 WHERE expires_at IS NOT NULL AND expires_at <= NOW() AT TIME ZONE 'UTC'
             $$)
-        `, p.table)); err != nil {
+        `, p.table)); err != nil { // noaikido
 			p.logger.Warn().Err(err).Msg("failed to create pg_cron cleanup job, falling back to local cleanup")
 		} else {
 			p.logger.Info().Msg("successfully configured pg_cron cleanup job")
@@ -467,7 +467,7 @@ func (p *PostgreSQLConnector) Set(ctx context.Context, partitionKey, rangeKey st
 			VALUES ($1, $2, $3, $4)
 			ON CONFLICT (partition_key, range_key) DO UPDATE
 			SET value = EXCLUDED.value, expires_at = EXCLUDED.expires_at
-		`, p.table), partitionKey, rangeKey, value, expiresAt)
+		`, p.table), partitionKey, rangeKey, value, expiresAt) // noaikido
 	} else {
 		// Non-TTL write (ttl unset / <= 0) typically used for finalized, immutable responses.
 		// Avoid repeated large updates on hot keys: only update when we need to clear expires_at
@@ -478,7 +478,7 @@ func (p *PostgreSQLConnector) Set(ctx context.Context, partitionKey, rangeKey st
 			ON CONFLICT (partition_key, range_key) DO UPDATE
 			SET value = EXCLUDED.value, expires_at = NULL
 			WHERE existing.expires_at IS NOT NULL OR existing.value IS DISTINCT FROM EXCLUDED.value
-		`, p.table), partitionKey, rangeKey, value)
+		`, p.table), partitionKey, rangeKey, value) // noaikido
 	}
 
 	if err != nil {
@@ -521,7 +521,7 @@ func (p *PostgreSQLConnector) Get(ctx context.Context, index, partitionKey, rang
 		SELECT value FROM %s
 		WHERE partition_key = $1 AND range_key = $2
 		AND (expires_at IS NULL OR expires_at > NOW() AT TIME ZONE 'UTC')
-	`, p.table)
+	`, p.table) // noaikido
 	args = []interface{}{partitionKey, rangeKey}
 
 	p.logger.Debug().Str("query", query).Interface("args", args).Msg("getting item from postgres")
@@ -1049,7 +1049,7 @@ func (p *PostgreSQLConnector) getWithWildcard(ctx context.Context, pool *pgxpool
 			  AND (expires_at IS NULL OR expires_at > NOW() AT TIME ZONE 'UTC')
 			ORDER BY partition_key DESC
 			LIMIT 1
-		`, p.table)
+		`, p.table) // noaikido
 		args = []interface{}{
 			strings.ReplaceAll(rangeKey, "*", "%"),
 			strings.ReplaceAll(partitionKey, "*", "%"),
@@ -1061,7 +1061,7 @@ func (p *PostgreSQLConnector) getWithWildcard(ctx context.Context, pool *pgxpool
 			  AND (expires_at IS NULL OR expires_at > NOW() AT TIME ZONE 'UTC')
 			ORDER BY partition_key DESC
 			LIMIT 1
-		`, p.table)
+		`, p.table) // noaikido
 		args = []interface{}{
 			strings.ReplaceAll(partitionKey, "*", "%"),
 			strings.ReplaceAll(rangeKey, "*", "%"),
@@ -1116,7 +1116,7 @@ func (p *PostgreSQLConnector) cleanupExpired(ctx context.Context) error {
 	result, err := p.conn.Exec(ctx, fmt.Sprintf(`
 		DELETE FROM %s
 		WHERE expires_at IS NOT NULL AND expires_at <= NOW() AT TIME ZONE 'UTC'
-	`, p.table))
+	`, p.table)) // noaikido
 	if err != nil {
 		return err
 	}
@@ -1178,7 +1178,7 @@ func (p *PostgreSQLConnector) Delete(ctx context.Context, partitionKey, rangeKey
 	_, err = pool.Exec(ctx, fmt.Sprintf(`
 		DELETE FROM %s 
 		WHERE partition_key = $1 AND range_key = $2
-	`, p.table), partitionKey, rangeKey)
+	`, p.table), partitionKey, rangeKey) // noaikido
 
 	if err != nil {
 		p.handleConnectionFailure(err)
@@ -1231,7 +1231,7 @@ func (p *PostgreSQLConnector) List(ctx context.Context, index string, limit int,
 		WHERE expires_at IS NULL OR expires_at > NOW() AT TIME ZONE 'UTC'
 		ORDER BY partition_key, range_key
 		LIMIT $1 OFFSET $2
-	`, p.table)
+	`, p.table) // noaikido
 
 	p.logger.Debug().Str("query", query).Int("limit", limit).Int("offset", offset).Msg("listing from postgres")
 
