@@ -87,4 +87,6 @@ jobs:
           go-version: '1.25.x'
           cache: false
       - name: Run Gosec Security Scanner
-        run: go run github.com/securego/gosec/v2/cmd/gosec@v2.22.11 -exclude=G115 -exclude-dir=test -tests=false ./...
+        uses: securego/gosec@f1c81de5fcdf7b466b229fb24ca02d1a8406dd09 # master
+        with:
+          args: -exclude=G115 -exclude-dir=test -tests=false ./...
