@@ -1,0 +1,186 @@
+{{- if ne (toString .Values.postgresql.enabled) "false" }}
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: erpc-db
+  annotations:
+    argocd.argoproj.io/sync-wave: "-2"
+spec:
+  instances: 2
+  primaryUpdateStrategy: unsupervised
+  imageCatalogRef:
+    apiGroup: postgresql.cnpg.io
+    kind: ImageCatalog
+    name: erpc-postgresql-native-18
+    major: 18
+
+  serviceAccountTemplate:
+    metadata:
+      annotations:
+        eks.amazonaws.com/role-arn: {{ .Values.postgresql.s3SARoleArn }}
+  postgresql:
+    shared_preload_libraries:
+      - pg_stat_statements
+    parameters:
+      max_connections: "5000"
+
+      idle_in_transaction_session_timeout: "30000"
+
+      max_locks_per_transaction: "512"
+      max_pred_locks_per_transaction: "512"
+
+      shared_buffers: {{ .Values.postgresql.sharedBuffers | default "1GB" | quote }}
+      effective_cache_size: {{ .Values.postgresql.effectiveCacheSize | default "3GB" | quote }}
+      maintenance_work_mem: {{ .Values.postgresql.maintenanceWorkMem | default "256MB" | quote }}
+      work_mem: {{ .Values.postgresql.workMem | default "8MB" | quote }}
+
+      wal_buffers: "16MB"
+      min_wal_size: "1GB"
+      max_wal_size: "8GB"
+      wal_keep_size: "2GB"
+      checkpoint_completion_target: "0.9"
+      checkpoint_timeout: "15min"
+      wal_level: "replica"
+      synchronous_commit: "off"
+
+      default_statistics_target: "200"
+      random_page_cost: "1.0"
+      effective_io_concurrency: "200"
+      huge_pages: "off"
+
+      max_worker_processes: {{ .Values.postgresql.maxWorkerProcesses | default "2" | quote }}
+      max_parallel_workers: {{ .Values.postgresql.maxParallelWorkers | default "2" | quote }}
+      max_parallel_workers_per_gather: {{ .Values.postgresql.maxParallelWorkersPerGather | default "1" | quote }}
+      max_parallel_maintenance_workers: {{ .Values.postgresql.maxParallelMaintenanceWorkers | default "1" | quote }}
+
+      autovacuum_max_workers: {{ .Values.postgresql.autovacuumMaxWorkers | default "2" | quote }}
+      autovacuum_naptime: "10s"
+      autovacuum_vacuum_scale_factor: "0.01"
+      autovacuum_analyze_scale_factor: "0.005"
+      autovacuum_vacuum_cost_delay: "2ms"
+      autovacuum_vacuum_cost_limit: "2000"
+
+      track_io_timing: "on"
+      jit: "off"
+
+      bgwriter_delay: "200ms"
+      bgwriter_lru_maxpages: "1000"
+      bgwriter_lru_multiplier: "10.0"
+
+      track_activity_query_size: "8192"
+      pg_stat_statements.max: "5000"
+      pg_stat_statements.track: "all"
+
+      # Must exceed worst-case pg_backup_start() duration (checkpoint + WAL flush)
+      # on a write-heavy DB; 10s was killing every barman base backup.
+      statement_timeout: "600000"
+      lock_timeout: "5000"
+
+      vacuum_cost_delay: "2ms"
+
+      # Write-heavy workload optimizations
+      full_page_writes: "on"
+      wal_compression: "on"
+      wal_writer_delay: "10ms"
+      commit_delay: "10"
+      commit_siblings: "10"
+
+      # Reduce checkpoint frequency impact
+      checkpoint_warning: "300s"
+
+      # Connection pooling optimization
+      tcp_keepalives_idle: "60"
+      tcp_keepalives_interval: "10"
+      tcp_keepalives_count: "6"
+    pg_hba:
+      - host all all 0.0.0.0/0 md5
+
+  bootstrap:
+    initdb:
+      database: erpc
+      owner: postgres
+      secret:
+        name: erpc-db-secret
+      postInitApplicationSQL:
+        - CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
+
+  storage:
+    storageClass: {{ .Values.postgresql.storageClass | default "gp3" }}
+    size: {{ .Values.postgresql.storage | default "100Gi" }}
+    {{- with .Values.postgresql.volumeAttributesClassName }}
+    pvcTemplate:
+      volumeAttributesClassName: {{ . | quote }}
+    {{- end }}
+
+  resources:
+    {{- toYaml .Values.postgresql.resources | nindent 4 }}
+
+  {{- $aff := .Values.postgresql.affinity | default dict -}}
+  {{- if or $aff.nodeSelector $aff.tolerations $aff.additionalPodAntiAffinity }}
+  affinity:
+    {{- with $aff.nodeSelector }}
+    nodeSelector:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+    {{- with $aff.tolerations }}
+    tolerations:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+    {{- with $aff.additionalPodAntiAffinity }}
+    additionalPodAntiAffinity:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+  {{- else }}
+  affinity: {}
+  {{- end }}
+
+  enableSuperuserAccess: true
+  superuserSecret:
+    name: erpc-db-secret
+
+  monitoring:
+    customQueriesConfigMap:
+      - key: queries
+        name: cnpg-default-monitoring
+      - key: custom-queries
+        name: {{ include "erpc.fullname" . }}-cnpg-recovery-health-monitoring
+
+  {{- $snapshotClass := .Values.postgresql.backup.volumeSnapshotClassName | default "" }}
+  {{- $backupMethod := .Values.postgresql.backup.method | default (ternary "volumeSnapshot" "barmanObjectStore" (ne $snapshotClass "")) }}
+  {{- if eq $backupMethod "volumeSnapshot" }}
+  {{- if not $snapshotClass }}{{ fail "postgresql.backup.volumeSnapshotClassName is required when postgresql.backup.method=volumeSnapshot" }}{{ end }}
+  backup:
+    retentionPolicy: {{ .Values.postgresql.backup.retentionPolicy | default "7d" | quote }}
+    {{- with .Values.postgresql.backup.destinationPath }}
+    barmanObjectStore:
+      s3Credentials:
+        inheritFromIAMRole: true
+      destinationPath: {{ . }}
+      endpointURL: "https://s3.eu-west-3.amazonaws.com"
+      wal:
+        compression: gzip
+        maxParallel: 4
+    {{- end }}
+    target: prefer-standby
+    volumeSnapshot:
+      className: {{ $snapshotClass }}
+      online: true
+      onlineConfiguration:
+        immediateCheckpoint: false
+        waitForArchive: true
+      snapshotOwnerReference: backup
+  {{- else if eq $backupMethod "barmanObjectStore" }}
+  backup:
+    retentionPolicy: {{ .Values.postgresql.backup.retentionPolicy | default "7d" | quote }}
+    barmanObjectStore:
+      s3Credentials:
+        inheritFromIAMRole: true
+      destinationPath: {{ .Values.postgresql.backup.destinationPath }}
+      endpointURL: "https://s3.eu-west-3.amazonaws.com"
+      wal:
+        compression: gzip
+        maxParallel: 4
+  {{- else }}
+  {{- fail (printf "postgresql.backup.method must be \"barmanObjectStore\" or \"volumeSnapshot\", got %q" $backupMethod) }}
+  {{- end }}
+{{- end }}

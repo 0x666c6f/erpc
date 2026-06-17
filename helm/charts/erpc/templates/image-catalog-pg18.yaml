@@ -1,0 +1,12 @@
+{{- if ne (toString .Values.postgresql.enabled) "false" }}
+apiVersion: postgresql.cnpg.io/v1
+kind: ImageCatalog
+metadata:
+  name: erpc-postgresql-native-18
+  annotations:
+    argocd.argoproj.io/sync-wave: "-3"
+spec:
+  images:
+    - major: 18
+      image: "ghcr.io/cloudnative-pg/postgresql:18.0-system-trixie"
+{{- end }}

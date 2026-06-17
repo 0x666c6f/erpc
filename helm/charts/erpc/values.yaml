@@ -1,0 +1,226 @@
+# Default values for erpc
+nameOverride: ""
+fullnameOverride: ""
+
+replicaCount: 3
+
+vault:
+  configPath: "secret/data/erpc/config"
+  jobImage:
+    repository: 537124939463.dkr.ecr.eu-west-3.amazonaws.com/docker-hub/morphoorg/erpc-validator
+    tag: "0.0.77"
+    pullPolicy: IfNotPresent
+
+image:
+  repository: 537124939463.dkr.ecr.eu-west-3.amazonaws.com/docker-hub/morphoorg/erpc
+  tag: "0.0.77"
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+serviceAccount:
+  # Deprecated/ignored: ServiceAccounts always disable token automount; pods opt in when needed.
+  automount: true
+  # The name of the service account to use.
+  # Legacy creator ServiceAccount name; runtime pods use runtimeName when set.
+  name: ""
+  runtimeName: ""
+  # Set create=false to reuse an existing Vault creator identity while still
+  # allowing the chart to create the runtime ServiceAccount.
+  vaultCreator:
+    # create: false
+    name: ""
+  annotations: {}
+
+# Legacy override hooks (kept for backward compatibility with environments
+# that already set podSecurityContext / securityContext directly on this
+# chart). Active only when securityHardening.enabled is false.
+podSecurityContext: {}
+
+securityContext: {}
+
+# Pod Security Standards "restricted" profile, gated behind an enabled
+# flag so it can be rolled out per-environment. Enable in dev to validate
+# before flipping in prd. When disabled the legacy podSecurityContext /
+# securityContext keys above are honored instead.
+securityHardening:
+  enabled: false
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    fsGroup: 1000
+    seccompProfile:
+      type: RuntimeDefault
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+        - ALL
+    readOnlyRootFilesystem: true
+    runAsNonRoot: true
+
+config:
+  server:
+    httpPort: 4000
+    metricsPort: 4001
+
+service:
+  type: ClusterIP
+  port: 4000
+  metricsPort: 4001
+  annotations: {}
+
+metricsService:
+  type: ClusterIP
+  annotations: {}
+
+# Headless service for HAProxy DNS-based pod discovery
+headlessService:
+  enabled: false
+
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 8
+  targetCPUUtilizationPercentage: 100
+  targetMemoryUtilizationPercentage: 100
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 120
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 15
+        - type: Pods
+          value: 4
+          periodSeconds: 15
+      selectPolicy: Max
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Percent
+          value: 50
+          periodSeconds: 30
+        - type: Pods
+          value: 2
+          periodSeconds: 30
+      selectPolicy: Max
+
+resources:
+  requests:
+    cpu: "600m"
+    memory: "1600Mi"
+  limits:
+    cpu: "1000m"
+    memory: "3500Mi"
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}
+
+extraEnvVars: []
+
+# Startup probe configuration (HTTP /healthcheck on httpPort)
+# Allows slow upstream initialization before liveness/readiness probes start
+# Pod has up to initialDelaySeconds + (periodSeconds * failureThreshold) to start
+startupProbe:
+  path: /healthcheck
+  initialDelaySeconds: 10
+  periodSeconds: 5
+  timeoutSeconds: 5
+  failureThreshold: 6
+
+# Liveness probe configuration (TCP socket on httpPort)
+# Checks if HTTP server is running, otherwise eRPC itself is dead
+# Only runs after startup probe succeeds
+livenessProbe:
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+# Readiness probe configuration (HTTP /healthcheck endpoint)
+# Pod stops receiving traffic if readiness fails
+# Detects when service should be removed from load balancers
+readinessProbe:
+  path: /healthcheck
+  periodSeconds: 5
+  timeoutSeconds: 5
+  failureThreshold: 2
+
+monitoring:
+  podMonitor:
+    enabled: true
+    # Additional labels for the PodMonitor
+    additionalLabels: {}
+    # Annotations for the PodMonitor
+    annotations: {}
+    # Scrape interval
+    interval: 30s
+    # Scrape timeout
+    scrapeTimeout: 10s
+    # Metrics path
+    path: /metrics
+    # Scheme (http or https)
+    scheme: http
+    # Honor labels from the scraped metrics
+    honorLabels: false
+    # Metric relabeling configurations
+    metricRelabelings: []
+    # Relabeling configurations
+    relabelings: []
+    # Namespace selector
+    namespaceSelector: {}
+    # Job label
+    jobLabel: ""
+    # Pod target labels
+    podTargetLabels: []
+    # Sample limit
+    sampleLimit: 0
+    # Target limit
+    targetLimit: 0
+
+postgresql:
+  storage: "500Gi"
+  storageClass: gp3
+  volumeAttributesClassName: ""
+  s3SARoleArn: "arn:aws:iam::537124939463:role/prd-erpc-backup"
+  vault:
+    secretsPath: "secret/data/erpc/db"
+  backup:
+    # Empty = infer volumeSnapshot when volumeSnapshotClassName is set.
+    method: ""
+    volumeSnapshotClassName: ""
+    retentionPolicy: "7d"
+    destinationPath: "s3://prd-morpho-database-backup/erpc-backups"
+  sharedBuffers: "2GB"
+  effectiveCacheSize: "6GB"
+  maintenanceWorkMem: "512MB"
+  workMem: "16MB"
+  maxWorkerProcesses: "2"
+  maxParallelWorkers: "2"
+  maxParallelWorkersPerGather: "1"
+  maxParallelMaintenanceWorkers: "1"
+  autovacuumMaxWorkers: "2"
+  resources:
+    requests:
+      cpu: "2"
+      memory: "8Gi"
+    limits:
+      cpu: "2"
+      memory: "8Gi"
+  # Node affinity for PostgreSQL cluster
+  # Set to null to disable affinity (e.g., in dev)
+  affinity:
+    nodeSelector:
+      purpose: disruptable-database
+      nodegroup: disruptable-database-nodes
+    tolerations:
+      - key: "dedicated"
+        operator: "Equal"
+        value: "disruptable-database"
+        effect: "NoSchedule"
+    # Raw block injected into spec.affinity.additionalPodAntiAffinity. Use to
+    # enforce 1-pod-per-node packing across all CNPG clusters in PRD.
+    additionalPodAntiAffinity: {}

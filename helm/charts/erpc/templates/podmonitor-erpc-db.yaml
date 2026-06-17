@@ -1,0 +1,17 @@
+{{- if ne (toString .Values.postgresql.enabled) "false" }}
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: erpc-db-monitor
+  labels:
+    app: erpc-db-monitor
+    cnpg-cluster: erpc-db
+spec:
+  selector:
+    matchLabels:
+      cnpg.io/cluster: erpc-db
+  podMetricsEndpoints:
+    - port: metrics
+      interval: 10s
+      scrapeTimeout: 8s
+{{- end }}

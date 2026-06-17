@@ -1,0 +1,97 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "erpc.fullname" . }}-vault-config-creator
+  labels:
+    {{- include "erpc.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "1"
+    "helm.sh/hook-delete-policy": hook-succeeded
+    argocd.argoproj.io/sync-wave: "-3"
+    argocd.argoproj.io/sync-options: Force=true,Replace=true
+spec:
+  template:
+    metadata:
+      labels:
+        {{- include "erpc.selectorLabels" . | nindent 8 }}
+        job: vault-config-creator
+      annotations:
+        # Vault Agent annotations for config injection (on pod template)
+        vault.hashicorp.com/agent-inject: "true"
+        vault.hashicorp.com/role: {{ include "erpc.vaultCreatorServiceAccountName" . | quote }}
+        vault.hashicorp.com/agent-inject-secret-erpc-config: {{ .Values.vault.configPath | default "secret/data/erpc/config" | quote }}
+        vault.hashicorp.com/agent-inject-template-erpc-config: |
+          {{`{{- with secret "`}}{{ .Values.vault.configPath | default "secret/data/erpc/config" }}{{`" -}}
+          {{- .Data.data.config -}}
+          {{- end }}`}}
+        vault.hashicorp.com/agent-pre-populate-only: "true"
+    spec:
+      serviceAccountName: {{ include "erpc.vaultCreatorServiceAccountName" . }}
+      automountServiceAccountToken: true
+      {{- if .Values.securityHardening.enabled }}
+      securityContext:
+        {{- toYaml .Values.securityHardening.podSecurityContext | nindent 8 }}
+      {{- end }}
+      restartPolicy: OnFailure
+      {{- if .Values.securityHardening.enabled }}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+      {{- end }}
+      containers:
+        - name: config-creator
+          {{- if .Values.securityHardening.enabled }}
+          securityContext:
+            {{- toYaml .Values.securityHardening.containerSecurityContext | nindent 12 }}
+          {{- end }}
+          image: "{{ .Values.vault.jobImage.repository }}:{{ .Values.vault.jobImage.tag }}"
+          imagePullPolicy: {{ .Values.vault.jobImage.pullPolicy }}
+          {{- if .Values.securityHardening.enabled }}
+          env:
+            - name: HOME
+              value: /tmp
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          {{- end }}
+          command:
+            - sh
+            - -c
+            - |
+              echo "Creating Kubernetes Secret from vault config..."
+
+              # Wait for vault agent to complete
+              timeout=60
+              count=0
+              while [ ! -f /vault/secrets/erpc-config ] && [ $count -lt $timeout ]; do
+                echo "Waiting for vault config file... ($count/$timeout)"
+                sleep 2
+                count=$((count + 2))
+              done
+
+              if [ ! -f /vault/secrets/erpc-config ]; then
+                echo "ERROR: Vault config file not found after $timeout seconds"
+                exit 1
+              fi
+
+              echo "Vault config file found. Validating ERPC configuration..."
+
+              # Validate ERPC configuration using erpc binary
+              if ! erpc validate --config /vault/secrets/erpc-config; then
+                echo "ERROR: Invalid ERPC configuration"
+                exit 1
+              fi
+
+              echo "ERPC configuration validation passed. Creating Kubernetes Secret..."
+
+              # Create secret from vault config file
+              kubectl create secret generic {{ include "erpc.fullname" . }}-vault-config \
+                --namespace={{ .Release.Namespace }} \
+                --from-file=erpc.yaml=/vault/secrets/erpc-config \
+                --dry-run=client -o yaml | kubectl apply -f -
+
+              echo "Secret {{ include "erpc.fullname" . }}-vault-config created successfully"
+
+              # Verify secret was created
+              kubectl get secret {{ include "erpc.fullname" . }}-vault-config -n {{ .Release.Namespace }}
