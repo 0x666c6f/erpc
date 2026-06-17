@@ -49,6 +49,13 @@ func networkPostForward_eth_getBlockByNumber(ctx context.Context, network common
 	))
 	defer span.End()
 
+	if re == nil {
+		if err := filterHyperEVMSystemTransactions(ctx, network, nq, nr); err != nil {
+			common.SetTraceSpanError(span, err)
+			return nr, err
+		}
+	}
+
 	nr, err := enforceHighestBlock(ctx, network, nq, nr, re)
 	if err != nil {
 		common.SetTraceSpanError(span, err)
@@ -108,6 +115,23 @@ func networkPostForward_eth_getBlockByNumber(ctx context.Context, network common
 	}
 
 	return enforceNonNullBlock(ctx, nq, nr)
+}
+
+func networkPostForward_eth_getBlockByHash(ctx context.Context, network common.Network, nq *common.NormalizedRequest, nr *common.NormalizedResponse, re error) (*common.NormalizedResponse, error) {
+	ctx, span := common.StartDetailSpan(ctx, "Network.PostForward.eth_getBlockByHash", trace.WithAttributes(
+		attribute.String("request.id", fmt.Sprintf("%v", nq.ID())),
+		attribute.String("network.id", network.Id()),
+	))
+	defer span.End()
+
+	if re == nil {
+		if err := filterHyperEVMSystemTransactions(ctx, network, nq, nr); err != nil {
+			common.SetTraceSpanError(span, err)
+			return nr, err
+		}
+	}
+
+	return nr, re
 }
 
 func enforceHighestBlock(ctx context.Context, network common.Network, nq *common.NormalizedRequest, nr *common.NormalizedResponse, re error) (*common.NormalizedResponse, error) {
@@ -458,7 +482,101 @@ func upstreamPostForward_eth_getBlockByNumber(ctx context.Context, n common.Netw
 		return rs, err
 	}
 
+	if err := filterHyperEVMSystemTransactions(ctx, n, rq, rs); err != nil {
+		return rs, err
+	}
+
 	return rs, re
+}
+
+const hyperEVMChainId int64 = 999
+
+func filterHyperEVMSystemTransactions(ctx context.Context, n common.Network, rq *common.NormalizedRequest, rs *common.NormalizedResponse) error {
+	if !isHyperEVMNetwork(n) || rs == nil {
+		return nil
+	}
+	if isHashOnlyBlockRequest(ctx, rq) {
+		return nil
+	}
+	if rs.IsObjectNull(ctx) || rs.IsResultEmptyish(ctx) {
+		return nil
+	}
+
+	jrr, err := rs.JsonRpcResponse(ctx)
+	if err != nil || jrr == nil || jrr.Error != nil {
+		return err
+	}
+
+	var block map[string]interface{}
+	if err := common.SonicCfg.Unmarshal(jrr.GetResultBytes(), &block); err != nil {
+		return common.NewErrEndpointContentValidation(fmt.Errorf("invalid JSON result for HyperEVM block transaction filtering: %w", err), rs.Upstream())
+	}
+
+	txs, ok := block["transactions"].([]interface{})
+	if !ok || len(txs) == 0 {
+		return nil
+	}
+
+	var filteredTxs []interface{}
+	for i, tx := range txs {
+		if isHyperEVMSystemTransaction(tx) {
+			if filteredTxs == nil {
+				filteredTxs = make([]interface{}, 0, len(txs)-1)
+				filteredTxs = append(filteredTxs, txs[:i]...)
+			}
+			continue
+		}
+		if filteredTxs != nil {
+			filteredTxs = append(filteredTxs, tx)
+		}
+	}
+	if filteredTxs == nil {
+		return nil
+	}
+
+	block["transactions"] = filteredTxs
+	result, err := common.SonicCfg.Marshal(block)
+	if err != nil {
+		return common.NewErrEndpointContentValidation(fmt.Errorf("failed to marshal HyperEVM filtered block: %w", err), rs.Upstream())
+	}
+	jrr.SetResult(result)
+	return nil
+}
+
+func isHashOnlyBlockRequest(ctx context.Context, rq *common.NormalizedRequest) bool {
+	if rq == nil {
+		return false
+	}
+	jrq, err := rq.JsonRpcRequest(ctx)
+	if err != nil || jrq == nil {
+		return false
+	}
+	jrq.RLock()
+	defer jrq.RUnlock()
+	if len(jrq.Params) < 2 {
+		return false
+	}
+	includeTransactions, ok := jrq.Params[1].(bool)
+	return ok && !includeTransactions
+}
+
+func isHyperEVMNetwork(n common.Network) bool {
+	if n == nil {
+		return false
+	}
+	if cfg := n.Config(); cfg != nil && cfg.Evm != nil && cfg.Evm.ChainId == hyperEVMChainId {
+		return true
+	}
+	return strings.EqualFold(n.Id(), "evm:999")
+}
+
+func isHyperEVMSystemTransaction(tx interface{}) bool {
+	txObj, ok := tx.(map[string]interface{})
+	if !ok {
+		return false
+	}
+	gasPrice, ok := txObj["gasPrice"].(string)
+	return ok && isZeroishHex(gasPrice)
 }
 
 // blockValidationTxLite is a minimal transaction model for block validation
