@@ -704,9 +704,13 @@ func (e *Engine) lookupSlotWithFallback(networkID, method, finality string) (slo
 
 func (e *Engine) slotCountForNetworkLocked(networkID string) int {
 	count := 0
+	limit := e.maxSlotsPerNetwork
 	for k := range e.slots {
 		if k.network == networkID {
 			count++
+			if limit > 0 && count >= limit {
+				return count
+			}
 		}
 	}
 	return count

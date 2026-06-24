@@ -404,17 +404,7 @@ func (b *RateLimiterBudget) recordAdmissionFullDeny(
 	waitDuration time.Duration,
 	evalCtx rateLimitEvalContext,
 ) bool {
-	const outcome = "admission_full_deny"
-	telemetry.ObserverHandle(
-		telemetry.MetricRateLimiterPermitWaitDuration,
-		b.Id,
-		evalCtx.methodPattern,
-		evalCtx.scope,
-		outcome,
-	).Observe(waitDuration.Seconds())
-	evalCtx.observe(outcome)
-	doSpan.SetAttributes(attribute.String("result", outcome))
-	doSpan.End()
+	b.finishRateLimitOutcome(doSpan, waitDuration, evalCtx, "admission_full_deny", nil)
 	return false
 }
 
@@ -425,14 +415,7 @@ func (b *RateLimiterBudget) recordFailOpen(
 	outcome, reason string,
 	panicErr error,
 ) bool {
-	telemetry.ObserverHandle(
-		telemetry.MetricRateLimiterPermitWaitDuration,
-		b.Id,
-		evalCtx.methodPattern,
-		evalCtx.scope,
-		outcome,
-	).Observe(waitDuration.Seconds())
-	evalCtx.observe(outcome)
+	b.finishRateLimitOutcome(doSpan, waitDuration, evalCtx, outcome, panicErr)
 	telemetry.MetricRateLimiterFailopenTotal.WithLabelValues(
 		evalCtx.projectId,
 		evalCtx.networkLabel,
@@ -443,12 +426,29 @@ func (b *RateLimiterBudget) recordFailOpen(
 		reason,
 	).Inc()
 	telemetry.IncNetworkAttemptReason(evalCtx.projectId, evalCtx.networkLabel, evalCtx.method, telemetry.AttemptReasonFailOpen)
+	return true
+}
+
+func (b *RateLimiterBudget) finishRateLimitOutcome(
+	doSpan trace.Span,
+	waitDuration time.Duration,
+	evalCtx rateLimitEvalContext,
+	outcome string,
+	panicErr error,
+) {
+	telemetry.ObserverHandle(
+		telemetry.MetricRateLimiterPermitWaitDuration,
+		b.Id,
+		evalCtx.methodPattern,
+		evalCtx.scope,
+		outcome,
+	).Observe(waitDuration.Seconds())
+	evalCtx.observe(outcome)
 	if panicErr != nil {
 		doSpan.RecordError(panicErr)
 	}
 	doSpan.SetAttributes(attribute.String("result", outcome))
 	doSpan.End()
-	return true
 }
 
 func (b *RateLimiterBudget) doLimitSafely(
@@ -523,9 +523,6 @@ func (b *RateLimiterBudget) doLimitWithTimeout(
 		default:
 			if b.admissionShedded != nil {
 				b.admissionShedded.Inc()
-			}
-			if b.durationOverlimit != nil {
-				b.durationOverlimit.Observe(time.Since(start).Seconds())
 			}
 			if b.logger != nil && b.logger.GetLevel() <= zerolog.DebugLevel {
 				b.logger.Debug().
