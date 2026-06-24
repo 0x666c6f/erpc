@@ -554,6 +554,8 @@ func (e *executor) runAnalyzer(
 	}
 	if analysis == nil || waitCapped {
 		analysis = newConsensusAnalysisWithOptions(e.logger, ctx, e.config, responses, waitCapped)
+	}
+	if winner == nil || (waitCapped && !shortCircuited) {
 		winner = e.determineWinner(lg, analysis)
 	}
 	if !shortCircuited {

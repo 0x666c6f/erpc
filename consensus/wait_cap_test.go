@@ -151,6 +151,49 @@ func TestWaitCap_MaxWaitOnResult_ReleasesLateResponses(t *testing.T) {
 	}, 5*time.Second, 10*time.Millisecond, "late post-wait-cap response should be released exactly once")
 }
 
+func TestWaitCap_DoesNotReplaceShortCircuitWinner(t *testing.T) {
+	logger := zerolog.New(zerolog.NewTestWriter(t))
+
+	pol := newBuilder().
+		WithLogger(&logger).
+		WithMaxParticipants(3).
+		WithAgreementThreshold(2).
+		WithMaxWaitOnResult(common.NewStaticDuration(50 * time.Millisecond)).
+		Build()
+
+	req := common.NewNormalizedRequest([]byte(
+		`{"jsonrpc":"2.0","id":1,"method":"eth_sendRawTransaction","params":["0xdeadbeef"]}`,
+	))
+	ctx := context.WithValue(context.Background(), common.RequestContextKey, req)
+
+	var callCount atomic.Int32
+	var winnerBodyClosed atomic.Int32
+	var slowBodyClosed atomic.Int32
+	slowRelease := make(chan struct{})
+
+	resp, err := pol.Run(ctx, req, func(_ context.Context, _ *common.NormalizedRequest) (*common.NormalizedResponse, error) {
+		if callCount.Add(1) == 1 {
+			return validResponseWithCloser("0xwinner", &winnerBodyClosed), nil
+		}
+		<-slowRelease
+		return validResponseWithCloser("0xslow", &slowBodyClosed), nil
+	})
+
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	defer resp.Release()
+
+	time.Sleep(100 * time.Millisecond)
+	close(slowRelease)
+
+	require.Eventually(t, func() bool {
+		return slowBodyClosed.Load() == 1
+	}, 5*time.Second, 10*time.Millisecond, "late response should still be drained")
+	assert.Never(t, func() bool {
+		return winnerBodyClosed.Load() != 0
+	}, 200*time.Millisecond, 10*time.Millisecond, "wait-cap finalization must not replace or release short-circuit winner")
+}
+
 // TestWaitCap_MaxWaitOnEmpty_TighterFloor verifies that when ONLY empty
 // responses have arrived, the (typically larger) maxWaitOnEmpty cap
 // applies — bounded even if no real answer is ever produced.
