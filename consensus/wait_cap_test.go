@@ -25,6 +25,7 @@ func TestWaitCap_MaxWaitOnResult_BoundsTailLatency(t *testing.T) {
 		WithMaxParticipants(3).
 		WithAgreementThreshold(2).
 		WithLowParticipantsBehavior(common.ConsensusLowParticipantsBehaviorAcceptMostCommonValidResult).
+		WithPreferLargerResponses(true).
 		WithMaxWaitOnResult(common.NewStaticDuration(100 * time.Millisecond)).
 		Build()
 
@@ -54,6 +55,8 @@ func TestWaitCap_MaxWaitOnResult_BoundsTailLatency(t *testing.T) {
 
 	require.NoError(t, err)
 	require.NotNil(t, resp)
+	assert.GreaterOrEqual(t, elapsed, 80*time.Millisecond,
+		"test must exercise maxWaitOnResult instead of short-circuiting before the cap")
 	assert.Less(t, elapsed, 800*time.Millisecond,
 		"wait cap must bound elapsed time well below the straggler's 2s")
 }
