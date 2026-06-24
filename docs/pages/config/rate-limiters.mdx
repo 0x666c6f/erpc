@@ -582,7 +582,7 @@ Full error code reference:
 
 | Metric | Type | Labels | When it fires |
 |---|---|---|---|
-| `erpc_rate_limits_total` | counter | `project, network, vendor, upstream, category, finality, user, agent_name, budget, scope, auth, origin` | A budget rule denies a request. `origin` ∈ `{auth, project, network, upstream}` |
+| `erpc_rate_limits_total` | counter | `project, network, vendor, upstream, category, finality, user, budget, scope, auth, origin` | A budget rule denies a request. `origin` ∈ `{auth, project, network, upstream}` |
 | `erpc_rate_limiter_budget_max_count` | gauge | `budget, method, scope` | Set at budget initialization and on every auto-tuner adjustment |
 | `erpc_rate_limiter_failopen_total` | counter | `project, network, user, agent_name, budget, category, reason` | Rate limiter allowed a request due to timeout or backend failure; admission saturation does not increment this counter |
 | `erpc_rate_limiter_remote_inflight` | gauge | `budget` | Incremented when a Redis DoLimit goroutine starts; decremented on completion or panic |
