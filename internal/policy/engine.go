@@ -75,6 +75,11 @@ type Engine struct {
 	// wildcard slot alive forever.
 	idleEvictionAfter time.Duration
 
+	// maxSlotsPerNetwork bounds lazily-created narrow slots for one
+	// network. The wildcard slot counts toward the cap. When exhausted,
+	// new method/finality buckets fall back to the wildcard ordering.
+	maxSlotsPerNetwork int
+
 	// probers owns the per-network shadow-probe subsystem (one
 	// `Prober` per networkID). Created lazily when a network's eval
 	// emits a non-nil `__probeConfig` and torn down when the eval
@@ -95,6 +100,12 @@ type Engine struct {
 // flapping eviction on/off across the slot lifecycle is more
 // disruptive than just dropping a tracker bucket.
 const DefaultEngineIdleEvictionAfter = 1 * time.Hour
+
+// DefaultEngineMaxSlotsPerNetwork caps lazy selection-policy slots created
+// from request method/finality hints. The wildcard slot counts toward it.
+const DefaultEngineMaxSlotsPerNetwork = 1024
+
+const maxSelectionPolicyMethodKeyBytes = 128
 
 // slotKey identifies one slot in the engine. The wildcard for an
 // unspecified dimension is `"*"`. Which dimensions are wildcarded is
@@ -152,17 +163,18 @@ func NewEngine(
 	ctx, cancel := context.WithCancel(parentCtx)
 	lg := logger.With().Str("component", "policy-engine").Str("projectId", projectID).Logger()
 	e := &Engine{
-		projectID:         projectID,
-		logger:            &lg,
-		tracker:           tracker,
-		pool:              newRuntimePool(runtimePrimer, userScript),
-		slots:             make(map[slotKey]*Slot),
-		networks:          make(map[string]*networkRegistration),
-		sticky:            newStickyStore(),
-		idleEvictionAfter: DefaultEngineIdleEvictionAfter,
-		probers:           make(map[string]*Prober),
-		appCtx:            ctx,
-		cancel:            cancel,
+		projectID:          projectID,
+		logger:             &lg,
+		tracker:            tracker,
+		pool:               newRuntimePool(runtimePrimer, userScript),
+		slots:              make(map[slotKey]*Slot),
+		networks:           make(map[string]*networkRegistration),
+		sticky:             newStickyStore(),
+		idleEvictionAfter:  DefaultEngineIdleEvictionAfter,
+		maxSlotsPerNetwork: DefaultEngineMaxSlotsPerNetwork,
+		probers:            make(map[string]*Prober),
+		appCtx:             ctx,
+		cancel:             cancel,
 	}
 	go e.idleSweepLoop()
 	return e
@@ -174,6 +186,12 @@ func NewEngine(
 // to exercise eviction without waiting an hour.
 func (e *Engine) SetIdleEvictionAfter(d time.Duration) {
 	e.idleEvictionAfter = d
+}
+
+// SetMaxSlotsPerNetworkForTest overrides the lazy-slot cap. A value <= 0
+// disables the cap. Production uses DefaultEngineMaxSlotsPerNetwork.
+func (e *Engine) SetMaxSlotsPerNetworkForTest(n int) {
+	e.maxSlotsPerNetwork = n
 }
 
 // idleSweepLoop runs once per `engineSweepInterval` and drops narrow
@@ -208,7 +226,8 @@ func (e *Engine) idleSweepLoop() {
 const engineSweepInterval = 1 * time.Minute
 
 // sweepIdleSlots stops and removes per-(method, finality) slots that
-// haven't been read OR ticked in `idleEvictionAfter`. The wildcard
+// haven't been read in `idleEvictionAfter`. Background ticker activity
+// does not refresh this timestamp. The wildcard
 // (`("*", "*")`) slot is exempt; only narrow slots that lazy-created
 // in response to specific-method traffic are evictable.
 func (e *Engine) sweepIdleSlots() {
@@ -554,13 +573,31 @@ func effectiveKey(cfg *common.SelectionPolicyConfig, networkID, method, finality
 	if cfg != nil {
 		perMethod, perFinality := scopeAxes(cfg.EvalScope)
 		if perMethod && method != "" && method != "*" {
-			m = method
+			m = normalizeSlotMethod(method)
 		}
 		if perFinality && finality != "" && finality != "*" {
 			f = finality
 		}
 	}
 	return slotKey{networkID, m, f}
+}
+
+func normalizeSlotMethod(method string) string {
+	if method == "" || method == "*" || len(method) > maxSelectionPolicyMethodKeyBytes {
+		return "*"
+	}
+	for i := 0; i < len(method); i++ {
+		c := method[i]
+		switch {
+		case c >= 'a' && c <= 'z':
+		case c >= 'A' && c <= 'Z':
+		case c >= '0' && c <= '9':
+		case c == '_' || c == '.' || c == '-' || c == ':':
+		default:
+			return "*"
+		}
+	}
+	return method
 }
 
 // scopeAxes decomposes the `EvalScope` enum back into the two axis
@@ -642,6 +679,11 @@ func (e *Engine) lookupSlotWithFallback(networkID, method, finality string) (slo
 		e.mu.Unlock()
 		return s, wildcard
 	}
+	wildcard = e.slots[slotKey{networkID, "*", "*"}]
+	if e.maxSlotsPerNetwork > 0 && e.slotCountForNetworkLocked(networkID) >= e.maxSlotsPerNetwork {
+		e.mu.Unlock()
+		return wildcard, wildcard
+	}
 	// Pass the resolved key's method/finality (with wildcards collapsed)
 	// to the new slot so its ticker emits ctx.finality / metric labels
 	// at the right scope. `reg.networkLabel` was set at RegisterNetwork
@@ -658,6 +700,16 @@ func (e *Engine) lookupSlotWithFallback(networkID, method, finality string) (slo
 	// tick completes, hence the wildcard fallback in `GetOrdered`.
 	s.start(e.appCtx)
 	return s, wildcard
+}
+
+func (e *Engine) slotCountForNetworkLocked(networkID string) int {
+	count := 0
+	for k := range e.slots {
+		if k.network == networkID {
+			count++
+		}
+	}
+	return count
 }
 
 // SetPaused gates every slot's ticker. While paused, the goroutine still

@@ -3,6 +3,7 @@ package policy_test
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,6 +18,99 @@ import (
 type fakeUpstream struct {
 	id   string
 	tier string
+}
+
+func TestEngine_LazySlotCreationRejectsInvalidMethodsAndCapsFlood(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	logger := zerolog.Nop()
+	tracker := health.NewTracker(&logger, "test", time.Minute)
+
+	cfg := &common.SelectionPolicyConfig{
+		EvalInterval:         common.Duration(0),
+		EvalTimeout:          common.Duration(500 * time.Millisecond),
+		EvalScope:            common.EvalScopeNetworkMethod,
+		EvalFunc:             `(ups, _ctx) => ups`,
+		DisableTickerForTest: true,
+	}
+	require.NoError(t, cfg.SetDefaults())
+
+	engine := policy.NewEngine(ctx, &logger, "p1", tracker, nil, nil)
+	defer engine.Stop()
+	engine.SetMaxSlotsPerNetworkForTest(4) // wildcard + 3 narrow method slots
+
+	ups := []common.Upstream{
+		&fakeUpstream{id: "rpc1"},
+		&fakeUpstream{id: "rpc2"},
+	}
+	require.NoError(t, engine.RegisterNetwork("evm:1", "", func() []common.Upstream { return ups }, cfg))
+
+	invalidMethods := []string{
+		"",
+		"*",
+		"eth call",
+		"eth\ncall",
+		"eth$getBalance",
+		strings.Repeat("a", 129),
+	}
+	for _, method := range invalidMethods {
+		_ = engine.GetOrdered("evm:1", method, "*")
+	}
+	require.Equal(t, 1, policy.SlotCountForTest(engine),
+		"invalid or oversized methods must use the wildcard slot")
+
+	for i := 0; i < 10; i++ {
+		_ = engine.GetOrdered("evm:1", fmt.Sprintf("eth_flood_%d", i), "*")
+	}
+	require.Equal(t, 4, policy.SlotCountForTest(engine),
+		"slot cap must bound method-flood cardinality")
+
+	seen := map[string]bool{}
+	policy.WalkSlotsForTest(engine, func(_ string, method string, _ string, _ int) {
+		seen[method] = true
+	})
+	require.True(t, seen["*"], "wildcard slot must stay present")
+	require.True(t, seen["eth_flood_0"])
+	require.True(t, seen["eth_flood_1"])
+	require.True(t, seen["eth_flood_2"])
+	require.False(t, seen["eth_flood_3"], "cap must route excess methods through wildcard")
+}
+
+func TestEngine_SweepIdleSlots_EvictsTickerBackedNarrowSlots(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	logger := zerolog.Nop()
+	tracker := health.NewTracker(&logger, "test", time.Minute)
+
+	cfg := &common.SelectionPolicyConfig{
+		EvalInterval: common.Duration(10 * time.Millisecond),
+		EvalTimeout:  common.Duration(5 * time.Millisecond),
+		EvalScope:    common.EvalScopeNetworkMethod,
+		EvalFunc:     `(ups, _ctx) => ups`,
+	}
+	require.NoError(t, cfg.SetDefaults())
+
+	engine := policy.NewEngine(ctx, &logger, "p1", tracker, nil, nil)
+	defer engine.Stop()
+	engine.SetIdleEvictionAfter(30 * time.Millisecond)
+
+	ups := []common.Upstream{
+		&fakeUpstream{id: "rpc1"},
+		&fakeUpstream{id: "rpc2"},
+	}
+	require.NoError(t, engine.RegisterNetwork("evm:1", "", func() []common.Upstream { return ups }, cfg))
+
+	_ = engine.GetOrdered("evm:1", "eth_tickerBacked", "*")
+	require.Equal(t, 2, policy.SlotCountForTest(engine),
+		"wildcard + one narrow slot expected")
+
+	time.Sleep(90 * time.Millisecond)
+	policy.SweepIdleSlotsForTest(engine)
+
+	require.Equal(t, 1, policy.SlotCountForTest(engine),
+		"background ticker activity must not keep an idle narrow slot alive")
 }
 
 func (f *fakeUpstream) Id() string           { return f.id }

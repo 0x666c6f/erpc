@@ -56,7 +56,7 @@ type RateLimiterBudget struct {
 	// a Redis-rate-limiter contention spike (root-caused 2026-05-07 cronos
 	// receipts incident), which then drove CPU/GC into a death spiral.
 	//
-	// When admission is full, doLimitWithTimeout fail-opens immediately
+	// When admission is full, doLimitWithTimeout fails closed immediately
 	// without spawning a goroutine — increments
 	// MetricRateLimiterRemoteAdmissionSheddedTotal so we can alert on it.
 	//
@@ -351,13 +351,10 @@ func (b *RateLimiterBudget) evaluateRule(ctx context.Context, projectId string, 
 	waitDuration := time.Since(waitStartedAt)
 
 	if admissionFull {
-		return b.recordFailOpen(
+		return b.recordAdmissionFullDeny(
 			doSpan,
 			waitDuration,
 			evalCtx,
-			"admission_full",
-			"admission_full",
-			nil,
 		)
 	}
 	if timedOut {
@@ -400,6 +397,25 @@ func (b *RateLimiterBudget) evaluateRule(ctx context.Context, projectId string, 
 	doSpan.End()
 
 	return !isOverLimit
+}
+
+func (b *RateLimiterBudget) recordAdmissionFullDeny(
+	doSpan trace.Span,
+	waitDuration time.Duration,
+	evalCtx rateLimitEvalContext,
+) bool {
+	const outcome = "admission_full_deny"
+	telemetry.ObserverHandle(
+		telemetry.MetricRateLimiterPermitWaitDuration,
+		b.Id,
+		evalCtx.methodPattern,
+		evalCtx.scope,
+		outcome,
+	).Observe(waitDuration.Seconds())
+	evalCtx.observe(outcome)
+	doSpan.SetAttributes(attribute.String("result", outcome))
+	doSpan.End()
+	return false
 }
 
 func (b *RateLimiterBudget) recordFailOpen(
@@ -508,15 +524,15 @@ func (b *RateLimiterBudget) doLimitWithTimeout(
 			if b.admissionShedded != nil {
 				b.admissionShedded.Inc()
 			}
-			if b.durationFailopen != nil {
-				b.durationFailopen.Observe(time.Since(start).Seconds())
+			if b.durationOverlimit != nil {
+				b.durationOverlimit.Observe(time.Since(start).Seconds())
 			}
 			if b.logger != nil && b.logger.GetLevel() <= zerolog.DebugLevel {
 				b.logger.Debug().
 					Str("budget", b.Id).
 					Str("method", method).
 					Int("admissionCap", cap(b.admission)).
-					Msg("rate limiter remote admission full, failing open")
+					Msg("rate limiter remote admission full, failing closed")
 			}
 			return nil, false, true, nil
 		}
@@ -545,8 +561,8 @@ func (b *RateLimiterBudget) doLimitWithTimeout(
 			}
 		}
 		// Observe remote-call duration split by outcome (ok / over-limit /
-		// fail-open). Without this only timeout/admission fail-opens were ever
-		// recorded, leaving the ok & over_limit histograms permanently empty.
+		// fail-open). Without this only timeout fail-opens were recorded,
+		// leaving the ok & over_limit histograms permanently empty.
 		dur := time.Since(start).Seconds()
 		if result.panicErr == nil {
 			if len(result.statuses) > 0 && result.statuses[0].Code == pb.RateLimitResponse_OVER_LIMIT {

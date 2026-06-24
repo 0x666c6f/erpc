@@ -121,14 +121,14 @@ rules match a single method, all are evaluated in parallel goroutines; the first
 The backing store is either an in-process sharded memory cache (64 FNV-1a shards,
 lazy-expiry cleanup) or a Redis-backed Envoy ratelimit store. In memory mode, each eRPC
 process has independent counters — the effective cluster limit is `maxCount × instanceCount`.
-In Redis mode, counters are shared across all instances, but the Redis client **fail-opens**
-while the connection is being established, and again on timeout or admission pressure.
+In Redis mode, counters are shared across all instances. The Redis client **fail-opens**
+while the connection is being established and on per-call timeout, but admission pressure
+fails closed.
 
-**Redis fail-open paths.** Three distinct conditions cause the Redis rate limiter to allow
-a request instead of blocking:
+**Redis failure paths.** Redis limiter failure is split by condition:
 
 1. **Not yet connected** — `getCache()` returns nil; `TryAcquirePermit` returns `(true, nil)` before even reaching the Redis call. This window lasts from startup until Redis first connects.
-2. **Admission semaphore full** — each budget has a bounded channel (`max(256, connPoolSize × 32)` slots). When full, the request is allowed immediately without spawning a goroutine, and `erpc_rate_limiter_remote_admission_shedded_total` increments. This design was added after the 2026-05-07 incident where 25k+ goroutines accumulated during a Redis contention spike.
+2. **Admission semaphore full** — each budget has a bounded channel (`max(256, connPoolSize × 32)` slots). When full, the request is denied immediately without spawning a goroutine, and `erpc_rate_limiter_remote_admission_shedded_total` increments. This design was added after the 2026-05-07 incident where 25k+ goroutines accumulated during a Redis contention spike.
 3. **Per-call timeout** (`getTimeout`, default `1s`) — `doLimitWithTimeout` returns after the timer fires, allows the request, and increments `erpc_rate_limiter_failopen_total{reason="limit_timeout"}`. The spawned goroutine **continues running** and completes the Redis write — the counter is updated even though the caller was not blocked.
 
 **Auto-tuner.** When an upstream has `rateLimitBudget` set and `rateLimitAutoTune` is
@@ -584,9 +584,9 @@ Full error code reference:
 |---|---|---|---|
 | `erpc_rate_limits_total` | counter | `project, network, vendor, upstream, category, finality, user, agent_name, budget, scope, auth, origin` | A budget rule denies a request. `origin` ∈ `{auth, project, network, upstream}` |
 | `erpc_rate_limiter_budget_max_count` | gauge | `budget, method, scope` | Set at budget initialization and on every auto-tuner adjustment |
-| `erpc_rate_limiter_failopen_total` | counter | `project, network, user, agent_name, budget, category, reason` | Rate limiter allowed a request due to error; `reason` ∈ `{admission_full, limit_timeout}` |
+| `erpc_rate_limiter_failopen_total` | counter | `project, network, user, agent_name, budget, category, reason` | Rate limiter allowed a request due to timeout or backend failure; admission saturation does not increment this counter |
 | `erpc_rate_limiter_remote_inflight` | gauge | `budget` | Incremented when a Redis DoLimit goroutine starts; decremented on completion or panic |
-| `erpc_rate_limiter_remote_admission_shedded_total` | counter | `budget` | Admission semaphore was full; request fail-opened without spawning a goroutine |
+| `erpc_rate_limiter_remote_admission_shedded_total` | counter | `budget` | Admission semaphore was full; request denied without spawning a goroutine |
 | `erpc_rate_limiter_remote_duration_seconds` | histogram | `budget, result` | Duration of each Redis DoLimit call; `result` ∈ `{ok, over_limit, fail_open}` |
 | `erpc_rate_limiter_budget_decision_total` | counter | `project, network, category, finality, user, agent_name, budget, method, scope, decision` | **DEPRECATED** — replaced by `erpc_rate_limits_total`. Zero call sites in production code. Source: <SourceLink file="telemetry/metrics.go" lines="515" /> |
 | `erpc_unexpected_panic_total` | counter | `origin, store, fingerprint` | Redis DoLimit goroutine panicked and was recovered; `origin="ratelimiter-redis-dolimit"` |

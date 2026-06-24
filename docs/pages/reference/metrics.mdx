@@ -298,9 +298,9 @@ All metric names carry the `erpc_` prefix. Full definitions: <SourceLink file="t
 | `erpc_rate_limits_total` | counter | project, network, vendor, upstream, category, finality, user, agent_name, budget, scope, auth, origin | Unified rate-limit event. `scope="remote", origin="upstream", budget="<remote>"` = upstream 429 passthrough. For local budget denials, `scope` = `ScopeString()` of the rule: a comma-joined set of enabled scope flags (e.g. `"user"`, `"network"`, `"ip"`, or combinations like `"user,network"`); `origin` = empty string. Idle series deleted by health-tracker sweep. |
 | `erpc_rate_limiter_budget_max_count` | gauge | budget, method, scope | Budget's allowed req/s, set on rule creation or auto-tuner update. `scope` = `ScopeString()` comma-joined flags (e.g. `"user,network"`). |
 | `erpc_rate_limiter_budget_decision_total` | counter | project, network, category, finality, user, agent_name, budget, method, scope, decision | **DEPRECATED / DORMANT** — registered but zero production call sites. Always 0. |
-| `erpc_rate_limiter_failopen_total` | counter | project, network, user, agent_name, budget, category, reason | Rate limiter failed open. `reason` ∈ `"admission_full"`, `"limit_timeout"`. |
+| `erpc_rate_limiter_failopen_total` | counter | project, network, user, agent_name, budget, category, reason | Rate limiter failed open. `reason` currently includes `"limit_timeout"` and backend panic/connectivity paths. Admission saturation no longer increments this counter. |
 | `erpc_rate_limiter_remote_inflight` | gauge | budget | Concurrent in-flight remote (e.g. Redis) DoLimit calls per budget. |
-| `erpc_rate_limiter_remote_admission_shedded_total` | counter | budget | Remote check fail-opened because admission semaphore full (load shed). |
+| `erpc_rate_limiter_remote_admission_shedded_total` | counter | budget | Remote check denied because admission semaphore full (load shed). |
 | `erpc_rate_limiter_remote_duration_seconds` | LabeledHistogram | budget, result | Remote rate-limit check duration. `result` ∈ `"ok"`, `"over_limit"`, `"fail_open"`. Buckets: 0.001–5 s. |
 
 #### Area 7: Upstream health (cordon, circuit-breaker, probing)

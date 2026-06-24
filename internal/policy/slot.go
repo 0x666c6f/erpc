@@ -41,7 +41,7 @@ type Slot struct {
 	// upstreams are shadow-probe candidates for incoming requests.
 	excludedCache atomic.Pointer[[]common.Upstream]
 
-	// lastAccessedAtMs is unix-millis of the last tick OR GetOrdered
+	// lastAccessedAtMs is unix-millis of the last GetOrdered
 	// touching this slot. Drives the engine's idle-slot eviction —
 	// per-(method, finality) slots that haven't seen traffic in a
 	// while get stopped and removed so a method-flood attacker can't
@@ -165,11 +165,6 @@ const decisionsRingSize = 64
 // tickOnce runs one eval cycle synchronously. Exported via TickForTest.
 func (s *Slot) tickOnce() {
 	start := time.Now()
-	// Mark the slot active so the engine's idle-sweep keeps it alive
-	// even if no request has hit GetOrdered between ticks. Ticking IS
-	// activity — the JS evaluator burned CPU on this slot, evicting
-	// would be wasteful.
-	s.lastAccessedAtMs.Store(start.UnixMilli())
 	timeout := s.cfg.EvalTimeout.Duration()
 
 	// Re-resolve upstreams each tick so newly-bootstrapped ones become visible.

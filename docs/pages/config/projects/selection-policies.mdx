@@ -206,7 +206,7 @@ When `Engine.RegisterNetwork` is called at network bootstrap it:
 2. Creates the wildcard `("*","*")` slot and runs a **synchronous** initial tick — the first request always sees a populated cache.
 3. Starts the slot's ticker goroutine.
 
-The default `evalScope: "network"` creates one slot per network. Setting `evalScope: "network-method"` lazy-creates additional slots on first request for each distinct method, enabling per-method primary divergence. `evalScope: "network-finality"` splits on finality bucket; `"network-method-finality"` is the most granular. Narrow slots fall back to the wildcard slot cache during cold-start until their first tick completes.
+The default `evalScope: "network"` creates one slot per network. Setting `evalScope: "network-method"` lazy-creates additional slots on first request for each distinct method, enabling per-method primary divergence. `evalScope: "network-finality"` splits on finality bucket; `"network-method-finality"` is the most granular. Narrow slots fall back to the wildcard slot cache during cold-start until their first tick completes. Lazy slots are capped per network, malformed or oversized method names use the wildcard slot, and idle narrow slots are evicted based on request access rather than background ticker activity.
 
 **Score inputs (health tracker).** Every metric available to `evalFunc` comes from the health tracker's rolling window. The tracker maintains 10 atomic sub-buckets per `(upstream, method, finality)` tuple; one bucket rotates out every `windowSize / 10`, so data drips out with no cliff. A DDSketch per bucket (1% relative accuracy) produces p50/p70/p90/p95/p99 latency quantiles.
 
@@ -373,9 +373,9 @@ Defaults: <SourceLink file="common/defaults.go" lines="2512-2609" />
 | `evalScope` | Slots per network | Goroutines | Notes |
 |---|---|---|---|
 | `"network"` (default) | 1 | 1 | `ctx.method` always `"*"`; method-specific `scoreMultipliers` never match. |
-| `"network-method"` | 1 per observed method, lazy-created | N methods | Slots evicted after 1h idle. `scoreMultipliers.method` works correctly here. |
+| `"network-method"` | 1 per observed method, lazy-created and capped | N methods | Slots evicted after 1h idle. `scoreMultipliers.method` works correctly here. |
 | `"network-finality"` | Up to 4 (one per finality bucket) | Up to 4 | `ctx.method` still `"*"`; method-specific multipliers still never match. |
-| `"network-method-finality"` | Up to `methods × 4` | N × 4 | Highest granularity. Both `scoreMultipliers.method` and `.finality` match. |
+| `"network-method-finality"` | Up to capped `methods × 4` | N × 4 | Highest granularity. Both `scoreMultipliers.method` and `.finality` match. |
 
 **Legacy fields (accepted, never survive to runtime):**
 
