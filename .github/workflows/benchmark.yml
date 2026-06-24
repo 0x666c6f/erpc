@@ -34,19 +34,32 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
           PR_JSON=$(gh pr view ${{ github.event.issue.number }} --repo ${{ github.repository }} --json headRefName,headRepository)
+          HEAD_REPO=$(echo "$PR_JSON" | jq -r '.headRepository.owner.login + "/" + .headRepository.name')
           echo "head_ref=$(echo "$PR_JSON" | jq -r '.headRefName')" >> "$GITHUB_OUTPUT"
-          echo "head_repo=$(echo "$PR_JSON" | jq -r '.headRepository.owner.login + "/" + .headRepository.name')" >> "$GITHUB_OUTPUT"
+          echo "head_repo=${HEAD_REPO}" >> "$GITHUB_OUTPUT"
+          if [[ "$HEAD_REPO" != "${{ github.repository }}" ]]; then
+            echo "head_is_fork=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "head_is_fork=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Reject fork PR benchmarks
+        if: steps.pr.outputs.head_is_fork == 'true'
+        run: |
+          echo "::error::Refusing to benchmark fork PR code on privileged runners"
+          exit 1
 
       - name: Set up Go
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version: '1.25.x'
 
-      - name: Checkout base main
+      - name: Checkout base morpho-main
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
-          ref: main
+          ref: morpho-main
           fetch-depth: 0
 
       - name: Install benchstat
@@ -69,8 +82,8 @@ jobs:
           PR_COMMIT=$(git rev-parse HEAD)
 
           git remote add upstream "https://github.com/${BASE_REPO}.git" 2>/dev/null || true
-          git fetch upstream main
-          git checkout upstream/main
+          git fetch upstream morpho-main
+          git checkout upstream/morpho-main
           make bench > /tmp/benchmark-main.txt || touch /tmp/benchmark-main.txt
 
           git checkout "$PR_COMMIT"
@@ -144,4 +157,3 @@ jobs:
                 body: comment,
               });
             }
-
