@@ -87,20 +87,8 @@ func secretCachePart(name string, value string) string {
 		return name + "="
 	}
 	mac := hmac.New(sha256.New, secretCacheKey)
-	writeSecretCachePart(mac, name, value)
+	_, _ = mac.Write([]byte(name + "\x00" + strconv.Itoa(len(value)) + "\x00" + value))
 	return name + "=secret:" + hex.EncodeToString(mac.Sum(nil))[:24]
-}
-
-func writeSecretCachePart(mac hashWriter, name, value string) {
-	_, _ = mac.Write([]byte(name))
-	_, _ = mac.Write([]byte{0})
-	_, _ = mac.Write([]byte(strconv.Itoa(len(value))))
-	_, _ = mac.Write([]byte{0})
-	_, _ = mac.Write([]byte(value))
-}
-
-type hashWriter interface {
-	Write([]byte) (int, error)
 }
 
 func intSliceCachePart(name string, values []int) string {
