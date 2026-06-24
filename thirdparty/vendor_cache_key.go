@@ -23,6 +23,9 @@ var (
 )
 
 func withProviderSettings(settings common.VendorSettings, providerID string) common.VendorSettings {
+	if settings == nil {
+		return nil
+	}
 	copied := make(common.VendorSettings, len(settings)+1)
 	for k, v := range settings {
 		copied[k] = v

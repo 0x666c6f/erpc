@@ -148,6 +148,34 @@ func TestProvider_SupportsNetwork_PassesProviderSettings(t *testing.T) {
 	assert.Equal(t, "secret", config.Settings["apiKey"])
 }
 
+func TestProvider_GenerateUpstreamConfigs_PreservesNilVendorSettings(t *testing.T) {
+	logger := zerolog.New(nil)
+	mockVendor := new(MockVendor)
+	config := &common.ProviderConfig{
+		Id:                 "provider-a",
+		Vendor:             "test",
+		UpstreamIdTemplate: "<NETWORK>",
+	}
+	provider := NewProvider(&logger, config, mockVendor, nil)
+	upstreams := []*common.UpstreamConfig{{Endpoint: "https://example.com"}}
+
+	mockVendor.On(
+		"GenerateConfigs",
+		mock.Anything,
+		mock.Anything,
+		mock.Anything,
+		mock.MatchedBy(func(settings common.VendorSettings) bool {
+			return settings == nil
+		}),
+	).Return(upstreams, nil).Once()
+
+	result, err := provider.GenerateUpstreamConfigs(context.Background(), &logger, "evm:1")
+
+	assert.NoError(t, err)
+	assert.Equal(t, upstreams, result)
+	mockVendor.AssertExpectations(t)
+}
+
 func TestApplyUpstreamIDTemplate_NonEVMChainIDUsesPlaceholder(t *testing.T) {
 	result := applyUpstreamIDTemplate(
 		"<VENDOR>-<PROVIDER>-<NETWORK>-<EVM_CHAIN_ID>",
