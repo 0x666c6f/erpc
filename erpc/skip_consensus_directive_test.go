@@ -29,8 +29,8 @@ import (
 //     consensus path correctly when the directive is absent.
 //
 // We assert observable behavior by:
-//   (a) Per-upstream call counts via httptest servers — consensus(2,3) hits
-//       all three upstreams to collect responses; the non-consensus path
+//   (a) Per-upstream call counts via httptest servers — consensus(2,3)
+//       queries enough participants to reach agreement; the non-consensus path
 //       picks one upstream and returns its result.
 //   (b) Wall-clock latency — consensus dispute/agreement adds extra time
 //       even on agreement; the non-consensus path returns as soon as one
@@ -38,6 +38,7 @@ import (
 
 func TestSkipConsensusDirective_PublicHeaderDoesNotBypass(t *testing.T) {
 	tc := skipConsensusTestCase(t)
+	tc.mockResponses = skipConsensusPublicBypassAttemptResponses()
 	tc.expectedCalls = []int{1, 1, 1}
 
 	startConsensusMockServers(t, tc)
@@ -66,12 +67,13 @@ func TestSkipConsensusDirective_PublicHeaderDoesNotBypass(t *testing.T) {
 	jrr, jrrErr := resp.JsonRpcResponse()
 	require.NoError(t, jrrErr)
 	require.NotNil(t, jrr)
-	assert.Equal(t, `"0xaaa"`, jrr.GetResultString(),
-		"response should still be accepted through the consensus path")
+	assert.Equal(t, `"0xconsensus"`, jrr.GetResultString(),
+		"response must come from the consensus path, not the first upstream a bypass would use")
 }
 
 func TestSkipConsensusDirective_PublicQueryParamDoesNotBypass(t *testing.T) {
 	tc := skipConsensusTestCase(t)
+	tc.mockResponses = skipConsensusPublicBypassAttemptResponses()
 	tc.expectedCalls = []int{1, 1, 1}
 
 	startConsensusMockServers(t, tc)
@@ -95,6 +97,12 @@ func TestSkipConsensusDirective_PublicQueryParamDoesNotBypass(t *testing.T) {
 	resp, err := ntw.Forward(ctx, req)
 	require.NoError(t, err)
 	require.NotNil(t, resp)
+
+	jrr, jrrErr := resp.JsonRpcResponse()
+	require.NoError(t, jrrErr)
+	require.NotNil(t, jrr)
+	assert.Equal(t, `"0xconsensus"`, jrr.GetResultString(),
+		"response must come from the consensus path, not the first upstream a bypass would use")
 }
 
 func TestSkipConsensusDirective_Bypass_ViaDirectiveDefaults(t *testing.T) {
@@ -255,6 +263,16 @@ func skipConsensusTestCase(_ *testing.T) consensusTestCase {
 		},
 		requestMethod: "eth_blockNumber",
 		requestParams: []interface{}{},
+	}
+}
+
+func skipConsensusPublicBypassAttemptResponses() []mockResponse {
+	return []mockResponse{
+		// SkipConsensus bypass selects the first upstream and would return this
+		// value. Consensus must instead wait for the matching 2-of-3 result below.
+		{status: 200, body: jsonRpcSuccess("0xbypass")},
+		{status: 200, body: jsonRpcSuccess("0xconsensus")},
+		{status: 200, body: jsonRpcSuccess("0xconsensus")},
 	}
 }
 
