@@ -191,6 +191,9 @@ func (e *Engine) SetIdleEvictionAfter(d time.Duration) {
 // SetMaxSlotsPerNetworkForTest overrides the lazy-slot cap. A value <= 0
 // disables the cap. Production uses DefaultEngineMaxSlotsPerNetwork.
 func (e *Engine) SetMaxSlotsPerNetworkForTest(n int) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
 	e.maxSlotsPerNetwork = n
 }
 
