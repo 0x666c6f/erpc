@@ -32,6 +32,9 @@ var consensusRules = []consensusRule{
 			if a.method != "eth_sendRawTransaction" {
 				return false
 			}
+			if len(a.missingRequired) > 0 {
+				return false
+			}
 			// Check if we have any non-empty response (tx hash)
 			for _, g := range a.groups {
 				if g.ResponseType == ResponseTypeNonEmpty && g.Count >= 1 {
@@ -877,6 +880,9 @@ var shortCircuitRules = []shortCircuitRule{
 		Condition: func(w *slotResult, a *consensusAnalysis) bool {
 			// Only applies to eth_sendRawTransaction
 			if a.method != "eth_sendRawTransaction" {
+				return false
+			}
+			if len(a.missingRequired) > 0 {
 				return false
 			}
 			// Short-circuit as soon as we have any valid non-empty response (tx hash)
