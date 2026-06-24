@@ -43,14 +43,14 @@
 
   function highlightValue(s) {
     if (!s) return "";
-    const tokenRe = /("(?:\\.|[^"\\])*")|(?<![\w])(\d+(?:\.\d+)?(?:ms|s|m|h|kb|mb|gb)?)\b|\b(true|false|null|~)\b/gi;
+    const tokenRe = /("(?:\\.|[^"\\])*")|(?<![\w])(\d+(?:\.\d+)?(?:ms|s|m|h|kb|mb|gb)?)\b|\b(true|false|null)\b|(~)/gi;
     let out = "";
     let last = 0;
     for (const m of s.matchAll(tokenRe)) {
       out += esc(s.slice(last, m.index));
       if (m[1]) out += `<span class="tk-str">${esc(m[1])}</span>`;
       else if (m[2]) out += `<span class="tk-num">${esc(m[2])}</span>`;
-      else out += `<span class="tk-bool">${esc(m[3])}</span>`;
+      else out += `<span class="tk-bool">${esc(m[3] || m[4])}</span>`;
       last = m.index + m[0].length;
     }
     out += esc(s.slice(last));
