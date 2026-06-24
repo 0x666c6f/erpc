@@ -422,16 +422,7 @@ func (b *RateLimiterBudget) recordRateLimitOutcome(
 	).Observe(waitDuration.Seconds())
 	evalCtx.observe(outcome)
 	if reason != "" {
-		telemetry.MetricRateLimiterFailopenTotal.WithLabelValues(
-			evalCtx.projectId,
-			evalCtx.networkLabel,
-			evalCtx.userLabel,
-			evalCtx.agentName,
-			b.Id,
-			evalCtx.method,
-			reason,
-		).Inc()
-		telemetry.IncNetworkAttemptReason(evalCtx.projectId, evalCtx.networkLabel, evalCtx.method, telemetry.AttemptReasonFailOpen)
+		b.recordRateLimitFailOpen(evalCtx, reason)
 	}
 	if panicErr != nil {
 		doSpan.RecordError(panicErr)
@@ -439,6 +430,24 @@ func (b *RateLimiterBudget) recordRateLimitOutcome(
 	doSpan.SetAttributes(attribute.String("result", outcome))
 	doSpan.End()
 	return allowed
+}
+
+func (b *RateLimiterBudget) recordRateLimitFailOpen(evalCtx rateLimitEvalContext, reason string) {
+	telemetry.MetricRateLimiterFailopenTotal.WithLabelValues(
+		evalCtx.projectId,
+		evalCtx.networkLabel,
+		evalCtx.userLabel,
+		evalCtx.agentName,
+		b.Id,
+		evalCtx.method,
+		reason,
+	).Inc()
+	telemetry.IncNetworkAttemptReason(
+		evalCtx.projectId,
+		evalCtx.networkLabel,
+		evalCtx.method,
+		telemetry.AttemptReasonFailOpen,
+	)
 }
 
 func (b *RateLimiterBudget) doLimitSafely(
