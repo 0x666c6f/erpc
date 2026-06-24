@@ -552,12 +552,7 @@ func (e *executor) runAnalyzer(
 	if waitTimer != nil {
 		waitTimer.Stop()
 	}
-	if analysis == nil || waitCapped {
-		analysis = newConsensusAnalysisWithOptions(e.logger, ctx, e.config, responses, waitCapped)
-	}
-	if winner == nil || (waitCapped && !shortCircuited) {
-		winner = e.determineWinner(lg, analysis)
-	}
+	analysis, winner = e.finalizeAnalyzerDecision(lg, ctx, responses, analysis, winner, waitCapped, shortCircuited)
 	if !shortCircuited {
 		// Short-circuit branch already marked winners; mark here only
 		// for the wait-all path.
@@ -626,6 +621,24 @@ func (e *executor) runAnalyzer(
 
 	e.trackAndPunishMisbehavingUpstreams(lg, originalReq, labels, winner, analysis)
 	e.releaseNonWinningResponses(analysis, winner)
+}
+
+func (e *executor) finalizeAnalyzerDecision(
+	lg *zerolog.Logger,
+	ctx context.Context,
+	responses []*execResult,
+	analysis *consensusAnalysis,
+	winner *slotResult,
+	waitCapped bool,
+	shortCircuited bool,
+) (*consensusAnalysis, *slotResult) {
+	if analysis == nil || waitCapped {
+		analysis = newConsensusAnalysisWithOptions(e.logger, ctx, e.config, responses, waitCapped)
+	}
+	if shortCircuited {
+		return analysis, winner
+	}
+	return analysis, e.determineWinner(lg, analysis)
 }
 
 // releaseNonWinningResponses releases the Result pointers on every non-winning
