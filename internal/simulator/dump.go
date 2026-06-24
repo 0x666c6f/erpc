@@ -2,6 +2,7 @@ package simulator
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -251,9 +252,20 @@ func (d *Dumper) LogRequest(ev *TraceEvent, params, body json.RawMessage) {
 		"ts":     time.Now().UTC().Format(time.RFC3339Nano),
 		"kind":   "request",
 		"event":  ev,
-		"params": params,
-		"body":   body,
+		"params": compactRawJSON(params),
+		"body":   compactRawJSON(body),
 	})
+}
+
+func compactRawJSON(raw json.RawMessage) json.RawMessage {
+	if len(raw) == 0 {
+		return nil
+	}
+	var buf bytes.Buffer
+	if err := json.Compact(&buf, raw); err != nil {
+		return raw
+	}
+	return json.RawMessage(buf.Bytes())
 }
 
 // LogStatsFrame records a periodic StatsFrame (~5x/s by default in the
