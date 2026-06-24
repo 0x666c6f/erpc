@@ -45,15 +45,20 @@ func TestQuicknodeFilterParams(t *testing.T) {
 
 func TestQuicknodeGenerateConfigs(t *testing.T) {
 	vendor := CreateQuicknodeVendor().(*QuicknodeVendor)
+	settings := common.VendorSettings{
+		"apiKey":          "test-key",
+		"recheckInterval": time.Hour,
+	}
+	cacheKey := vendor.getCacheKey("test-key", &QuicknodeFilterParams{}, settings)
 	vendor.cache.snapshot.Store(&remoteCacheSnapshot[[]*QuicknodeEndpoint]{
-		values: map[string][]*QuicknodeEndpoint{"test-key": {
+		values: map[string][]*QuicknodeEndpoint{cacheKey: {
 			{
 				ID:      "589650",
 				HttpUrl: "https://example-hyperevm.quiknode.pro/secret/evm",
 				ChainID: 999,
 			},
 		}},
-		fetchedAt: map[string]time.Time{"test-key": time.Now()},
+		fetchedAt: map[string]time.Time{cacheKey: time.Now()},
 	})
 
 	upstream := &common.UpstreamConfig{
@@ -65,12 +70,34 @@ func TestQuicknodeGenerateConfigs(t *testing.T) {
 	}
 
 	logger := zerolog.Nop()
-	configs, err := vendor.GenerateConfigs(context.Background(), &logger, upstream, common.VendorSettings{
-		"apiKey":          "test-key",
-		"recheckInterval": time.Hour,
-	})
+	configs, err := vendor.GenerateConfigs(context.Background(), &logger, upstream, settings)
 
 	assert.NoError(t, err)
 	assert.Len(t, configs, 1)
 	assert.Equal(t, "https://example-hyperevm.quiknode.pro/secret/evm/nanoreth", configs[0].Endpoint)
+}
+
+func TestQuicknodeCacheKeyReusesEndpointSnapshotAcrossNetworks(t *testing.T) {
+	vendor := CreateQuicknodeVendor().(*QuicknodeVendor)
+	settings := common.VendorSettings{
+		"apiKey":          "test-key",
+		"recheckInterval": time.Hour,
+	}
+	cacheKey := vendor.getCacheKey("test-key", &QuicknodeFilterParams{}, settings)
+	vendor.cache.snapshot.Store(&remoteCacheSnapshot[[]*QuicknodeEndpoint]{
+		values: map[string][]*QuicknodeEndpoint{cacheKey: {
+			{ID: "1", HttpUrl: "https://mainnet.quiknode.pro/secret", ChainID: 1},
+			{ID: "10", HttpUrl: "https://optimism.quiknode.pro/secret", ChainID: 10},
+		}},
+		fetchedAt: map[string]time.Time{cacheKey: time.Now()},
+	})
+
+	logger := zerolog.Nop()
+	mainnetSupported, err := vendor.SupportsNetwork(context.Background(), &logger, settings, "evm:1")
+	assert.NoError(t, err)
+	assert.True(t, mainnetSupported)
+
+	optimismSupported, err := vendor.SupportsNetwork(context.Background(), &logger, settings, "evm:10")
+	assert.NoError(t, err)
+	assert.True(t, optimismSupported)
 }

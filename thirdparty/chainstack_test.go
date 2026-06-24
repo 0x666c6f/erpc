@@ -3,6 +3,7 @@ package thirdparty
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -215,19 +216,25 @@ func TestChainstackCacheKey(t *testing.T) {
 	vendor := CreateChainstackVendor().(*ChainstackVendor)
 
 	tests := []struct {
-		name     string
-		apiKey   string
-		params   *ChainstackFilterParams
-		expected string
+		name          string
+		apiKey        string
+		params        *ChainstackFilterParams
+		settings      common.VendorSettings
+		expectedParts []string
 	}{
 		{
 			name:     "no filters",
 			apiKey:   "test-key",
 			params:   &ChainstackFilterParams{},
-			expected: "test-key",
+			settings: common.VendorSettings{},
+			expectedParts: []string{
+				"chainstack",
+				"provider=standalone",
+				"key=",
+			},
 		},
 		{
-			name:   "all filters",
+			name:   "all filters include provider",
 			apiKey: "test-key",
 			params: &ChainstackFilterParams{
 				Project:      "proj-123",
@@ -236,7 +243,14 @@ func TestChainstackCacheKey(t *testing.T) {
 				Provider:     "aws",
 				Type:         "dedicated",
 			},
-			expected: "test-key_p:proj-123_o:org-456_r:us-east-1_pr:aws_t:dedicated",
+			settings: common.VendorSettings{
+				vendorSettingProviderID: "provider-a",
+			},
+			expectedParts: []string{
+				"chainstack",
+				"provider=provider-a",
+				"key=",
+			},
 		},
 		{
 			name:   "partial filters",
@@ -245,14 +259,23 @@ func TestChainstackCacheKey(t *testing.T) {
 				Project: "proj-123",
 				Type:    "shared",
 			},
-			expected: "test-key_p:proj-123_t:shared",
+			settings: common.VendorSettings{},
+			expectedParts: []string{
+				"chainstack",
+				"provider=standalone",
+				"key=",
+			},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := vendor.getCacheKey(tt.apiKey, tt.params)
-			assert.Equal(t, tt.expected, result)
+			result := vendor.getCacheKey(tt.apiKey, tt.params, tt.settings)
+			for _, part := range tt.expectedParts {
+				assert.Contains(t, result, part)
+			}
+			assert.NotContains(t, result, tt.apiKey)
+			assert.True(t, strings.Contains(result, "|key="))
 		})
 	}
 }

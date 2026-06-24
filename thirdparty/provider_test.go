@@ -113,3 +113,48 @@ func TestProvider_SupportsNetwork_WithIgnoreNetworks(t *testing.T) {
 		})
 	}
 }
+
+func TestProvider_SupportsNetwork_PassesProviderSettings(t *testing.T) {
+	logger := zerolog.New(nil)
+	mockVendor := new(MockVendor)
+	config := &common.ProviderConfig{
+		Id:       "provider-a",
+		Vendor:   "test",
+		Settings: common.VendorSettings{"apiKey": "secret"},
+	}
+	provider := NewProvider(&logger, config, mockVendor, nil)
+	var captured common.VendorSettings
+
+	mockVendor.On(
+		"SupportsNetwork",
+		mock.Anything,
+		mock.Anything,
+		mock.MatchedBy(func(settings common.VendorSettings) bool {
+			captured = settings
+			return settings["apiKey"] == "secret" &&
+				settings[vendorSettingProviderID] == "provider-a"
+		}),
+		"evm:1",
+	).Return(true, nil).Once()
+
+	result, err := provider.SupportsNetwork(context.Background(), "evm:1")
+
+	assert.NoError(t, err)
+	assert.True(t, result)
+	mockVendor.AssertExpectations(t)
+	assert.NotContains(t, config.Settings, vendorSettingProviderID)
+
+	captured["apiKey"] = "mutated"
+	assert.Equal(t, "secret", config.Settings["apiKey"])
+}
+
+func TestApplyUpstreamIDTemplate_NonEVMChainIDUsesPlaceholder(t *testing.T) {
+	result := applyUpstreamIDTemplate(
+		"<VENDOR>-<PROVIDER>-<NETWORK>-<EVM_CHAIN_ID>",
+		"sqd",
+		"provider-a",
+		"solana:mainnet",
+	)
+
+	assert.Equal(t, "sqd-provider-a-solana:mainnet-N/A", result)
+}
