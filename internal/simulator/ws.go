@@ -42,8 +42,7 @@ import (
 func WSHandler(o *Orchestrator) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
-			InsecureSkipVerify: true, // local-only tool; origin not enforced
-			CompressionMode:    websocket.CompressionDisabled,
+			CompressionMode: websocket.CompressionDisabled,
 		})
 		if err != nil {
 			return
