@@ -430,6 +430,68 @@ func TestEnrichFromHttp_CheckAllUpstreamsDirective(t *testing.T) {
 	})
 }
 
+func TestEnrichFromHttp_IgnoresPublicTrustedOnlyDirectives(t *testing.T) {
+	t.Run("header_only_does_not_initialize_directives", func(t *testing.T) {
+		req := NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","id":1,"method":"eth_call"}`))
+		headers := http.Header{}
+		headers.Set(headerDirectiveUseUpstream, "rpc2")
+		headers.Set(headerDirectiveSkipConsensus, "true")
+
+		req.EnrichFromHttp(headers, nil, UserAgentTrackingModeSimplified)
+
+		if dirs := req.Directives(); dirs != nil {
+			t.Fatalf("expected public trusted-only headers to be ignored without initializing directives, got %+v", dirs)
+		}
+	})
+
+	t.Run("query_only_does_not_initialize_directives", func(t *testing.T) {
+		req := NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","id":1,"method":"eth_call"}`))
+		query := url.Values{}
+		query.Set(queryDirectiveUseUpstream, "rpc2")
+		query.Set(queryDirectiveSkipConsensus, "true")
+
+		req.EnrichFromHttp(nil, query, UserAgentTrackingModeSimplified)
+
+		if dirs := req.Directives(); dirs != nil {
+			t.Fatalf("expected public trusted-only query params to be ignored without initializing directives, got %+v", dirs)
+		}
+	})
+
+	t.Run("does_not_override_trusted_defaults_when_other_http_directives_apply", func(t *testing.T) {
+		req := NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","id":1,"method":"eth_call"}`))
+		trustedUpstream := "trusted-*"
+		trustedSkipConsensus := true
+		req.ApplyDirectiveDefaults(&DirectiveDefaultsConfig{
+			UseUpstream:   &trustedUpstream,
+			SkipConsensus: &trustedSkipConsensus,
+		})
+
+		headers := http.Header{}
+		headers.Set(headerDirectiveUseUpstream, "attacker-*")
+		headers.Set(headerDirectiveSkipConsensus, "false")
+		headers.Set(headerDirectiveSkipCacheRead, "true")
+		query := url.Values{}
+		query.Set(queryDirectiveUseUpstream, "attacker-query-*")
+		query.Set(queryDirectiveSkipConsensus, "false")
+
+		req.EnrichFromHttp(headers, query, UserAgentTrackingModeSimplified)
+
+		dirs := req.Directives()
+		if dirs == nil {
+			t.Fatalf("expected trusted defaults to remain present")
+		}
+		if dirs.UseUpstream != trustedUpstream {
+			t.Fatalf("expected trusted UseUpstream=%q, got %q", trustedUpstream, dirs.UseUpstream)
+		}
+		if !dirs.SkipConsensus {
+			t.Fatalf("expected trusted SkipConsensus=true to survive public override attempt")
+		}
+		if dirs.SkipCacheRead != "true" {
+			t.Fatalf("expected unrelated public directive to still apply, got SkipCacheRead=%q", dirs.SkipCacheRead)
+		}
+	})
+}
+
 func TestShouldCheckAllUpstreams_NilSafety(t *testing.T) {
 	var nilReq *NormalizedRequest
 	if nilReq.ShouldCheckAllUpstreams() {

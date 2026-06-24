@@ -181,9 +181,9 @@ func (e *networkExecutor) Run(
 	}
 
 	// Consensus branch: each slot is retry(hedge(tryOneUpstream)).
-	// Skipped when the request carries the SkipConsensus directive (header
-	// `X-ERPC-Skip-Consensus: true`, query `?skip-consensus=true`, or
-	// `directiveDefaults.skipConsensus: true` in the network/project config).
+	// Skipped when trusted config/library code sets the SkipConsensus directive
+	// (for example, `directiveDefaults.skipConsensus: true` in the
+	// network/project config). Public HTTP headers/query params cannot set it.
 	// Falls through to the standard non-consensus retry+hedge path; all
 	// other policies (retry, hedge, breaker, timeout) still apply.
 	skipConsensus := false

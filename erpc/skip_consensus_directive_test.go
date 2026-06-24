@@ -20,9 +20,10 @@ import (
 // directive-injection step before Network.Forward.
 //
 // The contract under test:
-//   - When SkipConsensus is set on the request, the consensus branch in
+//   - When trusted config/library code sets SkipConsensus on the request, the consensus branch in
 //     networkExecutor.Invoke is bypassed and the request flows through the
 //     standard retry+hedge+timeout path.
+//   - Public HTTP headers/query params must not set SkipConsensus.
 //   - When SkipConsensus is unset (or false), the consensus branch runs as
 //     usual. This file's "control" test confirms the harness still drives the
 //     consensus path correctly when the directive is absent.
@@ -35,11 +36,9 @@ import (
 //       even on agreement; the non-consensus path returns as soon as one
 //       upstream answers.
 
-func TestSkipConsensusDirective_Bypass_ViaHeader(t *testing.T) {
+func TestSkipConsensusDirective_PublicHeaderDoesNotBypass(t *testing.T) {
 	tc := skipConsensusTestCase(t)
-	// With SkipConsensus, only one upstream should be queried. Other slots
-	// may receive an in-flight cancellation but should not produce work.
-	tc.expectedCalls = []int{1, 0, 0}
+	tc.expectedCalls = []int{1, 1, 1}
 
 	startConsensusMockServers(t, tc)
 
@@ -57,7 +56,8 @@ func TestSkipConsensusDirective_Bypass_ViaHeader(t *testing.T) {
 	headers := http.Header{}
 	headers.Set("X-ERPC-Skip-Consensus", "true")
 	req.EnrichFromHttp(headers, nil, common.UserAgentTrackingModeSimplified)
-	require.True(t, req.Directives().SkipConsensus, "precondition: directive must be set")
+	require.True(t, req.Directives() == nil || !req.Directives().SkipConsensus,
+		"public HTTP header must not set SkipConsensus")
 
 	resp, err := ntw.Forward(ctx, req)
 	require.NoError(t, err)
@@ -67,12 +67,12 @@ func TestSkipConsensusDirective_Bypass_ViaHeader(t *testing.T) {
 	require.NoError(t, jrrErr)
 	require.NotNil(t, jrr)
 	assert.Equal(t, `"0xaaa"`, jrr.GetResultString(),
-		"response should come from the first upstream's mock, proving the request went down the non-consensus single-upstream path")
+		"response should still be accepted through the consensus path")
 }
 
-func TestSkipConsensusDirective_Bypass_ViaQueryParam(t *testing.T) {
+func TestSkipConsensusDirective_PublicQueryParamDoesNotBypass(t *testing.T) {
 	tc := skipConsensusTestCase(t)
-	tc.expectedCalls = []int{1, 0, 0}
+	tc.expectedCalls = []int{1, 1, 1}
 
 	startConsensusMockServers(t, tc)
 
@@ -89,7 +89,8 @@ func TestSkipConsensusDirective_Bypass_ViaQueryParam(t *testing.T) {
 	q := url.Values{}
 	q.Set("skip-consensus", "true")
 	req.EnrichFromHttp(nil, q, common.UserAgentTrackingModeSimplified)
-	require.True(t, req.Directives().SkipConsensus)
+	require.True(t, req.Directives() == nil || !req.Directives().SkipConsensus,
+		"public query param must not set SkipConsensus")
 
 	resp, err := ntw.Forward(ctx, req)
 	require.NoError(t, err)
@@ -144,8 +145,8 @@ func TestSkipConsensusDirective_FalseValueDoesNotBypass(t *testing.T) {
 	headers := http.Header{}
 	headers.Set("X-ERPC-Skip-Consensus", "false")
 	req.EnrichFromHttp(headers, nil, common.UserAgentTrackingModeSimplified)
-	require.False(t, req.Directives().SkipConsensus,
-		"explicit 'false' must keep SkipConsensus disabled")
+	require.True(t, req.Directives() == nil || !req.Directives().SkipConsensus,
+		"public SkipConsensus header must keep consensus enabled")
 
 	resp, err := ntw.Forward(ctx, req)
 	require.NoError(t, err)
@@ -179,7 +180,7 @@ func TestSkipConsensusDirective_NoDirective_ConsensusStillRuns(t *testing.T) {
 	require.NotNil(t, resp)
 }
 
-func TestSkipConsensusDirective_RetryStillAppliesOnUpstreamError(t *testing.T) {
+func TestSkipConsensusDirective_RetryStillAppliesOnTrustedDirective(t *testing.T) {
 	// SkipConsensus only bypasses the consensus policy. Retry, hedge, and
 	// timeout still wrap the call. Mock the first upstream as a transient
 	// failure and expect erpc to retry on the next upstream.
@@ -214,9 +215,7 @@ func TestSkipConsensusDirective_RetryStillAppliesOnUpstreamError(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 
 	req := buildSkipConsensusRequest(t, ntw)
-	headers := http.Header{}
-	headers.Set("X-ERPC-Skip-Consensus", "true")
-	req.EnrichFromHttp(headers, nil, common.UserAgentTrackingModeSimplified)
+	req.SetDirectives(&common.RequestDirectives{SkipConsensus: true})
 
 	resp, err := ntw.Forward(ctx, req)
 	require.NoError(t, err)

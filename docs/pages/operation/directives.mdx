@@ -1,6 +1,6 @@
 ---
 title: Directives
-description: Send an HTTP header or query param and change routing, caching, validation, or consensus for exactly that one request — no restarts, no config changes.
+description: Configure request directives for routing, caching, validation, and consensus; public HTTP overrides are limited to safe per-request controls.
 ---
 
 import { LLMsTxtLink, AISection, ConfigTabs, ConfigCode, SourceLink, PromptExample } from "../../components";
@@ -9,7 +9,7 @@ import { LLMsTxtLink, AISection, ConfigTabs, ConfigCode, SourceLink, PromptExamp
 
 # Directives
 
-Every request can carry its own instructions. Add an `X-ERPC-*` header or a `?param=` query string and eRPC instantly shifts routing, caching, integrity checks, or consensus behavior for that call only. No server restart. No config change. The same 23 directives can also be pinned as `directiveDefaults` on any network so every call starts with a sensible baseline.
+Every request can carry its own instructions. Safe per-request controls can be set with an `X-ERPC-*` header or a `?param=` query string; trusted routing and consensus controls such as `useUpstream` and `skipConsensus` must come from config defaults or library code. The same directives can also be pinned as `directiveDefaults` on any network so every call starts with a sensible baseline.
 
 * [Retry empty responses](#retry-empty-responses)
 * [Retry pending transactions](#retry-pending-transactions)
@@ -20,25 +20,25 @@ Every request can carry its own instructions. Add an `X-ERPC-*` header or a `?pa
 
 ## Quick taste
 
-Per request, the way directives are actually used — pin one call to specific upstreams via
+Per request, the way directives are actually used — bypass cache reads for one fresh call via
 header or query string:
 
 <ConfigCode
   language="bash"
   filename="terminal"
   focus="1-3,6-7"
-  code={`# via header: only Alchemy upstreams may serve this request
+  code={`# via header: skip cache reads for this request
 curl https://rpc.example.com/main/evm/1 \\
-  -H 'X-ERPC-Use-Upstream: alchemy-*' \\
+  -H 'X-ERPC-Skip-Cache-Read: true' \\
   -d '{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}'
 
 # same directive as a query parameter
-curl 'https://rpc.example.com/main/evm/1?use-upstream=alchemy-*' \\
+curl 'https://rpc.example.com/main/evm/1?skip-cache-read=true' \\
   -d '{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}'`}
 />
 
 Directives that make sense as a permanent baseline can be pinned per network with
-`directiveDefaults` — headers and query params still override them per request:
+`directiveDefaults` — public-safe headers and query params can still override their matching safe controls per request:
 
 <ConfigTabs
   path="projects[].networks[].directiveDefaults"
@@ -127,11 +127,11 @@ Reference: https://docs.erpc.cloud/operation/directives.llms.txt`}
 
 ### How it works
 
-**Parsing pipeline.** For every HTTP request eRPC runs two passes. First, `ApplyDirectiveDefaults` copies any `directiveDefaults` config block into the request struct (lowest priority). Second, `EnrichFromHttp` scans all 23 registered header and query names. If none are present it returns immediately after extracting User-Agent — zero allocations, zero locks. When directive inputs are present the struct is cloned before mutation so batch sub-requests that share the same pointer do not race.
+**Parsing pipeline.** For every HTTP request eRPC runs two passes. First, `ApplyDirectiveDefaults` copies any `directiveDefaults` config block into the request struct (lowest priority). Second, `EnrichFromHttp` scans registered public header and query names. Trusted-only controls (`UseUpstream`, `SkipConsensus`) are intentionally not in that public registry. If no public directives are present it returns immediately after extracting User-Agent — zero allocations, zero locks. When directive inputs are present the struct is cloned before mutation so batch sub-requests that share the same pointer do not race.
 
-Precedence from lowest to highest: `directiveDefaults` config → HTTP header → URL query parameter. A query-param value always wins over the same header, which always wins over config. `ApplyDirectiveDefaults` is idempotent — once `r.directives` is non-nil every subsequent call is a no-op, so per-request overrides can never be clobbered by a second config pass. Source: [`common/request.go:563-676`](https://github.com/erpc/erpc/blob/main/common/request.go#L563-L676).
+Precedence for public-safe controls, from lowest to highest: `directiveDefaults` config → HTTP header → URL query parameter. A query-param value always wins over the same header, which always wins over config. `UseUpstream` and `SkipConsensus` do not accept HTTP/query overrides. `ApplyDirectiveDefaults` is idempotent — once `r.directives` is non-nil every subsequent call is a no-op, so per-request overrides can never be clobbered by a second config pass. Source: [`common/request.go:563-676`](https://github.com/erpc/erpc/blob/main/common/request.go#L563-L676).
 
-**Boolean parsing rule.** For all 23 directive headers the only truthy value is the exact string `"true"` (case-insensitive, whitespace stripped). `"1"` and `"yes"` are not truthy. `X-ERPC-Force-Trace` is handled by the tracing subsystem separately and accepts all three. Always use `"true"` to avoid this asymmetry. Confirmed: [`common/request_test.go:406-427`](https://github.com/erpc/erpc/blob/main/common/request_test.go#L406-L427).
+**Boolean parsing rule.** For public boolean directive headers the only truthy value is the exact string `"true"` (case-insensitive, whitespace stripped). `"1"` and `"yes"` are not truthy. `X-ERPC-Force-Trace` is handled by the tracing subsystem separately and accepts all three. Always use `"true"` to avoid this asymmetry. Confirmed: [`common/request_test.go:406-427`](https://github.com/erpc/erpc/blob/main/common/request_test.go#L406-L427).
 
 **Exception for headers #20–23.** `X-ERPC-Validate-Header-Field-Lengths`, `X-ERPC-Validate-Transaction-Fields`, `X-ERPC-Validate-Transaction-Block-Info`, and `X-ERPC-Validate-Log-Fields` parse with `strings.ToLower` only (no `TrimSpace`), so `"  true  "` evaluates to `false` for these four. Query-param parsers always apply `TrimSpace`. Source: [`common/request.go:798-807`](https://github.com/erpc/erpc/blob/main/common/request.go#L798-L807).
 
@@ -150,9 +150,9 @@ Config struct: [`common/config.go:2105-2152`](https://github.com/erpc/erpc/blob/
 | 1 | `X-ERPC-Retry-Empty` | `retry-empty` | bool | `retryEmpty` | `false` | Retry on null/empty upstream response. Subject to `EmptyResultMaxAttempts` cap. | [`erpc/network_executor.go:427-442`](https://github.com/erpc/erpc/blob/main/erpc/network_executor.go#L427-L442) |
 | 2 | `X-ERPC-Retry-Pending` | `retry-pending` | bool | `retryPending` | `false` (struct comment "true by default" is **stale**) | Retry `eth_getTransactionReceipt` / `eth_getTransactionByHash` / `eth_getTransactionByBlockHashAndIndex` / `eth_getTransactionByBlockNumberAndIndex` while tx is pending. `EmptyResultMaxAttempts` cap applies. | [`erpc/network_executor.go:445-459`](https://github.com/erpc/erpc/blob/main/erpc/network_executor.go#L445-L459) |
 | 3 | `X-ERPC-Skip-Cache-Read` | `skip-cache-read` | string (bool in config YAML normalized to string) | `skipCacheRead` | `""` (no skip) | `"true"` = skip all; `"false"`/`""` = use cache; other string = connector-ID WildcardMatch pattern. YAML `true`/`false` normalized to strings via `fmt.Sprintf("%v", v)`. Header NOT trimmed; query IS trimmed. | [`common/request.go:898-914`](https://github.com/erpc/erpc/blob/main/common/request.go#L898-L914) |
-| 4 | `X-ERPC-Use-Upstream` | `use-upstream` | string | `useUpstream` | `""` (no filter) | Selector matched against upstream `id`; for purely-positive patterns also against upstream `Tags` (any tag match wins). Negated patterns (`!`) match ID only. Header NOT trimmed; query IS trimmed. No match → `ErrUpstreamsExhausted`. Activates selector-scoped served-tip partitioning. Stateful methods with multiple matching upstreams fail with `ErrNotImplemented`. | [`upstream/upstream.go:1526-1534`](https://github.com/erpc/erpc/blob/main/upstream/upstream.go#L1526-L1534) |
+| 4 | ignored | ignored | string | `useUpstream` | `""` (no filter) | Trusted config/library only. Selector matched against upstream `id`; for purely-positive patterns also against upstream `Tags` (any tag match wins). Negated patterns (`!`) match ID only. No match → `ErrUpstreamsExhausted`. Activates selector-scoped served-tip partitioning. Stateful methods with multiple matching upstreams fail with `ErrNotImplemented`. | [`upstream/upstream.go:1526-1534`](https://github.com/erpc/erpc/blob/main/upstream/upstream.go#L1526-L1534) |
 | 5 | `X-ERPC-Skip-Interpolation` | `skip-interpolation` | bool | `skipInterpolation` | `false` | Suppresses block-tag → hex substitution in forwarded params. Internal block refs still computed/cached. | [`architecture/evm/json_rpc.go:132`](https://github.com/erpc/erpc/blob/main/architecture/evm/json_rpc.go#L132) |
-| 6 | `X-ERPC-Skip-Consensus` | `skip-consensus` | bool | `skipConsensus` | `false` | Bypasses consensus branch; uses standard `retry(hedge(upstreamSweep))`. Retry/hedge/breaker/timeout still apply. | [`erpc/network_executor.go:179-188`](https://github.com/erpc/erpc/blob/main/erpc/network_executor.go#L179-L188) |
+| 6 | ignored | ignored | bool | `skipConsensus` | `false` | Trusted config/library only. Bypasses consensus branch; uses standard `retry(hedge(upstreamSweep))`. Retry/hedge/breaker/timeout still apply. | [`erpc/network_executor.go:179-188`](https://github.com/erpc/erpc/blob/main/erpc/network_executor.go#L179-L188) |
 | 7 | `X-ERPC-Enforce-Highest-Block` | `enforce-highest-block` | bool | `enforceHighestBlock` | **`true`** (SetDefaults) | `eth_getBlockByNumber` with `"latest"`/`"finalized"`: re-routes if response is behind known highest block. Skipped for cached responses. | [`architecture/evm/eth_getBlockByNumber.go:111-170`](https://github.com/erpc/erpc/blob/main/architecture/evm/eth_getBlockByNumber.go#L111-L170) |
 | 8 | `X-ERPC-Enforce-GetLogs-Range` | `enforce-getlogs-range` | bool | `enforceGetLogsBlockRange` | **`true`** (SetDefaults) | Pre-forward: rejects `eth_getLogs`/`trace_filter` if block range exceeds `getLogsMaxAllowedRange`. Consumed via legacy `EvmIntegrityConfig` (not a true per-request override — see Edge cases). | [`architecture/evm/eth_getLogs.go:280-288`](https://github.com/erpc/erpc/blob/main/architecture/evm/eth_getLogs.go#L280-L288) |
 | 9 | `X-ERPC-Enforce-Non-Null-Tagged-Blocks` | `enforce-non-null-tagged-blocks` | bool | `enforceNonNullTaggedBlocks` | **`true`** (SetDefaults) | Treats null block for tag-based `eth_getBlockByNumber` as an error. Disable for chains that legitimately return null for certain tags (e.g., zkSync). | [`architecture/evm/eth_getBlockByNumber.go:304`](https://github.com/erpc/erpc/blob/main/architecture/evm/eth_getBlockByNumber.go#L304) |
@@ -171,7 +171,7 @@ Config struct: [`common/config.go:2105-2152`](https://github.com/erpc/erpc/blob/
 | 22 | `X-ERPC-Validate-Transaction-Block-Info` | `validate-transaction-block-info` | bool | `validateTransactionBlockInfo` | `false` | Per-tx: `blockHash` matches block hash; `blockNumber` matches; `transactionIndex` matches array position. Full-object txs only. **Parses without `TrimSpace`**. | [`architecture/evm/eth_getBlockByNumber.go:711-753`](https://github.com/erpc/erpc/blob/main/architecture/evm/eth_getBlockByNumber.go#L711-L753) |
 | 23 | `X-ERPC-Validate-Log-Fields` | `validate-log-fields` | bool | `validateLogFields` | `false` | Per log: address 20 bytes, each topic 32 bytes, topic count ≤ `MaxTopics`, context fields match enclosing receipt. Absent fields skipped. **Parses without `TrimSpace`**. | [`architecture/evm/eth_getBlockReceipts.go:324-397`](https://github.com/erpc/erpc/blob/main/architecture/evm/eth_getBlockReceipts.go#L324-L397) |
 
-#### Config-only directives (no HTTP header or query param)
+#### Library-only validation payloads (no HTTP header or query param)
 
 | Field | Config path | Default | Notes |
 |---|---|---|---|
@@ -275,12 +275,16 @@ All patterns below are distilled from real production fleets; comments explain t
 }`}
 />
 
-**4. Per-request upstream pinning.** A dApp wants to read its own just-submitted transaction from the same upstream it used to broadcast, bypassing the normal load-balanced pool. Send the header at call time — no config change needed:
+**4. Trusted upstream pinning.** An internal network should always route a class of traffic to a dedicated upstream group. Pin it with `directiveDefaults.useUpstream` in config (or set `RequestDirectives.UseUpstream` from trusted library code). Public HTTP headers/query params are ignored for this directive:
 
-```http
-POST /1/main HTTP/1.1
-X-ERPC-Use-Upstream: alchemy-mainnet
-X-ERPC-Retry-Pending: true
+```yaml
+projects:
+  - id: main
+    networks:
+      - architecture: evm
+        evm: { chainId: 1 }
+        directiveDefaults:
+          useUpstream: alchemy-mainnet
 ```
 
 The upstream selector supports wildcards and tags: `"alchemy-*"`, `"alchemy-mainnet|quicknode-*"`, `"family:archival"` (tag match), `"!drpc"` (exclude one by ID).
@@ -294,18 +298,23 @@ X-ERPC-Skip-Cache-Read: true
 
 To bypass only the in-memory tier and keep Redis warm reads: `X-ERPC-Skip-Cache-Read: memory*`.
 
-**6. Skipping consensus for internal tooling.** A monitoring script wants low-latency reads and trusts a single upstream. Bypass the consensus quorum for that call:
+**6. Skipping consensus for trusted internal tooling.** A monitoring network wants low-latency reads and trusts a single upstream group. Bypass the consensus quorum from config or library code only:
 
-```http
-POST /1/main HTTP/1.1
-X-ERPC-Skip-Consensus: true
+```yaml
+projects:
+  - id: main
+    networks:
+      - architecture: evm
+        evm: { chainId: 1 }
+        directiveDefaults:
+          skipConsensus: true
 ```
 
 Retry, hedge, circuit-breaker, and timeout still apply — only the dispute/agreement step is skipped.
 
 ### Request/response behavior
 
-**Request headers — canonical truthy value.** All 23 directive headers require `"true"` (any case, optional surrounding whitespace). `"1"` and `"yes"` evaluate to `false` and silently have no effect. Exception: `X-ERPC-Force-Trace` (tracing subsystem, not a directive) accepts `"true"`, `"1"`, or `"yes"`. Always use `"true"`.
+**Request headers — canonical truthy value.** Public boolean directive headers require `"true"` (any case, optional surrounding whitespace). `"1"` and `"yes"` evaluate to `false` and silently have no effect. Exception: `X-ERPC-Force-Trace` (tracing subsystem, not a directive) accepts `"true"`, `"1"`, or `"yes"`. Always use `"true"`.
 
 **Directive-adjacent request inputs** (not in the 23-directive registry):
 
@@ -441,7 +450,7 @@ Directives have no dedicated Prometheus metrics; their effects appear in existin
 
 - [`common/request.go:116-215`](https://github.com/erpc/erpc/blob/main/common/request.go#L116-L215) — `RequestDirectives` struct: all 23 directive fields + library-only fields
 - [`common/request.go:563-676`](https://github.com/erpc/erpc/blob/main/common/request.go#L563-L676) — `ApplyDirectiveDefaults`: idempotency guard, nil-check per `*bool` field, copy-from-config
-- [`common/request.go:702-893`](https://github.com/erpc/erpc/blob/main/common/request.go#L702-L893) — `EnrichFromHttp`: fast-path scan, clone-on-write, all 23 header + query parsers
+- [`common/request.go:702-893`](https://github.com/erpc/erpc/blob/main/common/request.go#L702-L893) — `EnrichFromHttp`: fast-path scan, clone-on-write, public-safe header + query parsers
 - [`common/config.go:2105-2175`](https://github.com/erpc/erpc/blob/main/common/config.go#L2105-L2175) — `DirectiveDefaultsConfig` struct; `skipCacheRead` custom YAML/JSON unmarshal
 - [`common/defaults.go:1454-1471`](https://github.com/erpc/erpc/blob/main/common/defaults.go#L1454-L1471) — `DirectiveDefaultsConfig.SetDefaults`: four `true` defaults (`enforceHighestBlock`, `enforceGetLogsBlockRange`, `enforceNonNullTaggedBlocks`, `validateTransactionsRoot`)
 - [`erpc/http_server.go:1081-1272`](https://github.com/erpc/erpc/blob/main/erpc/http_server.go#L1081-L1272) — `executionHeadersMode`, `setResponseHeaders`, `writeCounterHeaders`, `writeResponseMetadataHeaders`, `writeUpstreamTraceHeaders`

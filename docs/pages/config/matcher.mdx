@@ -508,7 +508,8 @@ rule, a heavy-method request consumes from both buckets:
 
 ### Request/response behavior
 
-- The `use-upstream` directive is set via the `X-ERPC-Use-Upstream` request header or query param.
+- The `use-upstream` directive is set from trusted config (`directiveDefaults.useUpstream`) or
+  library-mode `RequestDirectives.UseUpstream`; public HTTP headers/query params are ignored.
   The value is a `MatchesSelector` pattern — id first, then tags if no `!` in pattern.
 - `ignoreMethods` and `allowMethods` at project or upstream scope cause eRPC to return
   `ErrUpstreamMethodIgnored` for blocked methods — surfaced to the client as an upstream
@@ -557,7 +558,7 @@ rule, a heavy-method request consumes from both buckets:
 15. **Legacy single-object failsafe migration is silent.** An old `failsafe: {…}` (object form) is quietly converted to a 1-element slice. No log or warning is emitted. The migration only forces `matchMethod` to `"*"` when the field is empty — an explicitly-set non-empty `matchMethod` value (e.g., `"eth_call"`) is preserved as-is. The migration applies at YAML parse time across `NetworkConfig`, `NetworkDefaults`, and `UpstreamConfig`. Source: <SourceLink file="common/config.go" lines="2041-2103" />
 16. **Zero-config auto-generated project only when `projects:` is entirely absent.** Even `projects: []` skips the auto-generated 'main' project defaults. Source: <SourceLink file="common/defaults.go" lines="100-167" />
 17. **`DataFinalityStateAll = -1` is an internal sentinel.** It must never appear in config or on requests — it only lives in health-tracker cross-finality rollup keys. Source: <SourceLink file="common/data.go" lines="29-36" />
-18. **Empty pattern in `MatchesSelector` always returns `false`.** The function guards against empty patterns at entry and immediately returns `false`. Callers must ensure the `use-upstream` directive value is non-empty — an empty `X-ERPC-Use-Upstream` header or query param results in no upstream being selected by that directive. Source: <SourceLink file="common/matcher.go" lines="73" />
+18. **Empty pattern in `MatchesSelector` always returns `false`.** The function guards against empty patterns at entry and immediately returns `false`. Trusted config/library callers must ensure the `use-upstream` directive value is non-empty. Source: <SourceLink file="common/matcher.go" lines="73" />
 
 ### Observability
 

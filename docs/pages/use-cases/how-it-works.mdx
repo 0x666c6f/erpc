@@ -332,10 +332,11 @@ all waiting followers with a response ID patch per follower:
 
 ### Request/response behavior
 
-- **Directive precedence:** HTTP headers → query params (query params override headers for
-  `use-upstream`, `retry-empty`, `retry-pending`, `skip-cache-read`, `skip-interpolation`,
-  `skip-consensus`). Config `directiveDefaults` are applied only when directives are not
-  already set — HTTP-set directives are never overwritten.
+- **Directive precedence:** HTTP headers → query params for public-safe controls
+  (`retry-empty`, `retry-pending`, `skip-cache-read`, `skip-interpolation`, validation
+  toggles). Config `directiveDefaults` are applied first and are not overwritten for
+  trusted-only controls such as `useUpstream` and `skipConsensus`; public HTTP/query
+  attempts to set those controls are ignored.
   <SourceLink file="common/request.go" lines="563-565" />
 - **Response headers** emitted by `setResponseHeaders` (`erpc/http_server.go:1105`) under `server.executionHeaders`:
 
@@ -357,16 +358,14 @@ all waiting followers with a response ID patch per follower:
   | `X-ERPC-Upstream` | if upstream response | upstream ID that served it |
   | `X-ERPC-Duration` | if response | total request duration in milliseconds |
   | `X-ERPC-Upstreams` | `executionHeaders=all` | per-attempt trace: `id=role:outcome:durationMs:won\|lost` |
-- **Request directives** — settable via HTTP header or query param (query overrides header for the non-validation directives). Header-only validation directives (`X-ERPC-Validate-*`, `X-ERPC-Enforce-*`) are not settable via query params. <SourceLink file="common/request.go" lines="38-114" />
+- **Request directives** — public-safe controls are settable via HTTP header or query param (query overrides header for the non-validation directives). Trusted-only controls are set from config/library code. <SourceLink file="common/request.go" lines="38-114" />
 
   | Header | Query param | Behavior |
   |---|---|---|
   | `X-ERPC-Retry-Empty` | `retry-empty` | Retry emptyish upstream responses |
   | `X-ERPC-Retry-Pending` | `retry-pending` | Retry pending tx lookups |
   | `X-ERPC-Skip-Cache-Read` | `skip-cache-read` | `"true"` = skip all; connector-id pattern = skip matching |
-  | `X-ERPC-Use-Upstream` | `use-upstream` | Pin request to matching upstream(s) by id, glob, or tag |
   | `X-ERPC-Skip-Interpolation` | `skip-interpolation` | Don't replace block tags with hex in outbound params |
-  | `X-ERPC-Skip-Consensus` | `skip-consensus` | Bypass consensus; retry+hedge still apply |
   | `X-ERPC-Enforce-Highest-Block` | `enforce-highest-block` | Block integrity validation |
   | `X-ERPC-Enforce-GetLogs-Range` | `enforce-getlogs-range` | Enforce `eth_getLogs` block range limit |
   | `X-ERPC-Enforce-Non-Null-Tagged-Blocks` | `enforce-non-null-tagged-blocks` | Reject null on tagged block lookups |
@@ -384,6 +383,13 @@ all waiting followers with a response ID patch per follower:
   | `X-ERPC-Validate-Transaction-Fields` | `validate-transaction-fields` | Validate transaction fields |
   | `X-ERPC-Validate-Transaction-Block-Info` | `validate-transaction-block-info` | Validate tx block info |
   | `X-ERPC-Validate-Log-Fields` | `validate-log-fields` | Validate log fields |
+
+  Trusted-only directives:
+
+  | Config/library field | Behavior |
+  |---|---|
+  | `useUpstream` | Pin request to matching upstream(s) by id, glob, or tag |
+  | `skipConsensus` | Bypass consensus; retry+hedge still apply |
 
 - **Retry reasons** — `shouldRetryWithReason` returns one of: `execution_exception_retryable` (EVM execution exception with `retryableTowardNetwork=true`), `block_unavailable` (`ErrCodeUpstreamBlockUnavailable`, subject to `emptyResultMaxAttempts` cap), `missing_data` (`ErrCodeEndpointMissingData` unless `RetryEmpty=false`), `retryable_error` (generic `IsRetryableTowardNetwork`), `empty_result` (emptyish response with `RetryEmpty=true`), `pending_tx` (tx-lookup methods with `RetryPending=true`). Composite requests are never retried at network scope. <SourceLink file="erpc/network_executor.go" lines="374-463" />
 

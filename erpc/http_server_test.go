@@ -2646,7 +2646,7 @@ func TestHttpServer_MultipleUpstreams(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test with background goroutines in short mode")
 	}
-	t.Run("UpstreamNotAllowedByDirectiveViaHeaders", func(t *testing.T) {
+	t.Run("PublicUseUpstreamHeaderDoesNotNarrowUpstreams", func(t *testing.T) {
 		cfg := &common.Config{
 			Server: &common.ServerConfig{
 				MaxTimeout: common.Duration(10 * time.Second).Ptr(),
@@ -2712,13 +2712,9 @@ func TestHttpServer_MultipleUpstreams(t *testing.T) {
 		util.ResetGock()
 		defer util.ResetGock()
 		util.SetupMocksForEvmStatePoller()
-		// The default selection policy probes the directive-excluded upstream in
-		// the background, so rpc1 is hit by the rpc2-directed request (as a probe)
-		// in addition to the later no-directive request. Persist the result mocks
-		// — and scope them to the eth_getBlockNumber body so they never shadow the
-		// poller mocks — so the probe and both real requests are served
-		// deterministically instead of racing a single-use mock. The 2 persisted
-		// mocks remain pending by design (hence expecting 2 below).
+		// Persist both mocks so ignored public upstream selectors cannot make the
+		// test flaky by racing background probes. The request itself should follow
+		// the default policy order and use rpc1, not the client-supplied rpc2.
 		defer util.AssertNoPendingMocks(t, 2)
 
 		gock.New("http://rpc1.localhost").
@@ -2758,7 +2754,7 @@ func TestHttpServer_MultipleUpstreams(t *testing.T) {
 		}, nil)
 
 		assert.Equal(t, http.StatusOK, statusCode2)
-		assert.Contains(t, body2, "0x2222222")
+		assert.Contains(t, body2, "0x1111111")
 
 		statusCode1, _, body1 := sendRequest(`{"jsonrpc":"2.0","method":"eth_getBlockNumber","params":[],"id":1}`, nil, nil)
 
@@ -2766,7 +2762,7 @@ func TestHttpServer_MultipleUpstreams(t *testing.T) {
 		assert.Contains(t, body1, "0x1111111")
 	})
 
-	t.Run("UpstreamNotAllowedByDirectiveViaQueryParams", func(t *testing.T) {
+	t.Run("PublicUseUpstreamQueryDoesNotNarrowUpstreams", func(t *testing.T) {
 		cfg := &common.Config{
 			Server: &common.ServerConfig{
 				MaxTimeout: common.Duration(10 * time.Second).Ptr(),
@@ -2832,12 +2828,9 @@ func TestHttpServer_MultipleUpstreams(t *testing.T) {
 		util.ResetGock()
 		defer util.ResetGock()
 		util.SetupMocksForEvmStatePoller()
-		// The default selection policy probes the directive-excluded rpc1 in the
-		// background (re-issuing the same eth_getBalance request), so rpc1 is hit
-		// even though the directive routes the real request to rpc2. Persist the
-		// result mocks so that probe is served deterministically instead of racing
-		// a single-use mock; both persisted mocks remain pending by design (2).
-		// The body2==0x2222222 assertion still proves the directive routed to rpc2.
+		// Persist both mocks so ignored public upstream selectors cannot make the
+		// test flaky by racing background probes. The request itself should follow
+		// the default policy order and use rpc1, not the client-supplied rpc2.
 		defer util.AssertNoPendingMocks(t, 2)
 
 		gock.New("http://rpc1.localhost").
@@ -2867,15 +2860,19 @@ func TestHttpServer_MultipleUpstreams(t *testing.T) {
 				"result":  "0x2222222",
 			})
 
-		sendRequest, _, _, shutdown, _ := createServerTestFixtures(cfg, t)
+		sendRequest, _, _, shutdown, erpcInstance := createServerTestFixtures(cfg, t)
 		defer shutdown()
+
+		prj, err := erpcInstance.GetProject("test_project")
+		require.NoError(t, err)
+		policy.OverrideAllForTest(prj.policyEngine)
 
 		statusCode2, _, body2 := sendRequest(`{"jsonrpc":"2.0","method":"eth_getBalance","params":[],"id":1}`, nil, map[string]string{
 			"use-upstream": "rpc2",
 		})
 
 		assert.Equal(t, http.StatusOK, statusCode2)
-		assert.Contains(t, body2, "0x2222222")
+		assert.Contains(t, body2, "0x1111111")
 	})
 
 	t.Run("ShouldReturnEmptyArrayWhenHedgeAndRetryDefinedOnBothNetworkAndUpstream", func(t *testing.T) {

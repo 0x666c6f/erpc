@@ -99,9 +99,9 @@ https://docs.erpc.cloud/config/failsafe/integrity.llms.txt`}
 	title="debug one upstream's raw view of the chain tip"
 	prompt={`I need to see what one specific upstream actually answers for eth_blockNumber,
 without eRPC upgrading the response to the network-wide highest block and without
-cache interference. Show me the per-request headers (use-upstream, enforce-highest-block,
-skip-cache-read) to send for a one-off debugging request, leaving the network config
-untouched. Reference: https://docs.erpc.cloud/config/failsafe/integrity.llms.txt`}
+cache interference. Show me the trusted config or library-mode useUpstream setup plus
+the safe per-request enforce-highest-block and skip-cache-read controls. Reference:
+https://docs.erpc.cloud/config/failsafe/integrity.llms.txt`}
 />
 
 <PromptExample

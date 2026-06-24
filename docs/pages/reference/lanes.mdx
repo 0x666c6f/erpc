@@ -21,7 +21,7 @@ What you get:
 
 - Per-group served-tip counters shared and monotonic across every pod
 - Deterministic lane names on your Prometheus dashboards (`flashblocks`, `systx`, …)
-- Zero config — lanes emerge automatically from your `use-upstream` selectors
+- Config-driven lanes — set `directiveDefaults.useUpstream` for trusted selector routing
 
 ## Agent reference
 
@@ -33,7 +33,7 @@ points the agent at this page's machine-readable reference so it can do the work
 	title="pin all traffic on a network to flashblocks upstreams"
 	defaultOpen
 	prompt={`I want all requests on my Ethereum mainnet network to route exclusively to flashblocks
-providers so the block tip is always flashblocks-accurate. Set directivesDefaults.useUpstream
+providers so the block tip is always flashblocks-accurate. Set directiveDefaults.useUpstream
 at the network level in my eRPC config, and explain when a selector qualifies for a lane
 partition versus falling back to stateless. Reference:
 https://docs.erpc.cloud/reference/lanes.llms.txt`}
@@ -53,7 +53,7 @@ https://docs.erpc.cloud/reference/lanes.llms.txt`}
 	n={3}
 	title="debug missing lane metrics in Prometheus"
 	prompt={`My Prometheus shows erpc_network_served_tip_block_number with lane=all but never a
-named lane label even though I'm sending X-ERPC-Use-Upstream headers. Explain the
+named lane label even though I set directiveDefaults.useUpstream. Explain the
 conditions that prevent a lane partition from forming (complex selector, fewer than 2
 upstreams matched, MAX mode, servedTip not enabled) and check my eRPC config for the
 likely cause. Reference: https://docs.erpc.cloud/reference/lanes.llms.txt`}
@@ -63,7 +63,7 @@ likely cause. Reference: https://docs.erpc.cloud/reference/lanes.llms.txt`}
 
 ### How it works
 
-A **lane** is not a config object. It is an emergent artifact: when a request carries a `use-upstream` selector (via `X-ERPC-Use-Upstream` header, `?use-upstream=` query parameter, or `directivesDefaults.useUpstream` in config), eRPC resolves which upstreams match. If the matched set is a proper subset of at least two upstreams — and the selector is "simple" (see below) — eRPC derives a stable key by SHA-256-hashing the sorted upstream IDs, then lazily creates a `servedTipPartition` for that key. That partition holds two `CounterInt64SharedVariable` counters (latest and finalized blocks), shared across pods via the shared-state registry.
+A **lane** is not a config object. It is an emergent artifact: when a trusted request carries a `use-upstream` selector (via `directiveDefaults.useUpstream` in config, or library-mode `RequestDirectives.UseUpstream`), eRPC resolves which upstreams match. Public HTTP headers/query params for `use-upstream` are ignored. If the matched set is a proper subset of at least two upstreams — and the selector is "simple" (see below) — eRPC derives a stable key by SHA-256-hashing the sorted upstream IDs, then lazily creates a `servedTipPartition` for that key. That partition holds two `CounterInt64SharedVariable` counters (latest and finalized blocks), shared across pods via the shared-state registry.
 
 **LaneName algorithm.** `LaneName(ids)` sorts the upstream IDs alphabetically, then builds a set of non-empty hyphen-split tokens for each ID (empty strings from consecutive hyphens are discarded). It walks the tokens of the first sorted ID and returns the first token that appears in every other ID's token set. If no universally shared token exists, it falls back to a concatenation of the first two characters of each ID (up to five IDs). The result is deterministic and order-independent — every pod reaches the same name from the same upstream topology. Source: <SourceLink file="common/lane.go" lines="25" />
 
@@ -75,11 +75,11 @@ The partition key is derived from the **matched upstream set**, not the selector
 
 **Stateless fallback.** When a selector is complex, matches fewer than two upstreams, or matches all upstreams, `servedTipPartitionFor` returns nil. `observeServedTipMetrics` is called with `lane=servedTipLaneNone` and returns immediately, writing nothing to Prometheus — preventing a subset value from overwriting the `lane="all"` gauge.
 
-**UseUpstream directive precedence** (highest to lowest):
+**UseUpstream directive sources**:
 
-1. `X-ERPC-Use-Upstream` header on the request.
-2. `?use-upstream=<value>` query parameter.
-3. `networks[*].directivesDefaults.useUpstream` config default.
+1. `networks[*].directiveDefaults.useUpstream` config default.
+2. Library-mode `RequestDirectives.UseUpstream`.
+3. Public `X-ERPC-Use-Upstream` headers and `?use-upstream=` query params are ignored.
 
 The selector is used in two places: as the partition lookup key for served-tip counters, and inside the upstream selection loop (`UpstreamMatchesSelector`) to filter which upstreams receive the request. Tag-based matching is supported — `family:flashblocks` matches any upstream whose tags include that key — but negated selectors (prefix `!`) never match by tag, only by upstream ID.
 
@@ -87,22 +87,22 @@ The selector is used in two places: as the partition lookup key for served-tip c
 
 | Field | Type | Default | Behavior / footguns |
 |---|---|---|---|
-| `networks[*].directivesDefaults.useUpstream` | `*string` | `nil` (no default selector) | Sets the `use-upstream` selector for all requests on this network when the client sends none. Identical semantics to the `X-ERPC-Use-Upstream` header. **Footgun:** a wildcard matching all upstreams does NOT form a partition — it uses the `lane="all"` path. Sources: <SourceLink file="common/config.go" lines="2109" />, <SourceLink file="common/request.go" lines="589-590" /> |
+| `networks[*].directiveDefaults.useUpstream` | `*string` | `nil` (no default selector) | Sets the `use-upstream` selector for all requests on this network from trusted config. Public headers/query params cannot set this selector. **Footgun:** a wildcard matching all upstreams does NOT form a partition — it uses the `lane="all"` path. Sources: <SourceLink file="common/config.go" lines="2109" />, <SourceLink file="common/request.go" lines="589-590" /> |
 
 Lanes themselves are not directly configured — they emerge from runtime request selectors and the upstream topology. Lane behavior requires `networks[*].evm.servedTip` cluster mode to be enabled; in MAX mode (the default) `servedTipEnabledFor` returns false, partition lookup never runs, and no `lane`-labelled metrics are emitted.
 
 ### Worked examples
 
-**1. Pin all network traffic to flashblocks upstreams.** Set `directivesDefaults.useUpstream` at the network level so every request on that chain automatically routes to flashblocks providers and gets a flashblocks-accurate tip:
+**1. Pin all network traffic to flashblocks upstreams.** Set `directiveDefaults.useUpstream` at the network level so every request on that chain automatically routes to flashblocks providers and gets a flashblocks-accurate tip:
 
 <ConfigTabs
-	path="projects[].networks[].directivesDefaults.useUpstream"
+	path="projects[].networks[].directiveDefaults.useUpstream"
 	yaml={`projects:
   - id: main
     networks:
       - architecture: evm
         evm: { chainId: 1 }
-        directivesDefaults:
+        directiveDefaults:
           useUpstream: "flashblocks*"  # all requests → flashblocks lane`}
 	ts={`import { createConfig } from "@erpc-cloud/config";
 
@@ -112,7 +112,7 @@ export default createConfig({
     networks: [{
       architecture: "evm",
       evm: { chainId: 1 },
-      directivesDefaults: {
+      directiveDefaults: {
         useUpstream: "flashblocks*",
       },
     }],
@@ -120,7 +120,7 @@ export default createConfig({
 });`}
 />
 
-**2. Per-request lane selection via header.** Send `X-ERPC-Use-Upstream: systx*` on individual requests to route them to system-transaction-capable upstreams. eRPC derives the lane name, maintains a `systx`-scoped tip, and serves block numbers visible to that provider class only.
+**2. Trusted library-mode lane selection.** Internal callers can set `RequestDirectives.UseUpstream = "systx*"` before forwarding to route that request to system-transaction-capable upstreams. Public HTTP callers cannot set this selector. eRPC derives the lane name, maintains a `systx`-scoped tip, and serves block numbers visible to that provider class only.
 
 **3. Tag-based lane targeting.** If upstreams are tagged with `family:archive`, a selector `family:archive` is simple, qualifies for a partition, and routes archive-depth calls to archive nodes — `LaneName` derives a human-readable label from the matched upstream IDs for your dashboards.
 
@@ -129,7 +129,7 @@ export default createConfig({
 ### Best practices
 
 - Use simple glob selectors (`flashblocks*`, `family:archive`) rather than boolean expressions when per-group tip accuracy matters; boolean selectors route correctly but never get a lane counter.
-- Set `directivesDefaults.useUpstream` at the network level rather than injecting headers per-request — it ensures every request (including retries and hedges) carries the selector without client cooperation.
+- Set `directiveDefaults.useUpstream` at the network level rather than injecting headers per-request — it ensures every request (including retries and hedges) carries the selector without client cooperation.
 - Keep the total number of distinct upstream subsets below 16 per network; beyond that, additional groups fall back to stateless tip and lose per-group accuracy.
 - Do not rely on `LaneName` label values being unique — two different upstream sets can produce the same label. Use the partition key (internal) as the stable identifier; the label is for human readability only.
 - Negated selectors (`!alchemy-*`) match by upstream ID only, not by tag. If you need tag-based exclusion, restructure as an inclusion selector on the desired tag instead.
@@ -171,8 +171,7 @@ Per-upstream exclusion counters (`erpc_network_served_tip_upstream_excluded_tota
 - [`erpc/networks.go:L517-L540`](https://github.com/erpc/erpc/blob/main/erpc/networks.go#L517-L540) — `EvmHighestLatestBlockNumber`: cluster-mode + per-lane branching.
 - [`erpc/networks.go:L802-L852`](https://github.com/erpc/erpc/blob/main/erpc/networks.go#L802-L852) — `observeServedTipMetrics`: lane label assignment and gauge emission.
 - [`common/matcher.go:L73-L112`](https://github.com/erpc/erpc/blob/main/common/matcher.go#L73-L112) — `MatchesSelector` + `UpstreamMatchesSelector`: ID + tag matching primitive.
-- [`common/request.go:L739-L741`](https://github.com/erpc/erpc/blob/main/common/request.go#L739-L741) — `X-ERPC-Use-Upstream` header extraction.
-- [`common/request.go:L811-L812`](https://github.com/erpc/erpc/blob/main/common/request.go#L811-L812) — `?use-upstream=` query-param extraction.
+- [`common/request.go:L589-L590`](https://github.com/erpc/erpc/blob/main/common/request.go#L589-L590) — trusted config/default `UseUpstream` assignment.
 - [`common/request.go:L1424-L1445`](https://github.com/erpc/erpc/blob/main/common/request.go#L1424-L1445) — `UpstreamMatchesSelector` call in the upstream selection loop; filters which upstreams receive the forwarded request.
 - [`erpc/networks.go:L396-L402`](https://github.com/erpc/erpc/blob/main/erpc/networks.go#L396-L402) — `requestSelector(ctx)`: reads `UseUpstream` directive from the bound request context for both served-tip and forwarding use.
 - [`common/config.go:L2109`](https://github.com/erpc/erpc/blob/main/common/config.go#L2109) — `DirectivesConfig.UseUpstream` field.

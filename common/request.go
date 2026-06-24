@@ -99,10 +99,10 @@ var directiveKeyRegistry = []directiveKeyNames{
 	{header: headerDirectiveRetryPending, query: queryDirectiveRetryPending},
 	{header: headerDirectiveSkipCacheRead, query: queryDirectiveSkipCacheRead},
 	{header: headerDirectiveCacheMaxAge, query: queryDirectiveCacheMaxAge},
-	{header: headerDirectiveUseUpstream, query: queryDirectiveUseUpstream},
+	// UseUpstream and SkipConsensus are intentionally excluded: they are
+	// trusted config/library directives, not public HTTP controls.
 	{header: headerDirectiveCheckAllUpstreams, query: queryDirectiveCheckAllUpstreams},
 	{header: headerDirectiveSkipInterpolation, query: queryDirectiveSkipInterpolation},
-	{header: headerDirectiveSkipConsensus, query: queryDirectiveSkipConsensus},
 	{header: headerDirectiveEnforceHighestBlock, query: queryDirectiveEnforceHighestBlock},
 	{header: headerDirectiveEnforceGetLogsRange, query: queryDirectiveEnforceGetLogsRange},
 	{header: headerDirectiveEnforceNonNullTaggedBlocks, query: queryDirectiveEnforceNonNullTaggedBlocks},
@@ -153,6 +153,7 @@ type RequestDirectives struct {
 	CacheMaxAgeExplicit bool `json:"-"`
 
 	// Instruct the proxy to forward the request to a specific upstream(s) only.
+	// Trusted config/library directive only; public HTTP headers/query params are ignored.
 	// Value can use "*" star char as a wildcard to target multiple upstreams.
 	// For example "alchemy" or "my-own-*", etc.
 	UseUpstream string `json:"useUpstream,omitempty"`
@@ -187,6 +188,7 @@ type RequestDirectives struct {
 	// consensus dispute / agreement step is skipped. Useful when the caller
 	// has its own correctness checks downstream and prefers first-response
 	// latency over multi-upstream agreement.
+	// Trusted config/library directive only; public HTTP headers/query params are ignored.
 	SkipConsensus bool `json:"skipConsensus"`
 
 	// Validation: Block Integrity
@@ -788,17 +790,11 @@ func (r *NormalizedRequest) EnrichFromHttp(headers http.Header, queryArgs url.Va
 			r.directives.CacheMaxAgeExplicit = true
 		}
 	}
-	if hv := headers.Get(headerDirectiveUseUpstream); hv != "" {
-		r.directives.UseUpstream = hv
-	}
 	if hv := headers.Get(headerDirectiveCheckAllUpstreams); hv != "" {
 		r.directives.CheckAllUpstreams = strings.ToLower(strings.TrimSpace(hv)) == "true"
 	}
 	if hv := headers.Get(headerDirectiveSkipInterpolation); hv != "" {
 		r.directives.SkipInterpolation = strings.ToLower(strings.TrimSpace(hv)) == "true"
-	}
-	if hv := headers.Get(headerDirectiveSkipConsensus); hv != "" {
-		r.directives.SkipConsensus = strings.ToLower(strings.TrimSpace(hv)) == "true"
 	}
 
 	// Validation Headers
@@ -862,9 +858,6 @@ func (r *NormalizedRequest) EnrichFromHttp(headers http.Header, queryArgs url.Va
 	}
 
 	// Query parameters come after headers so they can still override when explicitly present in URL.
-	if useUpstream := queryArgs.Get(queryDirectiveUseUpstream); useUpstream != "" {
-		r.directives.UseUpstream = strings.TrimSpace(useUpstream)
-	}
 	if checkAllUpstreams := queryArgs.Get(queryDirectiveCheckAllUpstreams); checkAllUpstreams != "" {
 		r.directives.CheckAllUpstreams = strings.ToLower(strings.TrimSpace(checkAllUpstreams)) == "true"
 	}
@@ -890,10 +883,6 @@ func (r *NormalizedRequest) EnrichFromHttp(headers http.Header, queryArgs url.Va
 
 	if skipInterpolation := queryArgs.Get(queryDirectiveSkipInterpolation); skipInterpolation != "" {
 		r.directives.SkipInterpolation = strings.ToLower(strings.TrimSpace(skipInterpolation)) == "true"
-	}
-
-	if skipConsensus := queryArgs.Get(queryDirectiveSkipConsensus); skipConsensus != "" {
-		r.directives.SkipConsensus = strings.ToLower(strings.TrimSpace(skipConsensus)) == "true"
 	}
 
 	// Validation query parameters

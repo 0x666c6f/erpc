@@ -431,15 +431,20 @@ func TestHttpServer_EthBlockNumberIntegrity(t *testing.T) {
 		setupBniPollerMocks()
 		setupBniBlockNumberMocks()
 
-		send, _, shutdown := bniBoot(t, bniConfig(false, integrityOn()))
+		cfg := bniConfig(false, integrityOn())
+		useUpstream := "rpc1"
+		cfg.Projects[0].Networks[0].DirectiveDefaults = &common.DirectiveDefaultsConfig{
+			UseUpstream: &useUpstream,
+		}
+		send, _, shutdown := bniBoot(t, cfg)
 		defer shutdown()
 
-		// The request is explicitly pinned to the lagging upstream. Per the
+		// The trusted config pins requests to the lagging upstream. Per the
 		// selector-scoped served-tip semantics (#912, honored by max-mode
 		// tipCandidateUpstreams when the ctx carries the request), "latest"
 		// must be decided AMONG the pinned subset — advertising the
 		// network-wide tip promises a block rpc1 cannot serve.
-		got, _ := bniSend(t, send, map[string]string{"X-ERPC-Use-Upstream": "rpc1"}, nil)
+		got, _ := bniSend(t, send, nil, nil)
 		assert.Equal(t, bniLaggingHead, got,
 			"request pinned to the lagging upstream must be corrected against the pinned subset's tip (0x%x), not the network-wide tip (0x%x)",
 			bniLaggingHead, bniHealthyHead)

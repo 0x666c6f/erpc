@@ -83,7 +83,7 @@ See [/use-cases/cut-costs-and-latency](/use-cases/cut-costs-and-latency) for cac
 - HTTP status follows JSON-RPC spec: 200 for all JSON-RPC responses (including errors); transport-level failures get appropriate 4xx/5xx codes.
 - Batch requests are dispatched concurrently; all results are re-assembled in order before writing the response.
 - Internal requests (state pollers, chainId probes) set `IsInternal=true` — they bypass retry, hedge, and circuit breaker policies; only per-attempt timeout applies.
-- Request directives (`X-ERPC-Use-Upstream`, `X-ERPC-Skip-Cache-Read`, `X-ERPC-Retry-Empty`, etc.) override network `directiveDefaults` on a per-request basis. See the directive reference in [KB 01](/reference/architecture).
+- Public-safe request directives (`X-ERPC-Skip-Cache-Read`, `X-ERPC-Retry-Empty`, etc.) override matching network `directiveDefaults` on a per-request basis; trusted routing/consensus directives stay config/library-only. See the directive reference in [KB 01](/reference/architecture).
 
 ### Best practices
 

@@ -90,9 +90,9 @@ is pure/stateless and safe under arbitrary input.
 upstream's **id ∪ tags**". A selector token matches an upstream if it
 glob-matches the id **or** any tag string.
 
-- Parsed already at [common/request.go:740-741](../../common/request.go) (header
-  `X-ERPC-Use-Upstream`) and [:811-812](../../common/request.go) (query
-  `use-upstream`); no new directive.
+- Set from trusted config/library directives (`directiveDefaults.useUpstream`
+  or `RequestDirectives.UseUpstream`); public HTTP header/query values are
+  ignored so clients cannot choose isolation or consensus participants.
 - A single matcher helper `selectorMatches(pattern, upstream) bool` replaces the
   three bare id matches:
   - [common/request.go:1443](../../common/request.go) (`NextUpstream` loop),
