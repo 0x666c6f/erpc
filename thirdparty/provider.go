@@ -14,6 +14,7 @@ type Provider struct {
 	logger           *zerolog.Logger
 	config           *common.ProviderConfig
 	vendor           common.Vendor
+	vendorSettings   common.VendorSettings
 	upstreamDefaults *common.UpstreamConfig
 }
 
@@ -22,6 +23,7 @@ func NewProvider(logger *zerolog.Logger, cfg *common.ProviderConfig, vendor comm
 		logger:           logger,
 		config:           cfg,
 		vendor:           vendor,
+		vendorSettings:   withProviderSettings(cfg.Settings, cfg.Id),
 		upstreamDefaults: upstreamDefaults,
 	}
 }
@@ -65,7 +67,7 @@ func (p *Provider) GenerateUpstreamConfigs(ctx context.Context, logger *zerolog.
 }
 
 func (p *Provider) settingsForVendor() common.VendorSettings {
-	return withProviderSettings(p.config.Settings, p.config.Id)
+	return p.vendorSettings
 }
 
 func (p *Provider) expandEnvVars(upsCfgs []*common.UpstreamConfig) {
