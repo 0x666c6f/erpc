@@ -5,11 +5,36 @@ fullnameOverride: ""
 replicaCount: 3
 
 vault:
+  # Non-secret eRPC config template. Secret placeholders use __SECRET_<KEY>__;
+  # the API-key auth list can be generated from __SECRET_API_KEY_STRATEGIES__.
   configPath: "secret/data/erpc/config"
+  # Dedicated secret-only entry shared by all eRPC config variants.
+  secretsPath: "secret/data/erpc/secrets"
   jobImage:
     repository: 537124939463.dkr.ecr.eu-west-3.amazonaws.com/docker-hub/morphoorg/erpc-validator
     tag: "0.0.77"
     pullPolicy: IfNotPresent
+  jobResources:
+    requests:
+      cpu: "50m"
+      memory: "64Mi"
+    limits:
+      cpu: "200m"
+      memory: "256Mi"
+  validationImage:
+    enabled: false
+    repository: ""
+    tag: ""
+    pullPolicy: IfNotPresent
+    command:
+      - erpc
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "128Mi"
+      limits:
+        cpu: "500m"
+        memory: "512Mi"
 
 image:
   repository: 537124939463.dkr.ecr.eu-west-3.amazonaws.com/docker-hub/morphoorg/erpc
@@ -113,6 +138,15 @@ resources:
   limits:
     cpu: "1000m"
     memory: "3500Mi"
+
+lifecycle:
+  enabled: true
+  preStop:
+    exec:
+      command:
+        - /bin/sh
+        - -c
+        - sleep 15
 
 nodeSelector: {}
 

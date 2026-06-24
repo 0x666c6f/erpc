@@ -112,10 +112,10 @@ spec:
             failureThreshold: {{ .Values.readinessProbe.failureThreshold | default 2 }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
+          {{- if .Values.lifecycle.enabled }}
           lifecycle:
-            preStop:
-              exec:
-                command: ["/bin/sh", "-c", "sleep 15"]
+            {{- omit .Values.lifecycle "enabled" | toYaml | nindent 12 }}
+          {{- end }}
       volumes:
         - name: config
           secret:
