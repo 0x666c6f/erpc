@@ -35,6 +35,18 @@ func TestWSHandlerRejectsCrossOrigin(t *testing.T) {
 func TestWSHandlerRejectsNonLoopbackHost(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/ws", nil)
 	req.Host = "attacker.example:8080"
+	req.RemoteAddr = "127.0.0.1:49152"
+	rec := httptest.NewRecorder()
+
+	WSHandler(nil).ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+}
+
+func TestWSHandlerRejectsNonLoopbackRemoteAddr(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/ws", nil)
+	req.Host = "localhost:8080"
+	req.RemoteAddr = "203.0.113.10:49152"
 	rec := httptest.NewRecorder()
 
 	WSHandler(nil).ServeHTTP(rec, req)

@@ -43,7 +43,7 @@ import (
 //	{"kind":"error","msg":"..."}              — generic error report
 func WSHandler(o *Orchestrator) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !isLoopbackHost(r.Host) {
+		if !isLoopbackHost(r.Host) || !isLoopbackRemoteAddr(r.RemoteAddr) {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
@@ -79,6 +79,15 @@ func isLoopbackHost(hostport string) bool {
 		return true
 	}
 	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+func isLoopbackRemoteAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		host = addr
+	}
+	ip := net.ParseIP(strings.Trim(host, "[]"))
 	return ip != nil && ip.IsLoopback()
 }
 
