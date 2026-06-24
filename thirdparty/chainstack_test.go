@@ -279,3 +279,16 @@ func TestChainstackCacheKey(t *testing.T) {
 		})
 	}
 }
+
+func TestChainstackCacheKey_DoesNotCollideAcrossFiltersOrProviders(t *testing.T) {
+	vendor := CreateChainstackVendor().(*ChainstackVendor)
+	apiKey := "test-key"
+	baseSettings := common.VendorSettings{vendorSettingProviderID: "provider-a"}
+	base := vendor.getCacheKey(apiKey, &ChainstackFilterParams{Project: "project-a"}, baseSettings)
+
+	differentFilter := vendor.getCacheKey(apiKey, &ChainstackFilterParams{Project: "project-b"}, baseSettings)
+	differentProvider := vendor.getCacheKey(apiKey, &ChainstackFilterParams{Project: "project-a"}, common.VendorSettings{vendorSettingProviderID: "provider-b"})
+
+	assert.NotEqual(t, base, differentFilter)
+	assert.NotEqual(t, base, differentProvider)
+}

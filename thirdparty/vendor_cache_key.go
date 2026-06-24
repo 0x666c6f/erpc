@@ -1,6 +1,10 @@
 package thirdparty
 
 import (
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"hash/maphash"
 	"sort"
@@ -16,7 +20,16 @@ const (
 
 var (
 	vendorCacheKeySeed = maphash.MakeSeed()
+	secretCacheKey     = newSecretCacheKey()
 )
+
+func newSecretCacheKey() []byte {
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		panic(fmt.Errorf("generate vendor secret cache key: %w", err))
+	}
+	return key
+}
 
 func withProviderSettings(settings common.VendorSettings, providerID string) common.VendorSettings {
 	if settings == nil {
@@ -73,7 +86,21 @@ func secretCachePart(name string, value string) string {
 	if value == "" {
 		return name + "="
 	}
-	return fmt.Sprintf("%s=secret:%016x", name, maphash.String(vendorCacheKeySeed, name+"\x00"+value))
+	mac := hmac.New(sha256.New, secretCacheKey)
+	writeSecretCachePart(mac, name, value)
+	return name + "=secret:" + hex.EncodeToString(mac.Sum(nil))[:24]
+}
+
+func writeSecretCachePart(mac hashWriter, name, value string) {
+	_, _ = mac.Write([]byte(name))
+	_, _ = mac.Write([]byte{0})
+	_, _ = mac.Write([]byte(strconv.Itoa(len(value))))
+	_, _ = mac.Write([]byte{0})
+	_, _ = mac.Write([]byte(value))
+}
+
+type hashWriter interface {
+	Write([]byte) (int, error)
 }
 
 func intSliceCachePart(name string, values []int) string {

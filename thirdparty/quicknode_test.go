@@ -101,3 +101,17 @@ func TestQuicknodeCacheKeyReusesEndpointSnapshotAcrossNetworks(t *testing.T) {
 	assert.NoError(t, err)
 	assert.True(t, optimismSupported)
 }
+
+func TestQuicknodeCacheKey_DoesNotCollideAcrossTags(t *testing.T) {
+	vendor := CreateQuicknodeVendor().(*QuicknodeVendor)
+	settings := common.VendorSettings{
+		vendorSettingProviderID: "quicknode-provider",
+	}
+
+	base := vendor.getCacheKey("test-key", &QuicknodeFilterParams{TagIDs: []int{1}, TagLabels: []string{"archive"}}, settings)
+	differentTagIDs := vendor.getCacheKey("test-key", &QuicknodeFilterParams{TagIDs: []int{2}, TagLabels: []string{"archive"}}, settings)
+	differentTagLabels := vendor.getCacheKey("test-key", &QuicknodeFilterParams{TagIDs: []int{1}, TagLabels: []string{"realtime"}}, settings)
+
+	assert.NotEqual(t, base, differentTagIDs)
+	assert.NotEqual(t, base, differentTagLabels)
+}
