@@ -27,8 +27,7 @@ func TestWSHandlerRejectsCrossOrigin(t *testing.T) {
 		},
 	})
 	require.Error(t, err)
-	if resp != nil {
-		defer resp.Body.Close()
-		assert.Equal(t, http.StatusForbidden, resp.StatusCode)
-	}
+	require.NotNil(t, resp)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusForbidden, resp.StatusCode)
 }
