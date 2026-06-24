@@ -232,6 +232,41 @@ func TestUpstreamPostForward_HyperEVMFiltersSystemTransactions(t *testing.T) {
 		require.NoError(t, common.SonicCfg.Unmarshal(jrr.GetResultBytes(), &block))
 		require.Len(t, block.Transactions, 4)
 	})
+
+	t.Run("ValidatesOriginalBlockBeforeFilteringAllSystemTransactions", func(t *testing.T) {
+		systemOnlyBlockJSON := `{
+			"number": "0x100",
+			"hash": "0xabc123",
+			"transactionsRoot": "0x1111111111111111111111111111111111111111111111111111111111111111",
+			"transactions": [
+				{"hash": "0xsystem1", "from": "0x0", "to": "0x0", "gas": "0x0", "gasPrice": "0x0", "input": "0x", "value": "0x0"}
+			]
+		}`
+		jrpcResp, err := common.NewJsonRpcResponseFromBytes([]byte(`1`), []byte(systemOnlyBlockJSON), nil)
+		require.NoError(t, err)
+		req := common.NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","id":1,"method":"eth_getBlockByNumber","params":["0x100",true]}`))
+		req.SetDirectives(&common.RequestDirectives{ValidateTransactionsRoot: true})
+		resp := common.NewNormalizedResponse().
+			WithRequest(req).
+			WithJsonRpcResponse(jrpcResp)
+		network := &testNetwork{cfg: &common.NetworkConfig{
+			Architecture: common.ArchitectureEvm,
+			Evm: &common.EvmNetworkConfig{
+				ChainId: 999,
+			},
+		}}
+
+		filteredResp, err := upstreamPostForward_eth_getBlockByNumber(ctx, network, nil, req, resp, nil)
+		require.NoError(t, err)
+
+		jrr, err := filteredResp.JsonRpcResponse(ctx)
+		require.NoError(t, err)
+		var block struct {
+			Transactions []map[string]interface{} `json:"transactions"`
+		}
+		require.NoError(t, common.SonicCfg.Unmarshal(jrr.GetResultBytes(), &block))
+		require.Empty(t, block.Transactions)
+	})
 }
 
 func TestAllPhantomTransactions(t *testing.T) {

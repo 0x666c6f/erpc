@@ -475,14 +475,14 @@ func upstreamPostForward_eth_getBlockByNumber(ctx context.Context, n common.Netw
 		return rs, re
 	}
 
-	if err := filterHyperEVMSystemTransactions(ctx, n, rq, rs); err != nil {
-		return rs, err
-	}
-
 	// Always run validation:
 	// - always-on request/response identity checks
 	// - directive-gated checks when directives are present
 	if err := validateBlock(ctx, u, rq.Directives(), rq, rs); err != nil {
+		return rs, err
+	}
+
+	if err := filterHyperEVMSystemTransactions(ctx, n, rq, rs); err != nil {
 		return rs, err
 	}
 
