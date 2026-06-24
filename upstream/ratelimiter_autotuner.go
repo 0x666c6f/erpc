@@ -117,6 +117,16 @@ func (arl *RateLimitAutoTuner) maybeAdjust(method string) {
 	}
 
 	for _, rule := range rules {
+		if rule == nil || rule.Config == nil || rule.Config.Method != method {
+			if rule != nil && rule.Config != nil {
+				arl.logger.Debug().
+					Str("method", rule.Config.Method).
+					Str("triggeredBy", method).
+					Msg("auto-tuner: skipping non-exact rate limit rule")
+			}
+			continue
+		}
+
 		var factor float64
 		if direction == "decrease" {
 			factor = arl.decreaseFactor
