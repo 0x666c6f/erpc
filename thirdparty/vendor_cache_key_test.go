@@ -21,7 +21,7 @@ func TestVendorCapabilityCacheKey_IsolatesProviderAndSecret(t *testing.T) {
 	assert.NotContains(t, key, "secret-value")
 	assert.NotContains(t, key, "apiKey=secret-value")
 	require.Contains(t, key, "|key=")
-	assert.Len(t, strings.Split(key, "|key=")[1], 24)
+	assert.Len(t, strings.Split(key, "|key=")[1], 16)
 }
 
 func TestVendorCapabilityCacheKey_DifferentInputsDoNotCollide(t *testing.T) {
@@ -33,4 +33,15 @@ func TestVendorCapabilityCacheKey_DifferentInputsDoNotCollide(t *testing.T) {
 
 	assert.NotEqual(t, base, differentProvider)
 	assert.NotEqual(t, base, differentPart)
+}
+
+func TestSecretCachePart_UsesStableOpaqueToken(t *testing.T) {
+	first := secretCachePart("apiKey", "secret-a")
+	second := secretCachePart("apiKey", "secret-a")
+	other := secretCachePart("apiKey", "secret-b")
+
+	assert.Equal(t, first, second)
+	assert.NotEqual(t, first, other)
+	assert.Contains(t, first, "apiKey=secret:")
+	assert.NotContains(t, first, "secret-a")
 }

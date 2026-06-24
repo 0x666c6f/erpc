@@ -1,18 +1,25 @@
 package thirdparty
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
+	"hash/maphash"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 
 	"github.com/erpc/erpc/common"
 )
 
 const (
 	vendorSettingProviderID = "__erpc_provider_id"
+)
+
+var (
+	secretCachePartIDs sync.Map
+	secretCachePartSeq atomic.Uint64
+	vendorCacheKeySeed = maphash.MakeSeed()
 )
 
 func withProviderSettings(settings common.VendorSettings, providerID string) common.VendorSettings {
@@ -40,27 +47,23 @@ func vendorCapabilityCacheKey(vendorName string, settings common.VendorSettings,
 		providerID = "standalone"
 	}
 
-	h := sha256.New()
-	writeCachePart(h, "vendor", vendorName)
-	writeCachePart(h, "provider", providerID)
+	var b strings.Builder
+	writeCachePart(&b, "vendor", vendorName)
+	writeCachePart(&b, "provider", providerID)
 	for _, part := range parts {
-		writeCachePart(h, "part", part)
+		writeCachePart(&b, "part", part)
 	}
 
-	return fmt.Sprintf("%s|provider=%s|key=%s", vendorName, providerID, hex.EncodeToString(h.Sum(nil))[:24])
+	return fmt.Sprintf("%s|provider=%s|key=%016x", vendorName, providerID, maphash.String(vendorCacheKeySeed, b.String()))
 }
 
-type cacheHash interface {
-	Write([]byte) (int, error)
-}
-
-func writeCachePart(h cacheHash, name, value string) {
-	_, _ = h.Write([]byte(name))
-	_, _ = h.Write([]byte{0})
-	_, _ = h.Write([]byte(strconv.Itoa(len(value))))
-	_, _ = h.Write([]byte{0})
-	_, _ = h.Write([]byte(value))
-	_, _ = h.Write([]byte{0})
+func writeCachePart(b *strings.Builder, name, value string) {
+	b.WriteString(name)
+	b.WriteByte(0)
+	b.WriteString(strconv.Itoa(len(value)))
+	b.WriteByte(0)
+	b.WriteString(value)
+	b.WriteByte(0)
 }
 
 func cachePart(name string, value string) string {
@@ -71,8 +74,14 @@ func secretCachePart(name string, value string) string {
 	if value == "" {
 		return name + "="
 	}
-	sum := sha256.Sum256([]byte(value))
-	return name + "=sha256:" + hex.EncodeToString(sum[:])[:24]
+	key := name + "\x00" + value
+	if cached, ok := secretCachePartIDs.Load(key); ok {
+		return name + "=secret:" + cached.(string)
+	}
+
+	generated := strconv.FormatUint(secretCachePartSeq.Add(1), 36)
+	actual, _ := secretCachePartIDs.LoadOrStore(key, generated)
+	return name + "=secret:" + actual.(string)
 }
 
 func intSliceCachePart(name string, values []int) string {
