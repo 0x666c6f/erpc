@@ -31,3 +31,13 @@ func TestWSHandlerRejectsCrossOrigin(t *testing.T) {
 	defer resp.Body.Close()
 	assert.Equal(t, http.StatusForbidden, resp.StatusCode)
 }
+
+func TestWSHandlerRejectsNonLoopbackHost(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/ws", nil)
+	req.Host = "attacker.example:8080"
+	rec := httptest.NewRecorder()
+
+	WSHandler(nil).ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+}
