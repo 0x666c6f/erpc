@@ -1,9 +1,11 @@
 package consensus
 
 import (
+	"context"
 	"testing"
 
 	"github.com/erpc/erpc/common"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
 
@@ -115,5 +117,43 @@ func TestReorderForParticipantQuota(t *testing.T) {
 		ups := quotaUps(spec{"a", []string{"region:eu"}}, spec{"b", []string{"region:eu"}})
 		reqs := []*common.ConsensusRequiredParticipant{{Tag: "region:ap", MinParticipants: 1}}
 		require.Equal(t, []string{"a", "b"}, idsOf(reorderForParticipantQuota(ups, reqs)))
+	})
+}
+
+func TestRequiredParticipantQuotaFailsClosedAtAnalysis(t *testing.T) {
+	lg := zerolog.Nop()
+	cfg := &config{
+		maxParticipants:         2,
+		agreementThreshold:      1,
+		disputeBehavior:         common.ConsensusDisputeBehaviorReturnError,
+		lowParticipantsBehavior: common.ConsensusLowParticipantsBehaviorAcceptMostCommonValidResult,
+		requiredParticipants: []*common.ConsensusRequiredParticipant{
+			{Tag: "tier:paid", MinParticipants: 1},
+		},
+	}
+
+	t.Run("missing required tag rejects threshold winner", func(t *testing.T) {
+		analysis := newConsensusAnalysis(&lg, context.Background(), cfg, []*execResult{{
+			Result:   validResponseWithValue("0x1"),
+			Upstream: common.NewFakeUpstream("public-1", common.WithTags("tier:public")),
+		}})
+
+		winner := (&executor{}).determineWinner(&lg, analysis)
+		require.NotNil(t, winner)
+		require.Nil(t, winner.Result)
+		require.Error(t, winner.Error)
+		require.True(t, common.HasErrorCode(winner.Error, common.ErrCodeConsensusLowParticipants), "got: %v", winner.Error)
+	})
+
+	t.Run("required tag present allows threshold winner", func(t *testing.T) {
+		analysis := newConsensusAnalysis(&lg, context.Background(), cfg, []*execResult{{
+			Result:   validResponseWithValue("0x1"),
+			Upstream: common.NewFakeUpstream("paid-1", common.WithTags("tier:paid")),
+		}})
+
+		winner := (&executor{}).determineWinner(&lg, analysis)
+		require.NotNil(t, winner)
+		require.NoError(t, winner.Error)
+		require.NotNil(t, winner.Result)
 	})
 }

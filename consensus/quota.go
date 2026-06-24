@@ -11,10 +11,8 @@ import "github.com/erpc/erpc/common"
 // Semantics:
 //   - Best-effort: if a required group has fewer matching upstreams than
 //     requested (or several quotas can't all fit within maxParticipants),
-//     it promotes everything it can and leaves the shortfall to the
-//     existing lowParticipantsBehavior / agreementThreshold handling —
-//     consensus is not aware this happened, it just sees fewer/uneven
-//     participants like any organic low-participation tick.
+//     it promotes everything it can. Final analysis enforces the quota
+//     against valid responses and returns low-participants on shortfall.
 //   - Minimal disturbance: non-required upstreams keep their incoming
 //     (selection-policy) order in the remaining slots, so ranking/quality
 //     is preserved wherever the quota doesn't force a change. Order WITHIN

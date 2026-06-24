@@ -107,6 +107,8 @@ func TestHedgeConsensus_AllUpstreamsMissingData_HedgeRecovery(t *testing.T) {
 			LowParticipantsBehavior: common.ConsensusLowParticipantsBehaviorAcceptMostCommonValidResult,
 			PreferNonEmpty:          &common.TRUE,
 			PreferLargerResponses:   &common.TRUE,
+			MaxWaitOnResult:         common.NewStaticDuration(500 * time.Millisecond),
+			MaxWaitOnEmpty:          common.NewStaticDuration(500 * time.Millisecond),
 		},
 		&common.RetryPolicyConfig{
 			MaxAttempts: 1,
@@ -205,6 +207,8 @@ func TestHedgeConsensus_ServerError_HedgeRecovery(t *testing.T) {
 			LowParticipantsBehavior: common.ConsensusLowParticipantsBehaviorAcceptMostCommonValidResult,
 			PreferNonEmpty:          &common.TRUE,
 			PreferLargerResponses:   &common.TRUE,
+			MaxWaitOnResult:         common.NewStaticDuration(500 * time.Millisecond),
+			MaxWaitOnEmpty:          common.NewStaticDuration(500 * time.Millisecond),
 		},
 		&common.RetryPolicyConfig{
 			MaxAttempts: 1,
@@ -364,6 +368,8 @@ func TestHedgeConsensus_OneUpstreamMissingData_OthersSucceed_StillWorks(t *testi
 			LowParticipantsBehavior: common.ConsensusLowParticipantsBehaviorAcceptMostCommonValidResult,
 			PreferNonEmpty:          &common.TRUE,
 			PreferLargerResponses:   &common.TRUE,
+			MaxWaitOnResult:         common.NewStaticDuration(500 * time.Millisecond),
+			MaxWaitOnEmpty:          common.NewStaticDuration(500 * time.Millisecond),
 		},
 		&common.RetryPolicyConfig{
 			MaxAttempts: 2,

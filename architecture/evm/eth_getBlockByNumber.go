@@ -475,14 +475,14 @@ func upstreamPostForward_eth_getBlockByNumber(ctx context.Context, n common.Netw
 		return rs, re
 	}
 
+	if err := filterHyperEVMSystemTransactions(ctx, n, rq, rs); err != nil {
+		return rs, err
+	}
+
 	// Always run validation:
 	// - always-on request/response identity checks
 	// - directive-gated checks when directives are present
 	if err := validateBlock(ctx, u, rq.Directives(), rq, rs); err != nil {
-		return rs, err
-	}
-
-	if err := filterHyperEVMSystemTransactions(ctx, n, rq, rs); err != nil {
 		return rs, err
 	}
 
@@ -575,8 +575,37 @@ func isHyperEVMSystemTransaction(tx interface{}) bool {
 	if !ok {
 		return false
 	}
+	from, ok := txObj["from"].(string)
+	if !ok || !isZeroishHex(from) {
+		return false
+	}
+	gas, ok := txObj["gas"].(string)
+	if !ok || !isZeroishHex(gas) {
+		return false
+	}
 	gasPrice, ok := txObj["gasPrice"].(string)
-	return ok && isZeroishHex(gasPrice)
+	if !ok || !isZeroishHex(gasPrice) {
+		return false
+	}
+	if to, exists := txObj["to"]; exists && to != nil {
+		toStr, ok := to.(string)
+		if !ok || !isZeroishHex(toStr) {
+			return false
+		}
+	}
+	if value, exists := txObj["value"]; exists && value != nil {
+		valueStr, ok := value.(string)
+		if !ok || !isZeroishHex(valueStr) {
+			return false
+		}
+	}
+	if input, exists := txObj["input"]; exists && input != nil {
+		inputStr, ok := input.(string)
+		if !ok || !isZeroishHex(inputStr) {
+			return false
+		}
+	}
+	return true
 }
 
 // blockValidationTxLite is a minimal transaction model for block validation

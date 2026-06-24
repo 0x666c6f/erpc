@@ -2,6 +2,7 @@ package consensus
 
 import (
 	"math/big"
+	"strings"
 
 	"github.com/erpc/erpc/common"
 )
@@ -52,6 +53,36 @@ var consensusRules = []consensusRule{
 			return &slotResult{
 				Error: common.NewErrConsensusDispute(
 					"no valid tx hash response found",
+					a.participants(),
+					nil,
+				),
+			}
+		},
+	},
+	{
+		Description: "wait-capped low participants fail closed",
+		Condition: func(a *consensusAnalysis) bool {
+			return a.waitCapped && a.validParticipants < a.config.agreementThreshold
+		},
+		Action: func(a *consensusAnalysis) *slotResult {
+			return &slotResult{
+				Error: common.NewErrConsensusLowParticipants(
+					"consensus wait cap fired before enough valid participants responded",
+					a.participants(),
+					nil,
+				),
+			}
+		},
+	},
+	{
+		Description: "required participant quotas must be represented in valid responses",
+		Condition: func(a *consensusAnalysis) bool {
+			return len(a.missingRequiredParticipants()) > 0
+		},
+		Action: func(a *consensusAnalysis) *slotResult {
+			return &slotResult{
+				Error: common.NewErrConsensusLowParticipants(
+					"not enough required consensus participants: "+strings.Join(a.missingRequiredParticipants(), ", "),
 					a.participants(),
 					nil,
 				),

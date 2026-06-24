@@ -158,8 +158,8 @@ func (e *executor) Run(
 	// include the configured minimum from each required group. Runs at the
 	// very top of consensus, before any participant slot consumes an
 	// upstream (req.UpstreamIdx is still 0), so the reorder takes effect.
-	// Best-effort: shortfalls fall through to lowParticipantsBehavior /
-	// agreementThreshold like organic low participation.
+	// Reordering is best-effort, but final analysis fails closed if valid
+	// responses do not satisfy the required tag quotas.
 	if len(e.config.requiredParticipants) > 0 {
 		if reordered := reorderForParticipantQuota(originalReq.Upstreams(), e.config.requiredParticipants); len(reordered) > 0 {
 			originalReq.SetUpstreams(reordered)
@@ -553,7 +553,10 @@ func (e *executor) runAnalyzer(
 		waitTimer.Stop()
 	}
 	if analysis == nil {
-		analysis = newConsensusAnalysis(e.logger, ctx, e.config, responses)
+		analysis = newConsensusAnalysisWithOptions(e.logger, ctx, e.config, responses, waitCapped)
+		winner = e.determineWinner(lg, analysis)
+	} else if waitCapped {
+		analysis = newConsensusAnalysisWithOptions(e.logger, ctx, e.config, responses, true)
 		winner = e.determineWinner(lg, analysis)
 	}
 	if !shortCircuited {
