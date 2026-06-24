@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -13,13 +13,19 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+var remoteCacheLogLevelMu sync.Mutex
+
 func TestRemoteDataCacheRedactsCacheKeyInRefreshFailureLogs(t *testing.T) {
+	remoteCacheLogLevelMu.Lock()
 	prevLevel := zerolog.GlobalLevel()
 	zerolog.SetGlobalLevel(zerolog.WarnLevel)
-	defer zerolog.SetGlobalLevel(prevLevel)
+	t.Cleanup(func() {
+		zerolog.SetGlobalLevel(prevLevel)
+		remoteCacheLogLevelMu.Unlock()
+	})
 
 	var logs bytes.Buffer
-	logger := zerolog.New(&logs)
+	logger := zerolog.New(&logs).Level(zerolog.WarnLevel)
 	cache := NewRemoteDataCache[string]("quicknode")
 	cacheKey := "https://example.quiknode.pro/raw-provider-secret/evm?apiKey=provider-api-key"
 	fetchCalled := make(chan struct{})
@@ -36,10 +42,13 @@ func TestRemoteDataCacheRedactsCacheKeyInRefreshFailureLogs(t *testing.T) {
 	}
 
 	require.Eventually(t, func() bool {
-		return strings.Contains(logs.String(), "vendor remote-data refresh failed")
+		cache.refreshMu.Lock()
+		defer cache.refreshMu.Unlock()
+		return len(cache.inflight) == 0
 	}, time.Second, 10*time.Millisecond)
 
 	text := logs.String()
+	assert.Contains(t, text, "vendor remote-data refresh failed")
 	assert.NotContains(t, text, cacheKey)
 	assert.NotContains(t, text, "raw-provider-secret")
 	assert.NotContains(t, text, "provider-api-key")
