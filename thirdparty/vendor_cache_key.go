@@ -6,8 +6,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
-	"sync/atomic"
 
 	"github.com/erpc/erpc/common"
 )
@@ -17,8 +15,6 @@ const (
 )
 
 var (
-	secretCachePartIDs sync.Map
-	secretCachePartSeq atomic.Uint64
 	vendorCacheKeySeed = maphash.MakeSeed()
 )
 
@@ -77,14 +73,7 @@ func secretCachePart(name string, value string) string {
 	if value == "" {
 		return name + "="
 	}
-	key := name + "\x00" + value
-	if cached, ok := secretCachePartIDs.Load(key); ok {
-		return name + "=secret:" + cached.(string)
-	}
-
-	generated := strconv.FormatUint(secretCachePartSeq.Add(1), 36)
-	actual, _ := secretCachePartIDs.LoadOrStore(key, generated)
-	return name + "=secret:" + actual.(string)
+	return fmt.Sprintf("%s=secret:%016x", name, maphash.String(vendorCacheKeySeed, name+"\x00"+value))
 }
 
 func intSliceCachePart(name string, values []int) string {
