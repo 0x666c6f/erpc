@@ -14,6 +14,18 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func waitForStragglerOrCancel(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
 // TestWaitCap_MaxWaitOnResult_BoundsTailLatency verifies that once enough
 // non-empty responses arrive to satisfy the threshold, the analyzer does not
 // wait for an unrelated straggler.
@@ -35,7 +47,7 @@ func TestWaitCap_MaxWaitOnResult_BoundsTailLatency(t *testing.T) {
 
 	var slot atomic.Int32
 	start := time.Now()
-	resp, err := pol.Run(ctx, req, func(_ context.Context, _ *common.NormalizedRequest) (*common.NormalizedResponse, error) {
+	resp, err := pol.Run(ctx, req, func(ctx context.Context, _ *common.NormalizedRequest) (*common.NormalizedResponse, error) {
 		idx := slot.Add(1)
 		switch idx {
 		case 1:
@@ -47,7 +59,9 @@ func TestWaitCap_MaxWaitOnResult_BoundsTailLatency(t *testing.T) {
 			return validResponseWithValue("0xfast"), nil
 		default:
 			// slow straggler — exceeds the cap, should be cancelled
-			time.Sleep(2 * time.Second)
+			if err := waitForStragglerOrCancel(ctx, 2*time.Second); err != nil {
+				return nil, err
+			}
 			return validResponseWithValue("0xslow"), nil
 		}
 	})
@@ -78,12 +92,14 @@ func TestWaitCap_MaxWaitOnResult_FailsClosedBelowThreshold(t *testing.T) {
 
 	var slot atomic.Int32
 	start := time.Now()
-	resp, err := pol.Run(ctx, req, func(_ context.Context, _ *common.NormalizedRequest) (*common.NormalizedResponse, error) {
+	resp, err := pol.Run(ctx, req, func(ctx context.Context, _ *common.NormalizedRequest) (*common.NormalizedResponse, error) {
 		idx := slot.Add(1)
 		if idx == 1 {
 			return validResponseWithValue("0xfast"), nil
 		}
-		time.Sleep(2 * time.Second)
+		if err := waitForStragglerOrCancel(ctx, 2*time.Second); err != nil {
+			return nil, err
+		}
 		return validResponseWithValue("0xfast"), nil
 	})
 	elapsed := time.Since(start)
@@ -214,7 +230,7 @@ func TestWaitCap_MaxWaitOnEmpty_TighterFloor(t *testing.T) {
 
 	var slot atomic.Int32
 	start := time.Now()
-	_, _ = pol.Run(ctx, req, func(_ context.Context, _ *common.NormalizedRequest) (*common.NormalizedResponse, error) {
+	_, _ = pol.Run(ctx, req, func(ctx context.Context, _ *common.NormalizedRequest) (*common.NormalizedResponse, error) {
 		idx := slot.Add(1)
 		switch idx {
 		case 1:
@@ -225,7 +241,9 @@ func TestWaitCap_MaxWaitOnEmpty_TighterFloor(t *testing.T) {
 			return validResponseWithValue(""), nil
 		default:
 			// straggler way over the cap
-			time.Sleep(2 * time.Second)
+			if err := waitForStragglerOrCancel(ctx, 2*time.Second); err != nil {
+				return nil, err
+			}
 			return validResponseWithValue("0xslow"), nil
 		}
 	})
@@ -385,7 +403,9 @@ func TestWaitCap_ArmedByRealAttemptFailures(t *testing.T) {
 			// Real attempt failure: a plain transport error, not a skip.
 			return nil, errors.New("connection reset by peer")
 		}
-		time.Sleep(2 * time.Second)
+		if err := waitForStragglerOrCancel(ctx, 2*time.Second); err != nil {
+			return nil, err
+		}
 		return validResponseWithValue("0xslow"), nil
 	})
 	elapsed := time.Since(start)
