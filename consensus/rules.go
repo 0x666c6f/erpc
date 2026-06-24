@@ -77,12 +77,12 @@ var consensusRules = []consensusRule{
 	{
 		Description: "required participant quotas must be represented in valid responses",
 		Condition: func(a *consensusAnalysis) bool {
-			return len(a.missingRequiredParticipants()) > 0
+			return len(a.missingRequired) > 0
 		},
 		Action: func(a *consensusAnalysis) *slotResult {
 			return &slotResult{
 				Error: common.NewErrConsensusLowParticipants(
-					"not enough required consensus participants: "+strings.Join(a.missingRequiredParticipants(), ", "),
+					"not enough required consensus participants: "+strings.Join(a.missingRequired, ", "),
 					a.participants(),
 					nil,
 				),

@@ -53,6 +53,7 @@ type consensusAnalysis struct {
 	leaderUpstream    common.Upstream
 	method            string // The RPC method being called (e.g., "eth_getTransactionCount")
 	waitCapped        bool
+	missingRequired   []string
 
 	// Cached computed values
 	cachedBestNonEmpty *responseGroup
@@ -168,11 +169,12 @@ func newConsensusAnalysisWithOptions(lg *zerolog.Logger, ctxOrExec any, config *
 	analysis.getBestError()
 	analysis.getBestByCount()
 	analysis.getBestBySize()
+	analysis.missingRequired = analysis.computeMissingRequiredParticipants()
 
 	return analysis
 }
 
-func (a *consensusAnalysis) missingRequiredParticipants() []string {
+func (a *consensusAnalysis) computeMissingRequiredParticipants() []string {
 	if a == nil || a.config == nil || len(a.config.requiredParticipants) == 0 {
 		return nil
 	}
