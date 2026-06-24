@@ -1207,6 +1207,34 @@ type GrpcUpstreamConfig struct {
 	Headers map[string]string `yaml:"headers,omitempty" json:"headers"`
 }
 
+func (c *GrpcUpstreamConfig) MarshalJSON() ([]byte, error) {
+	type grpcUpstreamConfigJSON struct {
+		Headers map[string]string `json:"headers,omitempty"`
+	}
+	return sonic.Marshal(grpcUpstreamConfigJSON{
+		Headers: redactHeaderValues(c.Headers),
+	})
+}
+
+func (c *GrpcUpstreamConfig) MarshalYAML() (interface{}, error) {
+	out := make(map[string]interface{})
+	if len(c.Headers) > 0 {
+		out["headers"] = redactHeaderValues(c.Headers)
+	}
+	return out, nil
+}
+
+func redactHeaderValues(headers map[string]string) map[string]string {
+	if len(headers) == 0 {
+		return nil
+	}
+	redacted := make(map[string]string, len(headers))
+	for key := range headers {
+		redacted[key] = "REDACTED"
+	}
+	return redacted
+}
+
 func (c *GrpcUpstreamConfig) Copy() *GrpcUpstreamConfig {
 	if c == nil {
 		return nil
