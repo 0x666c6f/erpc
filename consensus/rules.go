@@ -77,7 +77,7 @@ var consensusRules = []consensusRule{
 	{
 		Description: "required participant quotas must be represented in valid responses",
 		Condition: func(a *consensusAnalysis) bool {
-			return len(a.missingRequired) > 0
+			return len(a.missingRequired) > 0 && !a.hasPendingRequiredParticipants()
 		},
 		Action: func(a *consensusAnalysis) *slotResult {
 			return &slotResult{
@@ -894,6 +894,9 @@ var shortCircuitRules = []shortCircuitRule{
 		Description: "consensus-valid error meets agreement threshold -> short-circuit to error",
 		Reason:      "consensus_error_threshold",
 		Condition: func(w *slotResult, a *consensusAnalysis) bool {
+			if a.hasPendingRequiredParticipants() {
+				return false
+			}
 			best := a.getBestByCount()
 			if best == nil {
 				return false
@@ -927,6 +930,9 @@ var shortCircuitRules = []shortCircuitRule{
 		Description: "winner meets agreement threshold, is non-empty, and lead is unassailable (no possible tie with remaining)",
 		Reason:      "unassailable_lead",
 		Condition: func(w *slotResult, a *consensusAnalysis) bool {
+			if a.hasPendingRequiredParticipants() {
+				return false
+			}
 			// With remaining participants, avoid short-circuiting when a preference could still
 			// change the winner. In particular, when PreferLargerResponses is enabled, a later
 			// larger response can override a smaller above-threshold winner regardless of counts.

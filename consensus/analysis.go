@@ -217,6 +217,13 @@ func (a *consensusAnalysis) computeMissingRequiredParticipants() []string {
 	return missing
 }
 
+func (a *consensusAnalysis) hasPendingRequiredParticipants() bool {
+	if a == nil || a.config == nil || len(a.missingRequired) == 0 || a.waitCapped {
+		return false
+	}
+	return a.hasRemaining()
+}
+
 func (a *consensusAnalysis) hasRemaining() bool {
 	return a.config.maxParticipants > a.totalParticipants
 }
