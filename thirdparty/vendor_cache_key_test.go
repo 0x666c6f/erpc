@@ -39,9 +39,11 @@ func TestSecretCachePart_UsesStableOpaqueToken(t *testing.T) {
 	first := secretCachePart("apiKey", "secret-a")
 	second := secretCachePart("apiKey", "secret-a")
 	other := secretCachePart("apiKey", "secret-b")
+	otherName := secretCachePart("otherKey", "secret-a")
 
 	assert.Equal(t, first, second)
 	assert.NotEqual(t, first, other)
+	assert.NotEqual(t, first, otherName)
 	assert.Contains(t, first, "apiKey=secret:")
 	assert.NotContains(t, first, "secret-a")
 }

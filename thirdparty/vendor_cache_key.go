@@ -87,7 +87,7 @@ func secretCachePart(name string, value string) string {
 		return name + "="
 	}
 	mac := hmac.New(sha256.New, secretCacheKey)
-	_, _ = mac.Write([]byte(name + "\x00" + strconv.Itoa(len(value)) + "\x00" + value))
+	_, _ = fmt.Fprintf(mac, "%s\x00%d\x00%s", name, len(value), value)
 	return name + "=secret:" + hex.EncodeToString(mac.Sum(nil))[:24]
 }
 
