@@ -43,15 +43,18 @@
 
   function highlightValue(s) {
     if (!s) return "";
-    let v = s;
-    // strings (quoted)
-    v = v.replace(/("(?:\\.|[^"\\])*")/g, '<span class="tk-str">$1</span>');
-    // numbers + units (5s, 250ms, 12.5)
-    v = v.replace(/(?<![\w])(\d+(?:\.\d+)?(?:ms|s|m|h|kb|mb|gb)?)\b/gi,
-      '<span class="tk-num">$1</span>');
-    // booleans + null
-    v = v.replace(/\b(true|false|null|~)\b/g, '<span class="tk-bool">$1</span>');
-    return v;
+    const tokenRe = /("(?:\\.|[^"\\])*")|(?<![\w])(\d+(?:\.\d+)?(?:ms|s|m|h|kb|mb|gb)?)\b|\b(true|false|null|~)\b/gi;
+    let out = "";
+    let last = 0;
+    for (const m of s.matchAll(tokenRe)) {
+      out += esc(s.slice(last, m.index));
+      if (m[1]) out += `<span class="tk-str">${esc(m[1])}</span>`;
+      else if (m[2]) out += `<span class="tk-num">${esc(m[2])}</span>`;
+      else out += `<span class="tk-bool">${esc(m[3])}</span>`;
+      last = m.index + m[0].length;
+    }
+    out += esc(s.slice(last));
+    return out;
   }
   function inString(line, idx) {
     // naive: true if hash is inside a quoted region
