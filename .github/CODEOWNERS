@@ -1,7 +1,7 @@
 # Default ownership
-* @morpho-org/platform-engineers
+* @morpho-org/platform-engineers @0x666c6f
 
 # Helm charts migrated from morpho-infra-helm (2026-06-17)
-/helm/ @morpho-org/platform-engineers @morpho-org/api-engineers
-/validate-helm-charts.sh @morpho-org/platform-engineers
-/setup-hooks.sh @morpho-org/platform-engineers
+/helm/ @morpho-org/platform-engineers @morpho-org/api-engineers @0x666c6f
+/validate-helm-charts.sh @morpho-org/platform-engineers @0x666c6f
+/setup-hooks.sh @morpho-org/platform-engineers @0x666c6f

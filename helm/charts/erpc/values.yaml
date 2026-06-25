@@ -12,7 +12,7 @@ vault:
   secretsPath: "secret/data/erpc/secrets"
   jobImage:
     repository: 537124939463.dkr.ecr.eu-west-3.amazonaws.com/docker-hub/morphoorg/erpc-validator
-    tag: "0.0.77"
+    tag: "0.1.3"
     pullPolicy: IfNotPresent
   jobResources:
     requests:
@@ -38,7 +38,7 @@ vault:
 
 image:
   repository: 537124939463.dkr.ecr.eu-west-3.amazonaws.com/docker-hub/morphoorg/erpc
-  tag: "0.0.77"
+  tag: "0.1.3"
   pullPolicy: IfNotPresent
 
 imagePullSecrets: []
