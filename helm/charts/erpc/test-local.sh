@@ -192,7 +192,9 @@ if [ -n "${LABELS_SERVICE_API_KEY:-}" ] && [ "$LABELS_SERVICE_API_KEY" != "your-
             echo "✅ Authentication with proper secret parameter works"
         else
             echo "⚠️  Authentication secret parameter didn't work as expected"
-            echo "   Response: $auth_response_with_secret"
+            # Redact the API key in case the response (or a reflected error)
+            # echoes back the request URL containing the secret.
+            echo "   Response: ${auth_response_with_secret//$LABELS_SERVICE_API_KEY/***REDACTED***}"
         fi
     else
         echo "⚠️  Authentication might not be properly configured (no auth rejection detected)"
