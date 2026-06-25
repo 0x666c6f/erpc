@@ -192,7 +192,9 @@ if [ -n "${LABELS_SERVICE_API_KEY:-}" ] && [ "$LABELS_SERVICE_API_KEY" != "your-
             echo "✅ Authentication with proper secret parameter works"
         else
             echo "⚠️  Authentication secret parameter didn't work as expected"
-            echo "   Response: $auth_response_with_secret"
+            # Redact the API key in case the response (or a reflected error)
+            # echoes back the request URL containing the secret.
+            echo "   Response: ${auth_response_with_secret//$LABELS_SERVICE_API_KEY/***REDACTED***}"
         fi
     else
         echo "⚠️  Authentication might not be properly configured (no auth rejection detected)"
@@ -222,8 +224,8 @@ if echo "$response" | grep -q '"result"'; then
     log_count=$(echo "$response" | jq -r '.result | length' 2>/dev/null || echo "unknown")
     echo "✅ Arbitrum eth_getLogs test successful"
     echo "   Logs found: $log_count"
-    echo "   Block range: 0x1254048f (307,074,191) to 0x12558b2f (307,166,767)"
-    echo "   Range size: ~92,576 blocks"
+    echo "   Block range: 0x1254048f (307,496,079) to 0x12558b2f (307,596,079)"
+    echo "   Range size: 100,000 blocks"
 elif echo "$response" | grep -q '"error"'; then
     error_message=$(echo "$response" | jq -r '.error.message // .error' 2>/dev/null || echo "unknown")
     echo "⚠️  eth_getLogs returned error (expected for large ranges):"

@@ -39,10 +39,6 @@ if ! command -v helm &> /dev/null; then
     exit 1
 fi
 
-# Store the initial working directory
-INITIAL_DIR=$(pwd)
-export INITIAL_DIR
-
 # Set base directories to scan (erpc: base chart + prd env wrapper only)
 DIRS_TO_SCAN=("helm/charts/erpc" "helm/environments/prd/erpc")
 
@@ -80,7 +76,9 @@ export SKIP_VALIDATION_CHARTS
 process_chart() {
     local chart_path=$1
     local chart_name=$(basename "$chart_path")
-    local result_file=$(mktemp)
+    local result_dir=$(mktemp -d)
+    local lint_file="$result_dir/lint"
+    local template_file="$result_dir/template"
     local has_error=0
 
     # Store the absolute path to the chart
@@ -89,9 +87,9 @@ process_chart() {
     echo "Processing: ${chart_path}" >&2
 
     # Run helm lint
-    if ! helm lint "$chart_absolute_path" > "$result_file.lint" 2>&1; then
+    if ! helm lint "$chart_absolute_path" > "$lint_file" 2>&1; then
         echo -e "${RED}✗ Helm lint failed for ${chart_name}${NC}" >&2
-        cat "$result_file.lint" >&2
+        cat "$lint_file" >&2
         has_error=1
     else
         echo -e "${GREEN}✓ Helm lint passed for ${chart_name}${NC}" >&2
@@ -100,39 +98,39 @@ process_chart() {
     # Check if this chart should skip validation
     if should_skip_validation "$chart_name"; then
         echo -e "${YELLOW}⊘ Skipping kubeconform for ${chart_name} (database chart)${NC}" >&2
-        rm -f "$result_file" "$result_file.lint" "$result_file.template"
-        exit $has_error
+        rm -rf "$result_dir"
+        return $has_error
     fi
 
     # Build dependencies if Chart.yaml exists and has dependencies
     if [ -f "${chart_absolute_path}/Chart.yaml" ]; then
         if grep -q "dependencies:" "${chart_absolute_path}/Chart.yaml"; then
-            cd "$chart_absolute_path"
-            if ! helm dependency update > /dev/null 2>&1; then
+            if ! helm dependency update "$chart_absolute_path" > /dev/null 2>&1; then
                 echo -e "${RED}✗ Dependency update failed for ${chart_name}${NC}" >&2
-                cd "$INITIAL_DIR"
-                rm -f "$result_file" "$result_file.lint" "$result_file.template"
-                exit 1
+                rm -rf "$result_dir"
+                return 1
             fi
         fi
 
-        # Run template validation
-        cd "$chart_absolute_path"
-        if ! helm template . 2>/dev/null | kubeconform --ignore-missing-schemas --summary --skip "$CUSTOM_RESOURCES" > "$result_file.template" 2>&1; then
+        # Run template validation: render the chart and validate the
+        # resulting manifests with kubeconform. The pipeline's exit status
+        # reflects kubeconform (the last command), which is what we check.
+        if ! helm template "$chart_absolute_path" 2>/dev/null \
+            | kubeconform --ignore-missing-schemas --summary --skip "$CUSTOM_RESOURCES" \
+                > "$template_file" 2>&1; then
             echo -e "${RED}✗ Kubeconform failed for ${chart_name}${NC}" >&2
-            cat "$result_file.template" >&2
+            cat "$template_file" >&2
             has_error=1
         else
             echo -e "${GREEN}✓ Kubeconform passed for ${chart_name}${NC}" >&2
         fi
-        cd "$INITIAL_DIR"
     else
         echo -e "${RED}No Chart.yaml found in ${chart_path}${NC}" >&2
         has_error=1
     fi
 
-    rm -f "$result_file" "$result_file.lint" "$result_file.template"
-    exit $has_error
+    rm -rf "$result_dir"
+    return $has_error
 }
 
 # Export for parallel
