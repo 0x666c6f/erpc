@@ -101,7 +101,7 @@ process_chart() {
     if should_skip_validation "$chart_name"; then
         echo -e "${YELLOW}⊘ Skipping kubeconform for ${chart_name} (database chart)${NC}" >&2
         rm -f "$result_file" "$result_file.lint" "$result_file.template"
-        exit $has_error
+        return $has_error
     fi
 
     # Build dependencies if Chart.yaml exists and has dependencies
@@ -112,7 +112,7 @@ process_chart() {
                 echo -e "${RED}✗ Dependency update failed for ${chart_name}${NC}" >&2
                 cd "$INITIAL_DIR"
                 rm -f "$result_file" "$result_file.lint" "$result_file.template"
-                exit 1
+                return 1
             fi
         fi
 
@@ -132,7 +132,7 @@ process_chart() {
     fi
 
     rm -f "$result_file" "$result_file.lint" "$result_file.template"
-    exit $has_error
+    return $has_error
 }
 
 # Export for parallel
