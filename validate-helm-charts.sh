@@ -116,9 +116,13 @@ process_chart() {
             fi
         fi
 
-        # Run template validation
+        # Run template validation: render the chart and validate the
+        # resulting manifests with kubeconform. The pipeline's exit status
+        # reflects kubeconform (the last command), which is what we check.
         cd "$chart_absolute_path"
-        if ! helm template . 2>/dev/null | kubeconform --ignore-missing-schemas --summary --skip "$CUSTOM_RESOURCES" > "$result_file.template" 2>&1; then
+        if ! helm template . 2>/dev/null \
+            | kubeconform --ignore-missing-schemas --summary --skip "$CUSTOM_RESOURCES" \
+                > "$result_file.template" 2>&1; then
             echo -e "${RED}✗ Kubeconform failed for ${chart_name}${NC}" >&2
             cat "$result_file.template" >&2
             has_error=1
