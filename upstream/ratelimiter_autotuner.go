@@ -1,6 +1,7 @@
 package upstream
 
 import (
+	"strings"
 	"sync"
 	"time"
 
@@ -117,6 +118,10 @@ func (arl *RateLimitAutoTuner) maybeAdjust(method string) {
 	}
 
 	for _, rule := range rules {
+		if rule == nil || rule.Config == nil || rule.Config.Method != method || !isAutoTunableExactMethod(rule.Config.Method) {
+			continue
+		}
+
 		var factor float64
 		if direction == "decrease" {
 			factor = arl.decreaseFactor
@@ -139,4 +144,8 @@ func (arl *RateLimitAutoTuner) maybeAdjust(method string) {
 			Str("direction", direction).
 			Msg("auto-tuner: adjusting rate limit budget")
 	}
+}
+
+func isAutoTunableExactMethod(method string) bool {
+	return method != "" && !strings.ContainsAny(method, "*|&!() ")
 }
