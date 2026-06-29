@@ -19,7 +19,7 @@ echo
 
 echo "Top-level"
 if [[ $in_git -eq 1 ]]; then
-  git ls-files | awk -F/ '{print $1}' | sort -u | sed 's/^/- /'
+  git ls-files | awk -F/ '{print $1}' | LC_ALL=C sort -f -u | sed 's/^/- /'
 else
   ls -1 | sed 's/^/- /'
 fi
