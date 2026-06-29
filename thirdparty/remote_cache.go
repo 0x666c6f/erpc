@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/erpc/erpc/util"
 	"github.com/rs/zerolog"
 )
 
@@ -189,6 +190,7 @@ func (c *RemoteDataCache[T]) TriggerAsyncRefresh(
 	c.refreshMu.Unlock()
 
 	go func() {
+		logCacheKey := util.RedactEndpoint(cacheKey)
 		defer func() {
 			c.refreshMu.Lock()
 			delete(c.inflight, cacheKey)
@@ -197,7 +199,7 @@ func (c *RemoteDataCache[T]) TriggerAsyncRefresh(
 				logger.Error().
 					Interface("panic", rec).
 					Str("vendor", c.loggerName).
-					Str("cacheKey", cacheKey).
+					Str("cacheKey", logCacheKey).
 					Msg("panic recovered during vendor remote-data async refresh")
 			}
 		}()
@@ -213,7 +215,7 @@ func (c *RemoteDataCache[T]) TriggerAsyncRefresh(
 			logger.Warn().
 				Err(err).
 				Str("vendor", c.loggerName).
-				Str("cacheKey", cacheKey).
+				Str("cacheKey", logCacheKey).
 				Msg("vendor remote-data refresh failed; keeping previous snapshot")
 			return
 		}
