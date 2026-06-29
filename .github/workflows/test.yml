@@ -60,6 +60,8 @@ jobs:
           cache: false
       - name: Install dependencies
         run: make setup
+      - name: Validate Go modules
+        run: git diff --exit-code go.mod go.sum
       - name: Build
         run: make build
       - name: Test packages with the Go CLI

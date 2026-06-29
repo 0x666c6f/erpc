@@ -28,7 +28,7 @@ Codex + review agents. eRPC repo (Go + TS + infra/config).
 - Maintenance triggers: `review/autonomy.md`
 - Mechanical scripts: `scripts/agent-harness/*.sh`
 - Artifact boundary: `artifacts/agent/`
-- Scheduled loops: `.github/workflows/agent-automations.yml`
+- CI validation: `.github/workflows/test.yml`
 
 ## Review Depth Protocol (Repo-Aware)
 

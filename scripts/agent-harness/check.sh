@@ -16,8 +16,6 @@ required_files=(
   review/runbooks/bugfix.md
   review/runbooks/feature.md
   review/runbooks/review.md
-  .github/workflows/agent-harness.yml
-  .github/workflows/agent-automations.yml
   scripts/review-repo-map.sh
   scripts/review-impact-map.sh
   scripts/agent-harness/update-repo-map.sh
