@@ -3,7 +3,9 @@ package simulator
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -41,9 +43,13 @@ import (
 //	{"kind":"error","msg":"..."}              — generic error report
 func WSHandler(o *Orchestrator) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !isLoopbackHost(r.Host) || !isLoopbackRemoteAddr(r.RemoteAddr) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+
 		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
-			InsecureSkipVerify: true, // local-only tool; origin not enforced
-			CompressionMode:    websocket.CompressionDisabled,
+			CompressionMode: websocket.CompressionDisabled,
 		})
 		if err != nil {
 			return
@@ -61,6 +67,28 @@ func WSHandler(o *Orchestrator) http.Handler {
 		}
 		sess.run(r.Context())
 	})
+}
+
+func isLoopbackHost(hostport string) bool {
+	host := hostport
+	if h, _, err := net.SplitHostPort(hostport); err == nil {
+		host = h
+	}
+	host = strings.Trim(host, "[]")
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+func isLoopbackRemoteAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		host = addr
+	}
+	ip := net.ParseIP(strings.Trim(host, "[]"))
+	return ip != nil && ip.IsLoopback()
 }
 
 // Session is one connected WebSocket. Three goroutines:
