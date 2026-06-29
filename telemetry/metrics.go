@@ -605,15 +605,14 @@ var (
 		Help:      "Current number of in-flight remote rate-limit checks per budget.",
 	}, []string{"budget"})
 
-	// MetricRateLimiterRemoteAdmissionSheddedTotal is a counter of fail-open events
-	// caused by the per-budget admission semaphore being full. This is intentionally
-	// distinct from "limit_timeout" in MetricRateLimiterFailopenTotal because it
-	// indicates load shedding (we never even attempted the remote call) vs the
-	// remote being slow.
+	// MetricRateLimiterRemoteAdmissionSheddedTotal is a counter of load-shed
+	// denials caused by the per-budget admission semaphore being full. This is
+	// intentionally distinct from "limit_timeout" in MetricRateLimiterFailopenTotal
+	// because we never even attempted the remote call.
 	MetricRateLimiterRemoteAdmissionSheddedTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "erpc",
 		Name:      "rate_limiter_remote_admission_shedded_total",
-		Help:      "Total number of remote rate-limit checks fail-opened because the admission semaphore was full.",
+		Help:      "Total number of remote rate-limit checks denied because the admission semaphore was full.",
 	}, []string{"budget"})
 
 	MetricCacheSetSuccessTotal = promauto.NewCounterVec(prometheus.CounterOpts{
