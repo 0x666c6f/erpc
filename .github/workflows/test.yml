@@ -68,6 +68,8 @@ jobs:
         run: |
           go test ./erpc -run '^(TestConsensusPolicy|TestConsensusPolicy_DSLScenarios)$' -count=1 -parallel 1 -timeout 3m -v
           make test-fallback-config
+      - name: Validate Go modules
+        run: git diff --exit-code -- go.mod go.sum
 
   security:
     runs-on: ubuntu-24.04
