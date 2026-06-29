@@ -58,7 +58,7 @@ func (v *RepositoryVendor) SupportsNetwork(ctx context.Context, logger *zerolog.
 		recheckInterval = DefaultRecheckInterval
 	}
 
-	chains, ok := v.resolveChains(logger, urlStr, recheckInterval)
+	chains, ok := v.resolveChains(ctx, logger, urlStr, recheckInterval)
 	if !ok {
 		return false, ErrRemoteCacheCold
 	}
@@ -69,10 +69,11 @@ func (v *RepositoryVendor) SupportsNetwork(ctx context.Context, logger *zerolog.
 // resolveChains does a lock-free Lookup, kicks off an async refresh on
 // staleness, and returns (data, true) on hit or (nil, false) on cold start.
 // See remote_cache.go for the request-path safety rule.
-func (v *RepositoryVendor) resolveChains(logger *zerolog.Logger, urlStr string, recheckInterval time.Duration) (map[int64][]string, bool) {
-	chains, fresh := v.cache.Lookup(urlStr, recheckInterval)
+func (v *RepositoryVendor) resolveChains(ctx context.Context, logger *zerolog.Logger, urlStr string, recheckInterval time.Duration) (map[int64][]string, bool) {
+	cacheKey := v.getCacheKey(urlStr, providerIDFromContext(ctx))
+	chains, fresh := v.cache.Lookup(cacheKey, recheckInterval)
 	if !fresh {
-		v.cache.TriggerAsyncRefresh(logger, urlStr, func(ctx context.Context) (map[int64][]string, error) {
+		v.cache.TriggerAsyncRefresh(logger, cacheKey, func(ctx context.Context) (map[int64][]string, error) {
 			return fetchRemoteData(ctx, urlStr)
 		})
 	}
@@ -80,6 +81,14 @@ func (v *RepositoryVendor) resolveChains(logger *zerolog.Logger, urlStr string, 
 		return nil, false
 	}
 	return chains, true
+}
+
+func (v *RepositoryVendor) getCacheKey(urlStr string, providerID string) string {
+	return vendorCapabilityCacheKey(
+		v.Name(),
+		providerID,
+		cachePart("repositoryUrl", urlStr),
+	)
 }
 
 func (v *RepositoryVendor) GenerateConfigs(ctx context.Context, logger *zerolog.Logger, upstream *common.UpstreamConfig, settings common.VendorSettings) ([]*common.UpstreamConfig, error) {
@@ -109,7 +118,7 @@ func (v *RepositoryVendor) GenerateConfigs(ctx context.Context, logger *zerolog.
 	if !ok {
 		recheckInterval = DefaultRecheckInterval
 	}
-	chains, ok := v.resolveChains(logger, urlStr, recheckInterval)
+	chains, ok := v.resolveChains(ctx, logger, urlStr, recheckInterval)
 	if !ok {
 		return nil, ErrRemoteCacheCold
 	}

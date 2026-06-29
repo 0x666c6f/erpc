@@ -145,7 +145,7 @@ func (v *QuicknodeVendor) SupportsNetwork(ctx context.Context, logger *zerolog.L
 		recheckInterval = interval
 	}
 
-	endpoints, ok := v.resolveEndpoints(logger, apiKey, recheckInterval, settings)
+	endpoints, ok := v.resolveEndpoints(ctx, logger, apiKey, recheckInterval, settings)
 	if !ok {
 		return false, ErrRemoteCacheCold
 	}
@@ -183,7 +183,7 @@ func (v *QuicknodeVendor) GenerateConfigs(ctx context.Context, logger *zerolog.L
 			recheckInterval = interval
 		}
 
-		endpoints, ok := v.resolveEndpoints(logger, apiKey, recheckInterval, settings)
+		endpoints, ok := v.resolveEndpoints(ctx, logger, apiKey, recheckInterval, settings)
 		if !ok {
 			return nil, ErrRemoteCacheCold
 		}
@@ -210,11 +210,12 @@ func (v *QuicknodeVendor) GenerateConfigs(ctx context.Context, logger *zerolog.L
 // resolveEndpoints does a lock-free Lookup, kicks off an async refresh on
 // staleness, and returns (endpoints, true) on hit or (nil, false) on cold
 // start. See remote_cache.go for the request-path safety rule.
-func (v *QuicknodeVendor) resolveEndpoints(logger *zerolog.Logger, apiKey string, recheckInterval time.Duration, settings common.VendorSettings) ([]*QuicknodeEndpoint, bool) {
-	endpoints, fresh := v.cache.Lookup(apiKey, recheckInterval)
+func (v *QuicknodeVendor) resolveEndpoints(ctx context.Context, logger *zerolog.Logger, apiKey string, recheckInterval time.Duration, settings common.VendorSettings) ([]*QuicknodeEndpoint, bool) {
+	filterParams := v.extractFilterParams(settings)
+	cacheKey := v.getCacheKey(apiKey, filterParams, providerIDFromContext(ctx))
+	endpoints, fresh := v.cache.Lookup(cacheKey, recheckInterval)
 	if !fresh {
-		filterParams := v.extractFilterParams(settings)
-		v.cache.TriggerAsyncRefresh(logger, apiKey, func(ctx context.Context) ([]*QuicknodeEndpoint, error) {
+		v.cache.TriggerAsyncRefresh(logger, cacheKey, func(ctx context.Context) ([]*QuicknodeEndpoint, error) {
 			fetched, err := v.fetchEndpoints(ctx, apiKey, filterParams)
 			if err != nil {
 				return nil, err
@@ -231,6 +232,19 @@ func (v *QuicknodeVendor) resolveEndpoints(logger *zerolog.Logger, apiKey string
 		return nil, false
 	}
 	return endpoints, true
+}
+
+func (v *QuicknodeVendor) getCacheKey(apiKey string, params *QuicknodeFilterParams, providerID string) string {
+	if params == nil {
+		params = &QuicknodeFilterParams{}
+	}
+	return vendorCapabilityCacheKey(
+		v.Name(),
+		providerID,
+		secretCachePart("apiKey", apiKey),
+		intSliceCachePart("tagIds", params.TagIDs),
+		stringSliceCachePart("tagLabels", params.TagLabels),
+	)
 }
 
 func (v *QuicknodeVendor) fetchEndpoints(ctx context.Context, apiKey string, filterParams *QuicknodeFilterParams) ([]*QuicknodeEndpoint, error) {
