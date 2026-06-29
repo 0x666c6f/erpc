@@ -49,7 +49,7 @@ func TestQuicknodeGenerateConfigs(t *testing.T) {
 		"apiKey":          "test-key",
 		"recheckInterval": time.Hour,
 	}
-	cacheKey := vendor.getCacheKey("test-key", &QuicknodeFilterParams{}, settings)
+	cacheKey := vendor.getCacheKey("test-key", &QuicknodeFilterParams{}, "")
 	vendor.cache.snapshot.Store(&remoteCacheSnapshot[[]*QuicknodeEndpoint]{
 		values: map[string][]*QuicknodeEndpoint{cacheKey: {
 			{
@@ -83,7 +83,7 @@ func TestQuicknodeCacheKeyReusesEndpointSnapshotAcrossNetworks(t *testing.T) {
 		"apiKey":          "test-key",
 		"recheckInterval": time.Hour,
 	}
-	cacheKey := vendor.getCacheKey("test-key", &QuicknodeFilterParams{}, settings)
+	cacheKey := vendor.getCacheKey("test-key", &QuicknodeFilterParams{}, "")
 	vendor.cache.snapshot.Store(&remoteCacheSnapshot[[]*QuicknodeEndpoint]{
 		values: map[string][]*QuicknodeEndpoint{cacheKey: {
 			{ID: "1", HttpUrl: "https://mainnet.quiknode.pro/secret", ChainID: 1},
@@ -104,13 +104,10 @@ func TestQuicknodeCacheKeyReusesEndpointSnapshotAcrossNetworks(t *testing.T) {
 
 func TestQuicknodeCacheKey_DoesNotCollideAcrossTags(t *testing.T) {
 	vendor := CreateQuicknodeVendor().(*QuicknodeVendor)
-	settings := common.VendorSettings{
-		vendorSettingProviderID: "quicknode-provider",
-	}
 
-	base := vendor.getCacheKey("test-key", &QuicknodeFilterParams{TagIDs: []int{1}, TagLabels: []string{"archive"}}, settings)
-	differentTagIDs := vendor.getCacheKey("test-key", &QuicknodeFilterParams{TagIDs: []int{2}, TagLabels: []string{"archive"}}, settings)
-	differentTagLabels := vendor.getCacheKey("test-key", &QuicknodeFilterParams{TagIDs: []int{1}, TagLabels: []string{"realtime"}}, settings)
+	base := vendor.getCacheKey("test-key", &QuicknodeFilterParams{TagIDs: []int{1}, TagLabels: []string{"archive"}}, "quicknode-provider")
+	differentTagIDs := vendor.getCacheKey("test-key", &QuicknodeFilterParams{TagIDs: []int{2}, TagLabels: []string{"archive"}}, "quicknode-provider")
+	differentTagLabels := vendor.getCacheKey("test-key", &QuicknodeFilterParams{TagIDs: []int{1}, TagLabels: []string{"realtime"}}, "quicknode-provider")
 
 	assert.NotEqual(t, base, differentTagIDs)
 	assert.NotEqual(t, base, differentTagLabels)

@@ -14,7 +14,6 @@ type Provider struct {
 	logger           *zerolog.Logger
 	config           *common.ProviderConfig
 	vendor           common.Vendor
-	vendorSettings   common.VendorSettings
 	upstreamDefaults *common.UpstreamConfig
 }
 
@@ -23,7 +22,6 @@ func NewProvider(logger *zerolog.Logger, cfg *common.ProviderConfig, vendor comm
 		logger:           logger,
 		config:           cfg,
 		vendor:           vendor,
-		vendorSettings:   withProviderSettings(cfg.Settings, cfg.Id),
 		upstreamDefaults: upstreamDefaults,
 	}
 }
@@ -50,7 +48,7 @@ func (p *Provider) SupportsNetwork(ctx context.Context, networkId string) (bool,
 		return false, nil
 	}
 
-	return p.vendor.SupportsNetwork(ctx, p.logger, p.settingsForVendor(), networkId)
+	return p.vendor.SupportsNetwork(contextWithProviderID(ctx, p.config.Id), p.logger, p.settingsForVendor(), networkId)
 }
 
 func (p *Provider) GenerateUpstreamConfigs(ctx context.Context, logger *zerolog.Logger, networkId string) ([]*common.UpstreamConfig, error) {
@@ -58,7 +56,7 @@ func (p *Provider) GenerateUpstreamConfigs(ctx context.Context, logger *zerolog.
 	if err != nil {
 		return nil, err
 	}
-	upsCfgs, err := p.vendor.GenerateConfigs(ctx, logger, upsCfg, p.settingsForVendor())
+	upsCfgs, err := p.vendor.GenerateConfigs(contextWithProviderID(ctx, p.config.Id), logger, upsCfg, p.settingsForVendor())
 	if err != nil {
 		return nil, err
 	}
@@ -67,7 +65,7 @@ func (p *Provider) GenerateUpstreamConfigs(ctx context.Context, logger *zerolog.
 }
 
 func (p *Provider) settingsForVendor() common.VendorSettings {
-	return p.vendorSettings
+	return p.config.Settings
 }
 
 func (p *Provider) expandEnvVars(upsCfgs []*common.UpstreamConfig) {

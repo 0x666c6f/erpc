@@ -1,6 +1,7 @@
 package thirdparty
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -10,13 +11,9 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-
-	"github.com/erpc/erpc/common"
 )
 
-const (
-	vendorSettingProviderID = "__erpc_provider_id"
-)
+type vendorProviderIDContextKey struct{}
 
 var (
 	vendorCacheKeySeed = maphash.MakeSeed()
@@ -31,30 +28,27 @@ func newSecretCacheKey() []byte {
 	return key
 }
 
-func withProviderSettings(settings common.VendorSettings, providerID string) common.VendorSettings {
-	if settings == nil {
-		return nil
+func contextWithProviderID(ctx context.Context, providerID string) context.Context {
+	if providerID == "" {
+		return ctx
 	}
-	copied := make(common.VendorSettings, len(settings)+1)
-	for k, v := range settings {
-		copied[k] = v
+	if ctx == nil {
+		ctx = context.Background()
 	}
-	copied[vendorSettingProviderID] = providerID
-	return copied
+	return context.WithValue(ctx, vendorProviderIDContextKey{}, providerID)
 }
 
-func vendorSettingString(settings common.VendorSettings, key string) string {
-	if settings == nil {
+func providerIDFromContext(ctx context.Context) string {
+	if ctx == nil {
 		return ""
 	}
-	if value, ok := settings[key].(string); ok {
-		return value
+	if providerID, ok := ctx.Value(vendorProviderIDContextKey{}).(string); ok {
+		return providerID
 	}
 	return ""
 }
 
-func vendorCapabilityCacheKey(vendorName string, settings common.VendorSettings, parts ...string) string {
-	providerID := vendorSettingString(settings, vendorSettingProviderID)
+func vendorCapabilityCacheKey(vendorName string, providerID string, parts ...string) string {
 	if providerID == "" {
 		providerID = "standalone"
 	}

@@ -89,7 +89,7 @@ func (v *ChainstackVendor) SupportsNetwork(ctx context.Context, logger *zerolog.
 	if interval, ok := settings["recheckInterval"].(time.Duration); ok {
 		recheckInterval = interval
 	}
-	nodes, ok := v.resolveNodes(logger, apiKey, settings, recheckInterval)
+	nodes, ok := v.resolveNodes(ctx, logger, apiKey, settings, recheckInterval)
 	if !ok {
 		return false, ErrRemoteCacheCold
 	}
@@ -104,9 +104,9 @@ func (v *ChainstackVendor) SupportsNetwork(ctx context.Context, logger *zerolog.
 // resolveNodes does a lock-free Lookup, kicks off an async refresh on
 // staleness, and returns (nodes, true) on hit or (nil, false) on cold start.
 // See remote_cache.go for the request-path safety rule.
-func (v *ChainstackVendor) resolveNodes(logger *zerolog.Logger, apiKey string, settings common.VendorSettings, recheckInterval time.Duration) ([]*ChainstackNode, bool) {
+func (v *ChainstackVendor) resolveNodes(ctx context.Context, logger *zerolog.Logger, apiKey string, settings common.VendorSettings, recheckInterval time.Duration) ([]*ChainstackNode, bool) {
 	filterParams := v.extractFilterParams(settings)
-	cacheKey := v.getCacheKey(apiKey, filterParams, settings)
+	cacheKey := v.getCacheKey(apiKey, filterParams, providerIDFromContext(ctx))
 	nodes, fresh := v.cache.Lookup(cacheKey, recheckInterval)
 	if !fresh {
 		v.cache.TriggerAsyncRefresh(logger, cacheKey, func(ctx context.Context) ([]*ChainstackNode, error) {
@@ -151,7 +151,7 @@ func (v *ChainstackVendor) GenerateConfigs(ctx context.Context, logger *zerolog.
 			recheckInterval = interval
 		}
 
-		nodes, ok := v.resolveNodes(logger, apiKey, settings, recheckInterval)
+		nodes, ok := v.resolveNodes(ctx, logger, apiKey, settings, recheckInterval)
 		if !ok {
 			return nil, ErrRemoteCacheCold
 		}
@@ -208,13 +208,13 @@ func (v *ChainstackVendor) extractFilterParams(settings common.VendorSettings) *
 	return params
 }
 
-func (v *ChainstackVendor) getCacheKey(apiKey string, params *ChainstackFilterParams, settings common.VendorSettings) string {
+func (v *ChainstackVendor) getCacheKey(apiKey string, params *ChainstackFilterParams, providerID string) string {
 	if params == nil {
 		params = &ChainstackFilterParams{}
 	}
 	return vendorCapabilityCacheKey(
 		v.Name(),
-		settings,
+		providerID,
 		secretCachePart("apiKey", apiKey),
 		cachePart("project", params.Project),
 		cachePart("organization", params.Organization),

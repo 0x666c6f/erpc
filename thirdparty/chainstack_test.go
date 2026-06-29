@@ -219,14 +219,13 @@ func TestChainstackCacheKey(t *testing.T) {
 		name          string
 		apiKey        string
 		params        *ChainstackFilterParams
-		settings      common.VendorSettings
+		providerID    string
 		expectedParts []string
 	}{
 		{
-			name:     "no filters",
-			apiKey:   "test-key",
-			params:   &ChainstackFilterParams{},
-			settings: common.VendorSettings{},
+			name:   "no filters",
+			apiKey: "test-key",
+			params: &ChainstackFilterParams{},
 			expectedParts: []string{
 				"chainstack",
 				"provider=standalone",
@@ -243,9 +242,7 @@ func TestChainstackCacheKey(t *testing.T) {
 				Provider:     "aws",
 				Type:         "dedicated",
 			},
-			settings: common.VendorSettings{
-				vendorSettingProviderID: "provider-a",
-			},
+			providerID: "provider-a",
 			expectedParts: []string{
 				"chainstack",
 				"provider=provider-a",
@@ -259,7 +256,6 @@ func TestChainstackCacheKey(t *testing.T) {
 				Project: "proj-123",
 				Type:    "shared",
 			},
-			settings: common.VendorSettings{},
 			expectedParts: []string{
 				"chainstack",
 				"provider=standalone",
@@ -270,7 +266,7 @@ func TestChainstackCacheKey(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := vendor.getCacheKey(tt.apiKey, tt.params, tt.settings)
+			result := vendor.getCacheKey(tt.apiKey, tt.params, tt.providerID)
 			for _, part := range tt.expectedParts {
 				assert.Contains(t, result, part)
 			}
@@ -283,11 +279,10 @@ func TestChainstackCacheKey(t *testing.T) {
 func TestChainstackCacheKey_DoesNotCollideAcrossFiltersOrProviders(t *testing.T) {
 	vendor := CreateChainstackVendor().(*ChainstackVendor)
 	apiKey := "test-key"
-	baseSettings := common.VendorSettings{vendorSettingProviderID: "provider-a"}
-	base := vendor.getCacheKey(apiKey, &ChainstackFilterParams{Project: "project-a"}, baseSettings)
+	base := vendor.getCacheKey(apiKey, &ChainstackFilterParams{Project: "project-a"}, "provider-a")
 
-	differentFilter := vendor.getCacheKey(apiKey, &ChainstackFilterParams{Project: "project-b"}, baseSettings)
-	differentProvider := vendor.getCacheKey(apiKey, &ChainstackFilterParams{Project: "project-a"}, common.VendorSettings{vendorSettingProviderID: "provider-b"})
+	differentFilter := vendor.getCacheKey(apiKey, &ChainstackFilterParams{Project: "project-b"}, "provider-a")
+	differentProvider := vendor.getCacheKey(apiKey, &ChainstackFilterParams{Project: "project-a"}, "provider-b")
 
 	assert.NotEqual(t, base, differentFilter)
 	assert.NotEqual(t, base, differentProvider)

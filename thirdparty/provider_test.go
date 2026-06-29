@@ -127,12 +127,13 @@ func TestProvider_SupportsNetwork_PassesProviderSettings(t *testing.T) {
 
 	mockVendor.On(
 		"SupportsNetwork",
-		mock.Anything,
+		mock.MatchedBy(func(ctx context.Context) bool {
+			return providerIDFromContext(ctx) == "provider-a"
+		}),
 		mock.Anything,
 		mock.MatchedBy(func(settings common.VendorSettings) bool {
 			captured = settings
-			return settings["apiKey"] == "secret" &&
-				settings[vendorSettingProviderID] == "provider-a"
+			return settings["apiKey"] == "secret"
 		}),
 		"evm:1",
 	).Return(true, nil).Once()
@@ -142,10 +143,8 @@ func TestProvider_SupportsNetwork_PassesProviderSettings(t *testing.T) {
 	assert.NoError(t, err)
 	assert.True(t, result)
 	mockVendor.AssertExpectations(t)
-	assert.NotContains(t, config.Settings, vendorSettingProviderID)
-
-	captured["apiKey"] = "mutated"
-	assert.Equal(t, "secret", config.Settings["apiKey"])
+	assert.Equal(t, common.VendorSettings{"apiKey": "secret"}, config.Settings)
+	assert.Equal(t, common.VendorSettings{"apiKey": "secret"}, captured)
 }
 
 func TestProvider_GenerateUpstreamConfigs_PreservesNilVendorSettings(t *testing.T) {
