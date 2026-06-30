@@ -14,17 +14,30 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestWaitCap_MaxWaitOnResult_BoundsTailLatency verifies that once one
-// non-empty response arrives, the analyzer resolves within maxWaitOnResult
-// even if a sibling participant is still running.
+func waitForStragglerOrCancel(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+// TestWaitCap_MaxWaitOnResult_BoundsTailLatency verifies that once enough
+// non-empty responses arrive to satisfy the threshold, the analyzer does not
+// wait for an unrelated straggler.
 func TestWaitCap_MaxWaitOnResult_BoundsTailLatency(t *testing.T) {
 	logger := zerolog.New(zerolog.NewTestWriter(t))
 
 	pol := newBuilder().
 		WithLogger(&logger).
 		WithMaxParticipants(3).
-		WithAgreementThreshold(3). // require 3 to disable short-circuit
+		WithAgreementThreshold(2).
 		WithLowParticipantsBehavior(common.ConsensusLowParticipantsBehaviorAcceptMostCommonValidResult).
+		WithPreferLargerResponses(true).
 		WithMaxWaitOnResult(common.NewStaticDuration(100 * time.Millisecond)).
 		Build()
 
@@ -34,7 +47,7 @@ func TestWaitCap_MaxWaitOnResult_BoundsTailLatency(t *testing.T) {
 
 	var slot atomic.Int32
 	start := time.Now()
-	resp, err := pol.Run(ctx, req, func(_ context.Context, _ *common.NormalizedRequest) (*common.NormalizedResponse, error) {
+	resp, err := pol.Run(ctx, req, func(ctx context.Context, _ *common.NormalizedRequest) (*common.NormalizedResponse, error) {
 		idx := slot.Add(1)
 		switch idx {
 		case 1:
@@ -46,7 +59,9 @@ func TestWaitCap_MaxWaitOnResult_BoundsTailLatency(t *testing.T) {
 			return validResponseWithValue("0xfast"), nil
 		default:
 			// slow straggler — exceeds the cap, should be cancelled
-			time.Sleep(2 * time.Second)
+			if err := waitForStragglerOrCancel(ctx, 2*time.Second); err != nil {
+				return nil, err
+			}
 			return validResponseWithValue("0xslow"), nil
 		}
 	})
@@ -54,8 +69,46 @@ func TestWaitCap_MaxWaitOnResult_BoundsTailLatency(t *testing.T) {
 
 	require.NoError(t, err)
 	require.NotNil(t, resp)
+	assert.GreaterOrEqual(t, elapsed, 80*time.Millisecond,
+		"test must exercise maxWaitOnResult instead of short-circuiting before the cap")
 	assert.Less(t, elapsed, 800*time.Millisecond,
 		"wait cap must bound elapsed time well below the straggler's 2s")
+}
+
+func TestWaitCap_MaxWaitOnResult_FailsClosedBelowThreshold(t *testing.T) {
+	logger := zerolog.New(zerolog.NewTestWriter(t))
+
+	pol := newBuilder().
+		WithLogger(&logger).
+		WithMaxParticipants(3).
+		WithAgreementThreshold(2).
+		WithLowParticipantsBehavior(common.ConsensusLowParticipantsBehaviorAcceptMostCommonValidResult).
+		WithMaxWaitOnResult(common.NewStaticDuration(50 * time.Millisecond)).
+		Build()
+
+	req := newTestRequest()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var slot atomic.Int32
+	start := time.Now()
+	resp, err := pol.Run(ctx, req, func(ctx context.Context, _ *common.NormalizedRequest) (*common.NormalizedResponse, error) {
+		idx := slot.Add(1)
+		if idx == 1 {
+			return validResponseWithValue("0xfast"), nil
+		}
+		if err := waitForStragglerOrCancel(ctx, 2*time.Second); err != nil {
+			return nil, err
+		}
+		return validResponseWithValue("0xfast"), nil
+	})
+	elapsed := time.Since(start)
+
+	require.Error(t, err)
+	require.Nil(t, resp)
+	assert.True(t, common.HasErrorCode(err, common.ErrCodeConsensusLowParticipants), "got: %v", err)
+	assert.Less(t, elapsed, 800*time.Millisecond,
+		"wait cap should still bound latency, but must fail closed below threshold")
 }
 
 func TestWaitCap_MaxWaitOnResult_ReleasesLateResponses(t *testing.T) {
@@ -100,8 +153,9 @@ func TestWaitCap_MaxWaitOnResult_ReleasesLateResponses(t *testing.T) {
 	})
 	elapsed := time.Since(start)
 
-	require.NoError(t, err)
-	require.NotNil(t, resp)
+	require.Error(t, err)
+	require.Nil(t, resp)
+	assert.True(t, common.HasErrorCode(err, common.ErrCodeConsensusLowParticipants), "got: %v", err)
 	require.Less(t, elapsed, 500*time.Millisecond,
 		"maxWaitOnResult must return before slow participant finishes")
 	require.Equal(t, int32(0), slowBodyClosed.Load(), "late response should not be released before it exists")
@@ -111,6 +165,49 @@ func TestWaitCap_MaxWaitOnResult_ReleasesLateResponses(t *testing.T) {
 	require.Eventually(t, func() bool {
 		return slowBodyClosed.Load() == 1
 	}, 5*time.Second, 10*time.Millisecond, "late post-wait-cap response should be released exactly once")
+}
+
+func TestWaitCap_DoesNotReplaceShortCircuitWinner(t *testing.T) {
+	logger := zerolog.New(zerolog.NewTestWriter(t))
+
+	pol := newBuilder().
+		WithLogger(&logger).
+		WithMaxParticipants(3).
+		WithAgreementThreshold(2).
+		WithMaxWaitOnResult(common.NewStaticDuration(50 * time.Millisecond)).
+		Build()
+
+	req := common.NewNormalizedRequest([]byte(
+		`{"jsonrpc":"2.0","id":1,"method":"eth_sendRawTransaction","params":["0xdeadbeef"]}`,
+	))
+	ctx := context.WithValue(context.Background(), common.RequestContextKey, req)
+
+	var callCount atomic.Int32
+	var winnerBodyClosed atomic.Int32
+	var slowBodyClosed atomic.Int32
+	slowRelease := make(chan struct{})
+
+	resp, err := pol.Run(ctx, req, func(_ context.Context, _ *common.NormalizedRequest) (*common.NormalizedResponse, error) {
+		if callCount.Add(1) == 1 {
+			return validResponseWithCloser("0xwinner", &winnerBodyClosed), nil
+		}
+		<-slowRelease
+		return validResponseWithCloser("0xslow", &slowBodyClosed), nil
+	})
+
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	defer resp.Release()
+
+	time.Sleep(100 * time.Millisecond)
+	close(slowRelease)
+
+	require.Eventually(t, func() bool {
+		return slowBodyClosed.Load() == 1
+	}, 5*time.Second, 10*time.Millisecond, "late response should still be drained")
+	assert.Never(t, func() bool {
+		return winnerBodyClosed.Load() != 0
+	}, 200*time.Millisecond, 10*time.Millisecond, "wait-cap finalization must not replace or release short-circuit winner")
 }
 
 // TestWaitCap_MaxWaitOnEmpty_TighterFloor verifies that when ONLY empty
@@ -133,7 +230,7 @@ func TestWaitCap_MaxWaitOnEmpty_TighterFloor(t *testing.T) {
 
 	var slot atomic.Int32
 	start := time.Now()
-	_, _ = pol.Run(ctx, req, func(_ context.Context, _ *common.NormalizedRequest) (*common.NormalizedResponse, error) {
+	_, _ = pol.Run(ctx, req, func(ctx context.Context, _ *common.NormalizedRequest) (*common.NormalizedResponse, error) {
 		idx := slot.Add(1)
 		switch idx {
 		case 1:
@@ -144,7 +241,9 @@ func TestWaitCap_MaxWaitOnEmpty_TighterFloor(t *testing.T) {
 			return validResponseWithValue(""), nil
 		default:
 			// straggler way over the cap
-			time.Sleep(2 * time.Second)
+			if err := waitForStragglerOrCancel(ctx, 2*time.Second); err != nil {
+				return nil, err
+			}
 			return validResponseWithValue("0xslow"), nil
 		}
 	})
@@ -304,7 +403,9 @@ func TestWaitCap_ArmedByRealAttemptFailures(t *testing.T) {
 			// Real attempt failure: a plain transport error, not a skip.
 			return nil, errors.New("connection reset by peer")
 		}
-		time.Sleep(2 * time.Second)
+		if err := waitForStragglerOrCancel(ctx, 2*time.Second); err != nil {
+			return nil, err
+		}
 		return validResponseWithValue("0xslow"), nil
 	})
 	elapsed := time.Since(start)

@@ -1,9 +1,13 @@
 package consensus
 
 import (
+	"context"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/erpc/erpc/common"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
 
@@ -116,4 +120,92 @@ func TestReorderForParticipantQuota(t *testing.T) {
 		reqs := []*common.ConsensusRequiredParticipant{{Tag: "region:ap", MinParticipants: 1}}
 		require.Equal(t, []string{"a", "b"}, idsOf(reorderForParticipantQuota(ups, reqs)))
 	})
+}
+
+func TestRequiredParticipantQuotaFailsClosedAtAnalysis(t *testing.T) {
+	lg := zerolog.Nop()
+	cfg := &config{
+		maxParticipants:         1,
+		agreementThreshold:      1,
+		disputeBehavior:         common.ConsensusDisputeBehaviorReturnError,
+		lowParticipantsBehavior: common.ConsensusLowParticipantsBehaviorAcceptMostCommonValidResult,
+		requiredParticipants: []*common.ConsensusRequiredParticipant{
+			{Tag: "tier:paid", MinParticipants: 1},
+		},
+	}
+
+	t.Run("missing required tag rejects threshold winner", func(t *testing.T) {
+		analysis := newConsensusAnalysis(&lg, context.Background(), cfg, []*execResult{{
+			Result:   validResponseWithValue("0x1"),
+			Upstream: common.NewFakeUpstream("public-1", common.WithTags("tier:public")),
+		}})
+
+		winner := (&executor{}).determineWinner(&lg, analysis)
+		require.NotNil(t, winner)
+		require.Nil(t, winner.Result)
+		require.Error(t, winner.Error)
+		require.True(t, common.HasErrorCode(winner.Error, common.ErrCodeConsensusLowParticipants), "got: %v", winner.Error)
+	})
+
+	t.Run("required tag present allows threshold winner", func(t *testing.T) {
+		analysis := newConsensusAnalysis(&lg, context.Background(), cfg, []*execResult{{
+			Result:   validResponseWithValue("0x1"),
+			Upstream: common.NewFakeUpstream("paid-1", common.WithTags("tier:paid")),
+		}})
+
+		winner := (&executor{}).determineWinner(&lg, analysis)
+		require.NotNil(t, winner)
+		require.NoError(t, winner.Error)
+		require.NotNil(t, winner.Result)
+	})
+}
+
+func TestRequiredParticipantQuotaWaitsForSlowRequiredParticipant(t *testing.T) {
+	logger := zerolog.New(zerolog.NewTestWriter(t))
+	paid := common.NewFakeUpstream("paid-1", common.WithTags("tier:paid"))
+	public1 := common.NewFakeUpstream("public-1", common.WithTags("tier:public"))
+	public2 := common.NewFakeUpstream("public-2", common.WithTags("tier:public"))
+
+	pol := newBuilder().
+		WithLogger(&logger).
+		WithMaxParticipants(3).
+		WithAgreementThreshold(2).
+		WithDisputeBehavior(common.ConsensusDisputeBehaviorAcceptMostCommonValidResult).
+		WithLowParticipantsBehavior(common.ConsensusLowParticipantsBehaviorAcceptMostCommonValidResult).
+		WithMaxWaitOnResult(common.NewStaticDuration(500 * time.Millisecond)).
+		WithMaxWaitOnEmpty(common.NewStaticDuration(500 * time.Millisecond)).
+		WithRequiredParticipants([]*common.ConsensusRequiredParticipant{
+			{Tag: "tier:paid", MinParticipants: 1},
+		}).
+		Build()
+
+	req := newTestRequest()
+	req.SetUpstreams([]common.Upstream{public1, public2, paid})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	var calls atomic.Int32
+	var paidCompleted atomic.Bool
+	resp, err := pol.Run(ctx, req, func(ctx context.Context, _ *common.NormalizedRequest) (*common.NormalizedResponse, error) {
+		switch calls.Add(1) {
+		case 1:
+			select {
+			case <-time.After(120 * time.Millisecond):
+				paidCompleted.Store(true)
+				return validResponseWithValue("0x1").SetUpstream(paid), nil
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		case 2:
+			return validResponseWithValue("0x1").SetUpstream(public1), nil
+		default:
+			return validResponseWithValue("0x1").SetUpstream(public2), nil
+		}
+	})
+
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	require.True(t, paidCompleted.Load(), "slow required participant must be allowed to finish")
+	require.GreaterOrEqual(t, calls.Load(), int32(3), "third participant should start before quota is satisfied")
 }

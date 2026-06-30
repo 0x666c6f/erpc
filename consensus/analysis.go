@@ -52,6 +52,8 @@ type consensusAnalysis struct {
 	originalRequest   *common.NormalizedRequest
 	leaderUpstream    common.Upstream
 	method            string // The RPC method being called (e.g., "eth_getTransactionCount")
+	waitCapped        bool
+	missingRequired   []string
 
 	// Cached computed values
 	cachedBestNonEmpty *responseGroup
@@ -73,11 +75,16 @@ func contextFrom(ctxOrExec any) context.Context {
 }
 
 func newConsensusAnalysis(lg *zerolog.Logger, ctxOrExec any, config *config, responses []*execResult) *consensusAnalysis {
+	return newConsensusAnalysisWithOptions(lg, ctxOrExec, config, responses, false)
+}
+
+func newConsensusAnalysisWithOptions(lg *zerolog.Logger, ctxOrExec any, config *config, responses []*execResult, waitCapped bool) *consensusAnalysis {
 	ctx := contextFrom(ctxOrExec)
 	analysis := &consensusAnalysis{
 		config:            config,
 		groups:            make(map[string]*responseGroup),
 		totalParticipants: len(responses),
+		waitCapped:        waitCapped,
 	}
 
 	// Try to extract original request and compute leader upstream once
@@ -162,8 +169,59 @@ func newConsensusAnalysis(lg *zerolog.Logger, ctxOrExec any, config *config, res
 	analysis.getBestError()
 	analysis.getBestByCount()
 	analysis.getBestBySize()
+	analysis.missingRequired = analysis.computeMissingRequiredParticipants()
 
 	return analysis
+}
+
+func (a *consensusAnalysis) computeMissingRequiredParticipants() []string {
+	if a == nil || a.config == nil || len(a.config.requiredParticipants) == 0 {
+		return nil
+	}
+
+	seenByRequirement := make([]map[string]struct{}, len(a.config.requiredParticipants))
+	for _, group := range a.groups {
+		for _, result := range group.Results {
+			if result == nil || result.Upstream == nil || result.CachedResponseType == ResponseTypeInfrastructureError {
+				continue
+			}
+			upstreamID := result.Upstream.Id()
+			if upstreamID == "" {
+				upstreamID = fmt.Sprintf("%p", result.Upstream)
+			}
+			for i, required := range a.config.requiredParticipants {
+				if required == nil || required.Tag == "" || required.MinParticipants <= 0 {
+					continue
+				}
+				if !upstreamMatchesTag(result.Upstream, required.Tag) {
+					continue
+				}
+				if seenByRequirement[i] == nil {
+					seenByRequirement[i] = make(map[string]struct{})
+				}
+				seenByRequirement[i][upstreamID] = struct{}{}
+			}
+		}
+	}
+
+	var missing []string
+	for i, required := range a.config.requiredParticipants {
+		if required == nil || required.Tag == "" || required.MinParticipants <= 0 {
+			continue
+		}
+		have := len(seenByRequirement[i])
+		if have < required.MinParticipants {
+			missing = append(missing, fmt.Sprintf("%s=%d/%d", required.Tag, have, required.MinParticipants))
+		}
+	}
+	return missing
+}
+
+func (a *consensusAnalysis) hasPendingRequiredParticipants() bool {
+	if a == nil || a.config == nil || len(a.missingRequired) == 0 || a.waitCapped {
+		return false
+	}
+	return a.hasRemaining()
 }
 
 func (a *consensusAnalysis) hasRemaining() bool {
