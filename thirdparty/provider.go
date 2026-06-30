@@ -48,7 +48,7 @@ func (p *Provider) SupportsNetwork(ctx context.Context, networkId string) (bool,
 		return false, nil
 	}
 
-	return p.vendor.SupportsNetwork(ctx, p.logger, p.config.Settings, networkId)
+	return p.vendor.SupportsNetwork(contextWithProviderID(ctx, p.config.Id), p.logger, p.settingsForVendor(), networkId)
 }
 
 func (p *Provider) GenerateUpstreamConfigs(ctx context.Context, logger *zerolog.Logger, networkId string) ([]*common.UpstreamConfig, error) {
@@ -56,12 +56,16 @@ func (p *Provider) GenerateUpstreamConfigs(ctx context.Context, logger *zerolog.
 	if err != nil {
 		return nil, err
 	}
-	upsCfgs, err := p.vendor.GenerateConfigs(ctx, logger, upsCfg, p.config.Settings)
+	upsCfgs, err := p.vendor.GenerateConfigs(contextWithProviderID(ctx, p.config.Id), logger, upsCfg, p.settingsForVendor())
 	if err != nil {
 		return nil, err
 	}
 	p.expandEnvVars(upsCfgs)
 	return upsCfgs, nil
+}
+
+func (p *Provider) settingsForVendor() common.VendorSettings {
+	return p.config.Settings
 }
 
 func (p *Provider) expandEnvVars(upsCfgs []*common.UpstreamConfig) {
@@ -105,7 +109,7 @@ func (p *Provider) buildBaseUpstreamConfig(networkId string) (*common.UpstreamCo
 	//    <VENDOR>    with the provider's Vendor name (p.config.Vendor)
 	//    <PROVIDER>  with the provider ID from config (p.config.Id)
 	//    <NETWORK>   with the entire networkId string
-	//    <EVM_CHAIN_ID> with the number part of networkId if it's in "evm:####" format, else empty
+	//    <EVM_CHAIN_ID> with the number part of networkId if it's in "evm:####" format, else N/A
 	baseCfg.Id = applyUpstreamIDTemplate(
 		p.config.UpstreamIdTemplate,
 		p.config.Vendor,
@@ -150,7 +154,7 @@ func applyUpstreamIDTemplate(
 	result = strings.ReplaceAll(result, "<NETWORK>", networkId)
 
 	// If network is in "evm:<someChainId>" format, then <EVM_CHAIN_ID> = <someChainId>.
-	// Otherwise, we replace that placeholder with an empty string.
+	// Otherwise, we replace that placeholder with N/A.
 	if strings.HasPrefix(networkId, "evm:") {
 		evmChainId := strings.TrimPrefix(networkId, "evm:")
 		result = strings.ReplaceAll(result, "<EVM_CHAIN_ID>", evmChainId)

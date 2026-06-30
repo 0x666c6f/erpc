@@ -131,8 +131,8 @@ func buildLeakTestBudget(t testing.TB, redisDelay, maxTimeout time.Duration, adm
 //
 //   - In-flight Redis calls (and therefore Redis-bound goroutines) stay
 //     bounded by the per-budget admission cap.
-//   - Excess checks fail open via the "admission_full" reason instead of
-//     queueing a new goroutine.
+//   - Excess checks fail closed instead of bypassing the configured budget
+//     or queueing a new goroutine.
 //   - After the burst completes, every Redis-bound goroutine drains and the
 //     in-flight gauge returns to zero (no leak).
 func TestRateLimiterBudget_NoGoroutineLeakUnderRedisStall(t *testing.T) {
@@ -164,8 +164,8 @@ func TestRateLimiterBudget_NoGoroutineLeakUnderRedisStall(t *testing.T) {
 	}
 
 	// Wait for every TryAcquirePermit caller to return. Each caller either
-	// returns immediately (admission_full) or after the local maxTimeout
-	// (50ms) — both are << redisDelay (200ms), so all callers return well
+	// fails closed immediately on admission_full or returns after the local
+	// maxTimeout (50ms) — both are << redisDelay (200ms), so all callers return well
 	// before the first Redis call finishes. After wg.Wait the only
 	// goroutines added on top of baseline are the Redis-bound ones inside
 	// cache.DoLimit. Counting them this way gives us a clean measurement
@@ -182,11 +182,11 @@ func TestRateLimiterBudget_NoGoroutineLeakUnderRedisStall(t *testing.T) {
 		allowed.Load(), cache.completed.Load(),
 		currentInflight, maxInflightDuringBurst, burstFanInDur)
 
-	// All TryAcquirePermit calls must have returned (every caller is fail-
-	// opened: 100% allowed) — the leak fix MUST NOT change the user-visible
-	// fail-open contract.
-	assert.Equal(t, int64(burstSize), allowed.Load(),
-		"every request must fail-open under stall: caller-visible behaviour unchanged")
+	// All TryAcquirePermit calls must have returned, but admission-full
+	// callers are denied instead of bypassing cache.DoLimit. Calls that were
+	// already admitted can still hit the timeout fail-open path.
+	assert.Less(t, allowed.Load(), int64(burstSize),
+		"admission saturation must fail closed instead of allowing the full burst")
 
 	// Critical leak invariant #1: max concurrent Redis calls bounded by cap.
 	// Pre-fix this would equal burstSize (one Redis-bound goroutine per
@@ -243,6 +243,17 @@ func TestRateLimiterBudget_NoGoroutineLeakUnderRedisStall(t *testing.T) {
 	assert.LessOrEqual(t, finalGoroutines-baseline, 8,
 		"goroutine count must return to baseline (within slack), got delta %d",
 		finalGoroutines-baseline)
+}
+
+func TestRateLimiterBudget_AdmissionSaturationFailsClosed(t *testing.T) {
+	budget, cache := buildLeakTestBudget(t, time.Minute, 50*time.Millisecond, 1, 0)
+	budget.admission <- struct{}{}
+	defer func() { <-budget.admission }()
+
+	ok, err := budget.TryAcquirePermit(context.Background(), "proj", nil, "eth_call", "", "", "", "")
+	require.NoError(t, err)
+	assert.False(t, ok, "admission-full requests must fail closed")
+	assert.Zero(t, cache.maxSeen.Load(), "admission-full path must not spawn cache.DoLimit")
 }
 
 // TestRateLimiterBudget_AdmissionPanicSafety verifies that a panicking

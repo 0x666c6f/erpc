@@ -1207,6 +1207,31 @@ type GrpcUpstreamConfig struct {
 	Headers map[string]string `yaml:"headers,omitempty" json:"headers"`
 }
 
+func (c *GrpcUpstreamConfig) MarshalJSON() ([]byte, error) {
+	type grpcUpstreamConfigJSON GrpcUpstreamConfig
+	out := grpcUpstreamConfigJSON(*c)
+	out.Headers = redactHeaderValues(c.Headers)
+	return sonic.Marshal(out)
+}
+
+func (c *GrpcUpstreamConfig) MarshalYAML() (interface{}, error) {
+	type grpcUpstreamConfigYAML GrpcUpstreamConfig
+	out := grpcUpstreamConfigYAML(*c)
+	out.Headers = redactHeaderValues(c.Headers)
+	return out, nil
+}
+
+func redactHeaderValues(headers map[string]string) map[string]string {
+	if len(headers) == 0 {
+		return nil
+	}
+	redacted := make(map[string]string, len(headers))
+	for key := range headers {
+		redacted[key] = "REDACTED"
+	}
+	return redacted
+}
+
 func (c *GrpcUpstreamConfig) Copy() *GrpcUpstreamConfig {
 	if c == nil {
 		return nil
@@ -1746,12 +1771,9 @@ type ConsensusPolicyConfig struct {
 	// the participant set so the first `maxParticipants` drawn satisfy
 	// every entry — without changing `maxParticipants` itself.
 	//
-	// Best-effort and governed by the EXISTING consensus behaviors: if a
-	// required group has fewer healthy upstreams than requested (or the
-	// quotas can't all fit within `maxParticipants`), consensus simply
-	// runs with what it can promote and the resulting participation is
-	// handled by `lowParticipantsBehavior` / `agreementThreshold` exactly
-	// like any other low-participation tick. Empty (default) = disabled.
+	// Reordering is best-effort, but final analysis fails closed when valid
+	// consensus responses do not satisfy every required quota. Empty
+	// (default) = disabled.
 	RequiredParticipants []*ConsensusRequiredParticipant `yaml:"requiredParticipants,omitempty" json:"requiredParticipants,omitempty"`
 }
 

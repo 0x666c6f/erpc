@@ -1,6 +1,7 @@
 package consensus
 
 import (
+	"context"
 	"errors"
 	"testing"
 
@@ -172,6 +173,61 @@ func TestSendRawTransaction_ConsensusRule(t *testing.T) {
 		require.NotNil(t, result)
 		require.Nil(t, result.Error)
 		require.NotNil(t, result.Result)
+	})
+}
+
+func TestSendRawTransaction_RequiredParticipantQuota(t *testing.T) {
+	logger := zerolog.Nop()
+	cfg := &config{
+		maxParticipants:    2,
+		agreementThreshold: 1,
+		requiredParticipants: []*common.ConsensusRequiredParticipant{
+			{Tag: "tier:paid", MinParticipants: 1},
+		},
+	}
+	req := common.NewNormalizedRequest([]byte(
+		`{"jsonrpc":"2.0","id":1,"method":"eth_sendRawTransaction","params":["0xdeadbeef"]}`,
+	))
+	ctx := context.WithValue(context.Background(), common.RequestContextKey, req)
+	public1 := common.NewFakeUpstream("public-1", common.WithTags("tier:public"))
+	public2 := common.NewFakeUpstream("public-2", common.WithTags("tier:public"))
+	paid := common.NewFakeUpstream("paid-1", common.WithTags("tier:paid"))
+
+	t.Run("does not bypass while required participant can still respond", func(t *testing.T) {
+		resp := validResponseWithValue("0xpublic")
+		analysis := newConsensusAnalysis(&logger, ctx, cfg, []*execResult{{
+			Result:   resp,
+			Upstream: public1,
+		}})
+
+		require.NotEmpty(t, analysis.missingRequired)
+		assert.False(t, consensusRules[0].Condition(analysis), "sendRawTx result rule must wait for required quota")
+		assert.False(t, shortCircuitRules[0].Condition(&slotResult{Result: resp}, analysis), "sendRawTx short-circuit must wait for required quota")
+	})
+
+	t.Run("fails closed when required participant never returned valid response", func(t *testing.T) {
+		analysis := newConsensusAnalysis(&logger, ctx, cfg, []*execResult{
+			{Result: validResponseWithValue("0xpublic1"), Upstream: public1},
+			{Result: validResponseWithValue("0xpublic2"), Upstream: public2},
+		})
+
+		winner := (&executor{}).determineWinner(&logger, analysis)
+		require.NotNil(t, winner)
+		require.Nil(t, winner.Result)
+		require.Error(t, winner.Error)
+		require.True(t, common.HasErrorCode(winner.Error, common.ErrCodeConsensusLowParticipants), "got: %v", winner.Error)
+	})
+
+	t.Run("allows first tx hash once required quota is satisfied", func(t *testing.T) {
+		resp := validResponseWithValue("0xpaid")
+		analysis := newConsensusAnalysis(&logger, ctx, cfg, []*execResult{{
+			Result:   resp,
+			Upstream: paid,
+		}})
+
+		require.Empty(t, analysis.missingRequired)
+		assert.True(t, consensusRules[0].Condition(analysis), "sendRawTx result rule can apply after required quota")
+		assert.True(t, shortCircuitRules[0].Condition(&slotResult{Result: resp}, analysis), "sendRawTx short-circuit can apply after required quota")
 	})
 }
 

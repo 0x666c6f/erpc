@@ -113,3 +113,75 @@ func TestProvider_SupportsNetwork_WithIgnoreNetworks(t *testing.T) {
 		})
 	}
 }
+
+func TestProvider_SupportsNetwork_PassesProviderSettings(t *testing.T) {
+	logger := zerolog.New(nil)
+	mockVendor := new(MockVendor)
+	config := &common.ProviderConfig{
+		Id:       "provider-a",
+		Vendor:   "test",
+		Settings: common.VendorSettings{"apiKey": "secret"},
+	}
+	provider := NewProvider(&logger, config, mockVendor, nil)
+	var captured common.VendorSettings
+
+	mockVendor.On(
+		"SupportsNetwork",
+		mock.MatchedBy(func(ctx context.Context) bool {
+			return providerIDFromContext(ctx) == "provider-a"
+		}),
+		mock.Anything,
+		mock.MatchedBy(func(settings common.VendorSettings) bool {
+			captured = settings
+			return settings["apiKey"] == "secret"
+		}),
+		"evm:1",
+	).Return(true, nil).Once()
+
+	result, err := provider.SupportsNetwork(context.Background(), "evm:1")
+
+	assert.NoError(t, err)
+	assert.True(t, result)
+	mockVendor.AssertExpectations(t)
+	assert.Equal(t, common.VendorSettings{"apiKey": "secret"}, config.Settings)
+	assert.Equal(t, common.VendorSettings{"apiKey": "secret"}, captured)
+}
+
+func TestProvider_GenerateUpstreamConfigs_PreservesNilVendorSettings(t *testing.T) {
+	logger := zerolog.New(nil)
+	mockVendor := new(MockVendor)
+	config := &common.ProviderConfig{
+		Id:                 "provider-a",
+		Vendor:             "test",
+		UpstreamIdTemplate: "<NETWORK>",
+	}
+	provider := NewProvider(&logger, config, mockVendor, nil)
+	upstreams := []*common.UpstreamConfig{{Endpoint: "https://example.com"}}
+
+	mockVendor.On(
+		"GenerateConfigs",
+		mock.Anything,
+		mock.Anything,
+		mock.Anything,
+		mock.MatchedBy(func(settings common.VendorSettings) bool {
+			return settings == nil
+		}),
+	).Return(upstreams, nil).Once()
+
+	result, err := provider.GenerateUpstreamConfigs(context.Background(), &logger, "evm:1")
+
+	assert.NoError(t, err)
+	assert.Equal(t, upstreams, result)
+	mockVendor.AssertExpectations(t)
+}
+
+func TestApplyUpstreamIDTemplate_NonEVMChainIDUsesPlaceholder(t *testing.T) {
+	result := applyUpstreamIDTemplate(
+		"<VENDOR>-<PROVIDER>-<NETWORK>-<EVM_CHAIN_ID>",
+		"sqd",
+		"provider-a",
+		"solana:mainnet",
+	)
+
+	assert.Equal(t, "sqd-provider-a-solana:mainnet-N/A", result)
+}

@@ -3,6 +3,7 @@ package thirdparty
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -215,19 +216,24 @@ func TestChainstackCacheKey(t *testing.T) {
 	vendor := CreateChainstackVendor().(*ChainstackVendor)
 
 	tests := []struct {
-		name     string
-		apiKey   string
-		params   *ChainstackFilterParams
-		expected string
+		name          string
+		apiKey        string
+		params        *ChainstackFilterParams
+		providerID    string
+		expectedParts []string
 	}{
 		{
-			name:     "no filters",
-			apiKey:   "test-key",
-			params:   &ChainstackFilterParams{},
-			expected: "test-key",
+			name:   "no filters",
+			apiKey: "test-key",
+			params: &ChainstackFilterParams{},
+			expectedParts: []string{
+				"chainstack",
+				"provider=standalone",
+				"key=",
+			},
 		},
 		{
-			name:   "all filters",
+			name:   "all filters include provider",
 			apiKey: "test-key",
 			params: &ChainstackFilterParams{
 				Project:      "proj-123",
@@ -236,7 +242,12 @@ func TestChainstackCacheKey(t *testing.T) {
 				Provider:     "aws",
 				Type:         "dedicated",
 			},
-			expected: "test-key_p:proj-123_o:org-456_r:us-east-1_pr:aws_t:dedicated",
+			providerID: "provider-a",
+			expectedParts: []string{
+				"chainstack",
+				"provider=provider-a",
+				"key=",
+			},
 		},
 		{
 			name:   "partial filters",
@@ -245,14 +256,34 @@ func TestChainstackCacheKey(t *testing.T) {
 				Project: "proj-123",
 				Type:    "shared",
 			},
-			expected: "test-key_p:proj-123_t:shared",
+			expectedParts: []string{
+				"chainstack",
+				"provider=standalone",
+				"key=",
+			},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := vendor.getCacheKey(tt.apiKey, tt.params)
-			assert.Equal(t, tt.expected, result)
+			result := vendor.getCacheKey(tt.apiKey, tt.params, tt.providerID)
+			for _, part := range tt.expectedParts {
+				assert.Contains(t, result, part)
+			}
+			assert.NotContains(t, result, tt.apiKey)
+			assert.True(t, strings.Contains(result, "|key="))
 		})
 	}
+}
+
+func TestChainstackCacheKey_DoesNotCollideAcrossFiltersOrProviders(t *testing.T) {
+	vendor := CreateChainstackVendor().(*ChainstackVendor)
+	apiKey := "test-key"
+	base := vendor.getCacheKey(apiKey, &ChainstackFilterParams{Project: "project-a"}, "provider-a")
+
+	differentFilter := vendor.getCacheKey(apiKey, &ChainstackFilterParams{Project: "project-b"}, "provider-a")
+	differentProvider := vendor.getCacheKey(apiKey, &ChainstackFilterParams{Project: "project-a"}, "provider-b")
+
+	assert.NotEqual(t, base, differentFilter)
+	assert.NotEqual(t, base, differentProvider)
 }

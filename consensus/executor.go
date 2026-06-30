@@ -158,8 +158,8 @@ func (e *executor) Run(
 	// include the configured minimum from each required group. Runs at the
 	// very top of consensus, before any participant slot consumes an
 	// upstream (req.UpstreamIdx is still 0), so the reorder takes effect.
-	// Best-effort: shortfalls fall through to lowParticipantsBehavior /
-	// agreementThreshold like organic low participation.
+	// Reordering is best-effort, but final analysis fails closed if valid
+	// responses do not satisfy the required tag quotas.
 	if len(e.config.requiredParticipants) > 0 {
 		if reordered := reorderForParticipantQuota(originalReq.Upstreams(), e.config.requiredParticipants); len(reordered) > 0 {
 			originalReq.SetUpstreams(reordered)
@@ -552,10 +552,7 @@ func (e *executor) runAnalyzer(
 	if waitTimer != nil {
 		waitTimer.Stop()
 	}
-	if analysis == nil {
-		analysis = newConsensusAnalysis(e.logger, ctx, e.config, responses)
-		winner = e.determineWinner(lg, analysis)
-	}
+	analysis, winner = e.finalizeAnalyzerDecision(lg, ctx, responses, analysis, winner, waitCapped, shortCircuited)
 	if !shortCircuited {
 		// Short-circuit branch already marked winners; mark here only
 		// for the wait-all path.
@@ -624,6 +621,24 @@ func (e *executor) runAnalyzer(
 
 	e.trackAndPunishMisbehavingUpstreams(lg, originalReq, labels, winner, analysis)
 	e.releaseNonWinningResponses(analysis, winner)
+}
+
+func (e *executor) finalizeAnalyzerDecision(
+	lg *zerolog.Logger,
+	ctx context.Context,
+	responses []*execResult,
+	analysis *consensusAnalysis,
+	winner *slotResult,
+	waitCapped bool,
+	shortCircuited bool,
+) (*consensusAnalysis, *slotResult) {
+	if analysis == nil || waitCapped {
+		analysis = newConsensusAnalysisWithOptions(e.logger, ctx, e.config, responses, waitCapped)
+	}
+	if shortCircuited {
+		return analysis, winner
+	}
+	return analysis, e.determineWinner(lg, analysis)
 }
 
 // releaseNonWinningResponses releases the Result pointers on every non-winning

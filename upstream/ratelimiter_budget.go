@@ -56,7 +56,7 @@ type RateLimiterBudget struct {
 	// a Redis-rate-limiter contention spike (root-caused 2026-05-07 cronos
 	// receipts incident), which then drove CPU/GC into a death spiral.
 	//
-	// When admission is full, doLimitWithTimeout fail-opens immediately
+	// When admission is full, doLimitWithTimeout fails closed immediately
 	// without spawning a goroutine — increments
 	// MetricRateLimiterRemoteAdmissionSheddedTotal so we can alert on it.
 	//
@@ -351,33 +351,36 @@ func (b *RateLimiterBudget) evaluateRule(ctx context.Context, projectId string, 
 	waitDuration := time.Since(waitStartedAt)
 
 	if admissionFull {
-		return b.recordFailOpen(
+		return b.recordRateLimitOutcome(
 			doSpan,
 			waitDuration,
 			evalCtx,
-			"admission_full",
-			"admission_full",
+			"admission_full_deny",
+			"",
 			nil,
+			false,
 		)
 	}
 	if timedOut {
-		return b.recordFailOpen(
+		return b.recordRateLimitOutcome(
 			doSpan,
 			waitDuration,
 			evalCtx,
 			"timeout_fail_open",
 			"limit_timeout",
 			nil,
+			true,
 		)
 	}
 	if panicErr != nil {
-		return b.recordFailOpen(
+		return b.recordRateLimitOutcome(
 			doSpan,
 			waitDuration,
 			evalCtx,
 			"panic_fail_open",
 			"limit_panic",
 			panicErr,
+			true,
 		)
 	}
 
@@ -402,12 +405,13 @@ func (b *RateLimiterBudget) evaluateRule(ctx context.Context, projectId string, 
 	return !isOverLimit
 }
 
-func (b *RateLimiterBudget) recordFailOpen(
+func (b *RateLimiterBudget) recordRateLimitOutcome(
 	doSpan trace.Span,
 	waitDuration time.Duration,
 	evalCtx rateLimitEvalContext,
 	outcome, reason string,
 	panicErr error,
+	allowed bool,
 ) bool {
 	telemetry.ObserverHandle(
 		telemetry.MetricRateLimiterPermitWaitDuration,
@@ -417,6 +421,18 @@ func (b *RateLimiterBudget) recordFailOpen(
 		outcome,
 	).Observe(waitDuration.Seconds())
 	evalCtx.observe(outcome)
+	if reason != "" {
+		b.recordRateLimitFailOpen(evalCtx, reason)
+	}
+	if panicErr != nil {
+		doSpan.RecordError(panicErr)
+	}
+	doSpan.SetAttributes(attribute.String("result", outcome))
+	doSpan.End()
+	return allowed
+}
+
+func (b *RateLimiterBudget) recordRateLimitFailOpen(evalCtx rateLimitEvalContext, reason string) {
 	telemetry.MetricRateLimiterFailopenTotal.WithLabelValues(
 		evalCtx.projectId,
 		evalCtx.networkLabel,
@@ -426,13 +442,12 @@ func (b *RateLimiterBudget) recordFailOpen(
 		evalCtx.method,
 		reason,
 	).Inc()
-	telemetry.IncNetworkAttemptReason(evalCtx.projectId, evalCtx.networkLabel, evalCtx.method, telemetry.AttemptReasonFailOpen)
-	if panicErr != nil {
-		doSpan.RecordError(panicErr)
-	}
-	doSpan.SetAttributes(attribute.String("result", outcome))
-	doSpan.End()
-	return true
+	telemetry.IncNetworkAttemptReason(
+		evalCtx.projectId,
+		evalCtx.networkLabel,
+		evalCtx.method,
+		telemetry.AttemptReasonFailOpen,
+	)
 }
 
 func (b *RateLimiterBudget) doLimitSafely(
@@ -508,15 +523,12 @@ func (b *RateLimiterBudget) doLimitWithTimeout(
 			if b.admissionShedded != nil {
 				b.admissionShedded.Inc()
 			}
-			if b.durationFailopen != nil {
-				b.durationFailopen.Observe(time.Since(start).Seconds())
-			}
 			if b.logger != nil && b.logger.GetLevel() <= zerolog.DebugLevel {
 				b.logger.Debug().
 					Str("budget", b.Id).
 					Str("method", method).
 					Int("admissionCap", cap(b.admission)).
-					Msg("rate limiter remote admission full, failing open")
+					Msg("rate limiter remote admission full, failing closed")
 			}
 			return nil, false, true, nil
 		}
@@ -545,8 +557,8 @@ func (b *RateLimiterBudget) doLimitWithTimeout(
 			}
 		}
 		// Observe remote-call duration split by outcome (ok / over-limit /
-		// fail-open). Without this only timeout/admission fail-opens were ever
-		// recorded, leaving the ok & over_limit histograms permanently empty.
+		// fail-open). Without this only timeout fail-opens were recorded,
+		// leaving the ok & over_limit histograms permanently empty.
 		dur := time.Since(start).Seconds()
 		if result.panicErr == nil {
 			if len(result.statuses) > 0 && result.statuses[0].Code == pb.RateLimitResponse_OVER_LIMIT {

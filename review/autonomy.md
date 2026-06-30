@@ -13,7 +13,7 @@ Goal: high-success autonomous coding loops with low supervision.
 - `review/checklist.md`: severity rubric + output format.
 - `review/runbooks/*.md`: bugfix/feature/review procedures.
 - `scripts/agent-harness/*.sh`: mechanical checks + maintenance.
-- `.github/workflows/agent-automations.yml`: scheduled autonomous loops.
+- `.github/workflows/test.yml`: build, test, and security validation.
 - `artifacts/agent/`: boundary for generated agent runtime artifacts.
 
 ## Trigger Matrix
@@ -44,12 +44,12 @@ Weekly (or after major refactors):
 3. `scripts/agent-harness/suggest-doc-updates.sh --strict HEAD~20..HEAD`
 4. `scripts/agent-harness/random-bug-scan.sh --count 2`
 
-Continuous automation:
-- `scripts/agent-harness/pr-health.sh` on schedule for mergeability drift.
-- `scripts/agent-harness/merged-digest.sh` daily for contribution visibility.
+CI automation:
+- `.github/workflows/test.yml` owns Go build, package tests, fallback regressions, TypeScript config checks, and gosec.
+- Harness maintenance commands stay manual; do not gate PRs on harness-only checks.
 
 ## Merge Policy
 
-- Harness checks must pass.
+- CI checks must pass.
 - Bugfixes: regression test when feasible.
 - If a contract changed, update docs in same PR.
