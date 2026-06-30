@@ -88,6 +88,8 @@ jobs:
         with:
           go-version: '1.25.x'
           cache: false
+      - name: Check workflow security policy
+        run: go test ./internal/ci -count=1 -v
       - name: Run Gosec Security Scanner
         run: |
           set +e

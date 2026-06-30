@@ -79,10 +79,8 @@ async function install(): Promise<void> {
       dest: binaryPath,
     });
 
-    // Verify checksum before making executable
-    // TODO Uncomment after finding the root cause of the checksum mismatch?
-    // console.log("\nVerifying binary checksum...");
-    // await verifyChecksum(binaryPath, platform);
+    console.log("\nVerifying binary checksum...");
+    await verifyChecksum(binaryPath, platform);
 
     // Make binary executable
     await chmod(binaryPath, 0o755);
