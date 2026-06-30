@@ -187,8 +187,19 @@ func TestWaitCap_DoesNotReplaceShortCircuitWinner(t *testing.T) {
 	var slowBodyClosed atomic.Int32
 	slowRelease := make(chan struct{})
 
+	var started sync.WaitGroup
+	started.Add(2)
+	allStarted := make(chan struct{})
+	go func() {
+		started.Wait()
+		close(allStarted)
+	}()
+
 	resp, err := pol.Run(ctx, req, func(_ context.Context, _ *common.NormalizedRequest) (*common.NormalizedResponse, error) {
-		if callCount.Add(1) == 1 {
+		n := callCount.Add(1)
+		started.Done()
+		<-allStarted
+		if n == 1 {
 			return validResponseWithCloser("0xwinner", &winnerBodyClosed), nil
 		}
 		<-slowRelease
