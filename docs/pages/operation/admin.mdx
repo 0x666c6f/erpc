@@ -178,7 +178,8 @@ ERPC_IGNORE_LOCAL_ENDPOINT_VALIDATION=true erpc validate --config ./erpc.yaml
 # Add
 curl ... -d '{"jsonrpc":"2.0","id":1,"method":"erpc_addApiKey","params":[{
   "projectId":"myProject","connectorId":"my-dynamodb","apiKey":"sk_abc123",
-  "userId":"user-42","rateLimitBudget":"standard"}]}'
+  "userId":"user-42","rateLimitBudget":"standard",
+  "allowMethods":["eth_call","eth_chainId"]}]}'
 
 # List (paginated, default limit 50)
 curl ... -d '{"jsonrpc":"2.0","id":2,"method":"erpc_listApiKeys","params":[{
@@ -255,9 +256,9 @@ Lists all loaded projects, their networks (with aliases if configured), and per-
 
 #### `erpc_addApiKey`
 
-**Params**: `[{"projectId": string, "connectorId": string, "apiKey": string, "userId": string, "rateLimitBudget"?: string, "enabled"?: bool}]`
+**Params**: `[{"projectId": string, "connectorId": string, "apiKey": string, "userId": string, "rateLimitBudget"?: string, "enabled"?: bool, "ignoreMethods"?: string[], "allowMethods"?: string[]}]`
 
-`enabled` defaults to `true` when omitted. `connectorId` must match a `database` strategy connector in the **project's consumer auth config** (not admin auth). Source: [`erpc/admin.go:L102-L192`](https://github.com/erpc/erpc/blob/main/erpc/admin.go#L102-L192)
+`enabled` defaults to `true` when omitted. `allowMethods` / `ignoreMethods` use the same wildcard matcher as file-based `secret` strategies. When `allowMethods` is present without `ignoreMethods`, database auth treats it as allowlist-only and blocks every non-matching method. `connectorId` must match a `database` strategy connector in the **project's consumer auth config** (not admin auth). Source: [`erpc/admin.go:L102-L192`](https://github.com/erpc/erpc/blob/main/erpc/admin.go#L102-L192)
 
 **Response**:
 ```json
@@ -280,6 +281,8 @@ Lists all loaded projects, their networks (with aliases if configured), and per-
       "key": "abc123",
       "userId": "user1",
       "rateLimitBudget": "standard",
+      "ignoreMethods": ["debug_*"],
+      "allowMethods": ["eth_call"],
       "enabled": true,
       "createdAt": "<time.Now()>",
       "updatedAt": "<time.Now()>"
@@ -298,7 +301,7 @@ Lists all loaded projects, their networks (with aliases if configured), and per-
 
 **Params**: `[{"projectId": string, "connectorId": string, "apiKey": string, "updates": object}]`
 
-Applies patch semantics: `null` values in `updates` delete fields from the stored blob; non-null values overwrite. No schema enforcement — any JSON field can be added. Source: [`erpc/admin.go:L294-L381`](https://github.com/erpc/erpc/blob/main/erpc/admin.go#L294-L381)
+Applies patch semantics: `null` values in `updates` delete fields from the stored blob; non-null values overwrite. Common fields are `enabled`, `rateLimitBudget`, `ignoreMethods`, and `allowMethods`. No schema enforcement — any JSON field can be added. Source: [`erpc/admin.go:L294-L381`](https://github.com/erpc/erpc/blob/main/erpc/admin.go#L294-L381)
 
 **Response**:
 ```json

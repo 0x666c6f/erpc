@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dgraph-io/ristretto/v2"
 	"github.com/erpc/erpc/common"
 	"github.com/erpc/erpc/data"
 	"github.com/jackc/pgconn"
@@ -89,6 +90,28 @@ func newTestStrategyWith(t *testing.T, fc *fakeConnector, failOpenEnabled bool) 
 		cfg:       cfg,
 		connector: fc,
 	}
+}
+
+func enableTestCache(t *testing.T, s *DatabaseStrategy) {
+	t.Helper()
+	cacheTTL := time.Hour
+	maxSize := int64(1000)
+	maxCost := int64(1 << 20)
+	numCounters := int64(1000)
+	s.cfg.Cache = &common.DatabaseStrategyCacheConfig{
+		TTL:         &cacheTTL,
+		MaxSize:     &maxSize,
+		MaxCost:     &maxCost,
+		NumCounters: &numCounters,
+	}
+	cache, err := ristretto.NewCache(&ristretto.Config[string, *databaseAuthRecord]{
+		NumCounters: numCounters,
+		MaxCost:     maxCost,
+		BufferItems: 64,
+	})
+	require.NoError(t, err)
+	s.cache = cache
+	t.Cleanup(cache.Close)
 }
 
 // TestClassifyDbError pins down the bounded set of telemetry labels.
@@ -523,4 +546,57 @@ func TestAuthenticate_RecoveryClearsConnectorDown(t *testing.T) {
 	require.NoError(t, err)
 	assert.Greater(t, fc.getCalls.Load(), callsBefore,
 		"normal flow must invoke connector.Get after recovery")
+}
+
+func TestAuthenticate_DatabaseRecordMethodFiltersApplyOnCacheHit(t *testing.T) {
+	t.Parallel()
+
+	fc := &fakeConnector{
+		id: "test",
+		getResult: func() ([]byte, error) {
+			return []byte(`{"userId":"limited-user","enabled":true,"rateLimitBudget":"standard","allowMethods":["eth_call"]}`), nil
+		},
+	}
+	s := newTestStrategyWith(t, fc, false)
+	enableTestCache(t, s)
+
+	ap := &AuthPayload{Type: common.AuthTypeSecret, Method: "eth_call", Secret: &SecretPayload{Value: "k1"}}
+	u, err := s.Authenticate(context.Background(), nil, ap)
+	require.NoError(t, err)
+	require.NotNil(t, u)
+	assert.Equal(t, "limited-user", u.Id)
+	assert.Equal(t, "standard", u.RateLimitBudget)
+	s.cache.Wait()
+	require.Equal(t, int64(1), fc.getCalls.Load())
+
+	ap.Method = "eth_getLogs"
+	u, err = s.Authenticate(context.Background(), nil, ap)
+	require.Error(t, err)
+	assert.Nil(t, u)
+	assert.Contains(t, err.Error(), "API key is not allowed for method")
+	assert.Equal(t, int64(1), fc.getCalls.Load(), "cached DB auth record must still enforce method filters")
+}
+
+func TestAuthenticate_DatabaseRecordIgnoreMethods(t *testing.T) {
+	t.Parallel()
+
+	fc := &fakeConnector{
+		id: "test",
+		getResult: func() ([]byte, error) {
+			return []byte(`{"userId":"limited-user","enabled":true,"ignoreMethods":["debug_*"]}`), nil
+		},
+	}
+	s := newTestStrategyWith(t, fc, false)
+
+	ap := &AuthPayload{Type: common.AuthTypeSecret, Method: "debug_traceBlockByNumber", Secret: &SecretPayload{Value: "k1"}}
+	u, err := s.Authenticate(context.Background(), nil, ap)
+	require.Error(t, err)
+	assert.Nil(t, u)
+	assert.Contains(t, err.Error(), "API key is not allowed for method")
+
+	ap.Method = "eth_call"
+	u, err = s.Authenticate(context.Background(), nil, ap)
+	require.NoError(t, err)
+	require.NotNil(t, u)
+	assert.Equal(t, "limited-user", u.Id)
 }

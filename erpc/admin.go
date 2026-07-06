@@ -17,6 +17,8 @@ type ApiKey struct {
 	Key             string    `json:"key"`
 	UserId          string    `json:"userId"`
 	RateLimitBudget string    `json:"rateLimitBudget,omitempty"`
+	IgnoreMethods   []string  `json:"ignoreMethods,omitempty"`
+	AllowMethods    []string  `json:"allowMethods,omitempty"`
 	Enabled         bool      `json:"enabled"`
 	CreatedAt       time.Time `json:"createdAt"`
 	UpdatedAt       time.Time `json:"updatedAt"`
@@ -99,6 +101,45 @@ func (e *ERPC) findDatabaseConnectorById(projectId, connectorId string) (data.Co
 	return preparedProject.consumerAuthRegistry.FindDatabaseConnector(connectorId)
 }
 
+func (e *ERPC) invalidateDatabaseAuthCache(projectId, connectorId, apiKey string) {
+	if e.projectsRegistry == nil {
+		return
+	}
+
+	preparedProject := e.projectsRegistry.preparedProjects[projectId]
+	if preparedProject == nil || preparedProject.consumerAuthRegistry == nil {
+		return
+	}
+
+	if err := preparedProject.consumerAuthRegistry.InvalidateDatabaseAuthCache(connectorId, apiKey); err != nil && e.logger != nil {
+		e.logger.Debug().Err(err).Str("projectId", projectId).Str("connectorId", connectorId).Msg("failed to invalidate API key auth cache")
+	}
+}
+
+func optionalStringSliceParam(params map[string]interface{}, field string) ([]string, bool, error) {
+	raw, exists := params[field]
+	if !exists || raw == nil {
+		return nil, false, nil
+	}
+
+	switch typed := raw.(type) {
+	case []string:
+		return append([]string{}, typed...), true, nil
+	case []interface{}:
+		values := make([]string, 0, len(typed))
+		for _, item := range typed {
+			value, ok := item.(string)
+			if !ok {
+				return nil, true, fmt.Errorf("%s must contain only strings", field)
+			}
+			values = append(values, value)
+		}
+		return values, true, nil
+	default:
+		return nil, true, fmt.Errorf("%s must be an array of strings", field)
+	}
+}
+
 // handleAddApiKey adds a new API key
 func (e *ERPC) handleAddApiKey(ctx context.Context, nq *common.NormalizedRequest) (*common.NormalizedResponse, error) {
 	jrr, err := nq.JsonRpcRequest()
@@ -144,6 +185,16 @@ func (e *ERPC) handleAddApiKey(ctx context.Context, nq *common.NormalizedRequest
 		}
 	}
 
+	ignoreMethods, hasIgnoreMethods, err := optionalStringSliceParam(params, "ignoreMethods")
+	if err != nil {
+		return nil, common.NewErrInvalidRequest(err)
+	}
+
+	allowMethods, hasAllowMethods, err := optionalStringSliceParam(params, "allowMethods")
+	if err != nil {
+		return nil, common.NewErrInvalidRequest(err)
+	}
+
 	connector, err := e.findDatabaseConnectorById(projectId, connectorId)
 	if err != nil {
 		return nil, fmt.Errorf("failed to find connector: %w", err)
@@ -166,6 +217,12 @@ func (e *ERPC) handleAddApiKey(ctx context.Context, nq *common.NormalizedRequest
 	if rateLimitBudget != "" {
 		userData["rateLimitBudget"] = rateLimitBudget
 	}
+	if hasIgnoreMethods {
+		userData["ignoreMethods"] = ignoreMethods
+	}
+	if hasAllowMethods {
+		userData["allowMethods"] = allowMethods
+	}
 
 	userDataBytes, err := json.Marshal(userData)
 	if err != nil {
@@ -176,6 +233,7 @@ func (e *ERPC) handleAddApiKey(ctx context.Context, nq *common.NormalizedRequest
 	if err != nil {
 		return nil, fmt.Errorf("failed to store API key: %w", err)
 	}
+	e.invalidateDatabaseAuthCache(projectId, connectorId, apiKey)
 
 	result := map[string]interface{}{
 		"success": true,
@@ -269,6 +327,24 @@ func (e *ERPC) handleListApiKeys(ctx context.Context, nq *common.NormalizedReque
 		if budget, ok := userData["rateLimitBudget"]; ok {
 			if budgetStr, ok := budget.(string); ok {
 				apiKey.RateLimitBudget = budgetStr
+			}
+		}
+		if ignoreMethods, ok := userData["ignoreMethods"]; ok {
+			if values, ok := ignoreMethods.([]interface{}); ok {
+				for _, value := range values {
+					if method, ok := value.(string); ok {
+						apiKey.IgnoreMethods = append(apiKey.IgnoreMethods, method)
+					}
+				}
+			}
+		}
+		if allowMethods, ok := userData["allowMethods"]; ok {
+			if values, ok := allowMethods.([]interface{}); ok {
+				for _, value := range values {
+					if method, ok := value.(string); ok {
+						apiKey.AllowMethods = append(apiKey.AllowMethods, method)
+					}
+				}
 			}
 		}
 
@@ -365,6 +441,7 @@ func (e *ERPC) handleUpdateApiKey(ctx context.Context, nq *common.NormalizedRequ
 	if err := connector.Set(ctx, apiKey, userId, updatedBytes, nil); err != nil {
 		return nil, fmt.Errorf("failed to update API key: %w", err)
 	}
+	e.invalidateDatabaseAuthCache(projectId, connectorId, apiKey)
 
 	result := map[string]interface{}{
 		"success": true,
@@ -437,6 +514,7 @@ func (e *ERPC) handleDeleteApiKey(ctx context.Context, nq *common.NormalizedRequ
 	if err != nil {
 		return nil, fmt.Errorf("failed to delete API key: %w", err)
 	}
+	e.invalidateDatabaseAuthCache(projectId, connectorId, apiKey)
 
 	result := map[string]interface{}{
 		"success": true,
