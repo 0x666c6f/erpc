@@ -268,10 +268,6 @@ func (s *DatabaseStrategy) Authenticate(ctx context.Context, req *common.Normali
 			allowMethods:    userData.AllowMethods,
 			methodFiltering: len(userData.IgnoreMethods) > 0 || len(userData.AllowMethods) > 0,
 		}
-		if !s.authRecordAllowsMethod(record, req, ap) {
-			s.recordAuthFailureMetric(req, "method_not_allowed")
-			return &authFetchResult{record: nil, err: common.NewErrAuthUnauthorized("database", "API key is not allowed for method"), neg: false}, nil
-		}
 		return &authFetchResult{record: record, err: nil, neg: false}, nil
 	})
 	if sfErr != nil {
@@ -290,6 +286,10 @@ func (s *DatabaseStrategy) Authenticate(ctx context.Context, req *common.Normali
 		return nil, afr.err
 	}
 	record := afr.record
+	if !s.authRecordAllowsMethod(record, req, ap) {
+		s.recordAuthFailureMetric(req, "method_not_allowed")
+		return nil, common.NewErrAuthUnauthorized("database", "API key is not allowed for method")
+	}
 
 	// Cache the successful result if cache is available and not marked to skip
 	if afr.skipCache == false && s.cache != nil && s.cfg.Cache != nil && s.cfg.Cache.TTL != nil {

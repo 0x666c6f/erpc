@@ -258,7 +258,7 @@ Lists all loaded projects, their networks (with aliases if configured), and per-
 
 **Params**: `[{"projectId": string, "connectorId": string, "apiKey": string, "userId": string, "rateLimitBudget"?: string, "enabled"?: bool, "ignoreMethods"?: string[], "allowMethods"?: string[]}]`
 
-`enabled` defaults to `true` when omitted. `allowMethods` / `ignoreMethods` use the same wildcard matcher as file-based `secret` strategies. When `allowMethods` is present without `ignoreMethods`, database auth treats it as allowlist-only and blocks every non-matching method. `connectorId` must match a `database` strategy connector in the **project's consumer auth config** (not admin auth). Source: [`erpc/admin.go:L102-L192`](https://github.com/erpc/erpc/blob/main/erpc/admin.go#L102-L192)
+`enabled` defaults to `true` when omitted. `allowMethods` / `ignoreMethods` use the same wildcard matcher as file-based `secret` strategies. When `allowMethods` is present without `ignoreMethods`, database auth treats it as allowlist-only and blocks every non-matching method. `connectorId` must match a `database` strategy connector in the **project's consumer auth config** (not admin auth). Source: [`erpc/admin.go:L150-L257`](https://github.com/erpc/erpc/blob/main/erpc/admin.go#L150-L257)
 
 **Response**:
 ```json
@@ -271,7 +271,7 @@ Lists all loaded projects, their networks (with aliases if configured), and per-
 
 **Params**: `[{"projectId": string, "connectorId": string, "limit"?: number, "paginationToken"?: string}]`
 
-`limit` defaults to `50`. `paginationToken` is the opaque `nextToken` from a previous response. Source: [`erpc/admin.go:L195-L291`](https://github.com/erpc/erpc/blob/main/erpc/admin.go#L195-L291)
+`limit` defaults to `50`. `paginationToken` is the opaque `nextToken` from a previous response. Source: [`erpc/admin.go:L259-L374`](https://github.com/erpc/erpc/blob/main/erpc/admin.go#L259-L374)
 
 **Response**:
 ```json
@@ -301,7 +301,7 @@ Lists all loaded projects, their networks (with aliases if configured), and per-
 
 **Params**: `[{"projectId": string, "connectorId": string, "apiKey": string, "updates": object}]`
 
-Applies patch semantics: `null` values in `updates` delete fields from the stored blob; non-null values overwrite. Common fields are `enabled`, `rateLimitBudget`, `ignoreMethods`, and `allowMethods`. No schema enforcement — any JSON field can be added. Source: [`erpc/admin.go:L294-L381`](https://github.com/erpc/erpc/blob/main/erpc/admin.go#L294-L381)
+Applies patch semantics: `null` values in `updates` delete fields from the stored blob; non-null values overwrite. Common fields are `enabled`, `rateLimitBudget`, `ignoreMethods`, and `allowMethods`. No schema enforcement — any JSON field can be added. Source: [`erpc/admin.go:L376-L465`](https://github.com/erpc/erpc/blob/main/erpc/admin.go#L376-L465)
 
 **Response**:
 ```json

@@ -2,6 +2,8 @@ package erpc
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -22,6 +24,11 @@ type ApiKey struct {
 	Enabled         bool      `json:"enabled"`
 	CreatedAt       time.Time `json:"createdAt"`
 	UpdatedAt       time.Time `json:"updatedAt"`
+}
+
+func apiKeyFingerprint(apiKey string) string {
+	sum := sha256.Sum256([]byte(apiKey))
+	return hex.EncodeToString(sum[:])[:12]
 }
 
 func (e *ERPC) AdminAuthenticate(ctx context.Context, req *common.NormalizedRequest, method string, ap *auth.AuthPayload) (*common.User, error) {
@@ -112,7 +119,7 @@ func (e *ERPC) invalidateDatabaseAuthCache(projectId, connectorId, apiKey string
 	}
 
 	if err := preparedProject.consumerAuthRegistry.InvalidateDatabaseAuthCache(connectorId, apiKey); err != nil && e.logger != nil {
-		e.logger.Debug().Err(err).Str("projectId", projectId).Str("connectorId", connectorId).Msg("failed to invalidate API key auth cache")
+		e.logger.Warn().Err(err).Str("projectId", projectId).Str("connectorId", connectorId).Str("apiKeyHash", apiKeyFingerprint(apiKey)).Msg("failed to invalidate API key auth cache")
 	}
 }
 
@@ -148,7 +155,7 @@ func (e *ERPC) handleAddApiKey(ctx context.Context, nq *common.NormalizedRequest
 	}
 
 	if len(jrr.Params) < 1 {
-		return nil, common.NewErrInvalidRequest(fmt.Errorf("requires params: {projectId, connectorId, apiKey, userId, rateLimitBudget?}"))
+		return nil, common.NewErrInvalidRequest(fmt.Errorf("requires params: {projectId, connectorId, apiKey, userId, rateLimitBudget?, enabled?, ignoreMethods?, allowMethods?}"))
 	}
 
 	params, ok := jrr.Params[0].(map[string]interface{})

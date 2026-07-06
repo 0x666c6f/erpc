@@ -577,6 +577,64 @@ func TestAuthenticate_DatabaseRecordMethodFiltersApplyOnCacheHit(t *testing.T) {
 	assert.Equal(t, int64(1), fc.getCalls.Load(), "cached DB auth record must still enforce method filters")
 }
 
+func TestAuthenticate_DatabaseRecordMethodFiltersApplyPerSingleflightWaiter(t *testing.T) {
+	t.Parallel()
+
+	getEntered := make(chan struct{})
+	secondStarted := make(chan struct{})
+	var closeGetEntered sync.Once
+	var closeSecondStarted sync.Once
+
+	fc := &fakeConnector{
+		id: "test",
+		getResult: func() ([]byte, error) {
+			closeGetEntered.Do(func() { close(getEntered) })
+			<-secondStarted
+			time.Sleep(25 * time.Millisecond)
+			return []byte(`{"userId":"limited-user","enabled":true,"allowMethods":["eth_call"]}`), nil
+		},
+	}
+	s := newTestStrategyWith(t, fc, false)
+
+	type authResult struct {
+		user *common.User
+		err  error
+	}
+	allowedResult := make(chan authResult, 1)
+	disallowedResult := make(chan authResult, 1)
+
+	go func() {
+		u, err := s.Authenticate(context.Background(), nil, &AuthPayload{
+			Type:   common.AuthTypeSecret,
+			Method: "eth_call",
+			Secret: &SecretPayload{Value: "k1"},
+		})
+		allowedResult <- authResult{user: u, err: err}
+	}()
+
+	<-getEntered
+	go func() {
+		closeSecondStarted.Do(func() { close(secondStarted) })
+		u, err := s.Authenticate(context.Background(), nil, &AuthPayload{
+			Type:   common.AuthTypeSecret,
+			Method: "eth_getLogs",
+			Secret: &SecretPayload{Value: "k1"},
+		})
+		disallowedResult <- authResult{user: u, err: err}
+	}()
+
+	allowed := <-allowedResult
+	require.NoError(t, allowed.err)
+	require.NotNil(t, allowed.user)
+	assert.Equal(t, "limited-user", allowed.user.Id)
+
+	disallowed := <-disallowedResult
+	require.Error(t, disallowed.err)
+	assert.Nil(t, disallowed.user)
+	assert.Contains(t, disallowed.err.Error(), "API key is not allowed for method")
+	assert.Equal(t, int64(1), fc.getCalls.Load(), "concurrent miss should share one DB lookup")
+}
+
 func TestAuthenticate_DatabaseRecordIgnoreMethods(t *testing.T) {
 	t.Parallel()
 
