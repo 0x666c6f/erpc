@@ -55,17 +55,38 @@ func TestAuthProxySecretAuthAndRateLimit(t *testing.T) {
 
 	bad := httptest.NewRecorder()
 	proxy.ServeHTTP(bad, rpcRequest("/cache/evm/1?secret=bad"))
-	if bad.Code != http.StatusOK || !strings.Contains(bad.Body.String(), "invalid secret") {
+	if bad.Code != http.StatusUnauthorized || !strings.Contains(bad.Body.String(), "unauthorized") {
 		t.Fatalf("expected bad secret to be rejected, code=%d body=%s", bad.Code, bad.Body.String())
 	}
 
 	limited := httptest.NewRecorder()
 	proxy.ServeHTTP(limited, rpcRequest("/cache/evm/1?secret=good"))
-	if limited.Code != http.StatusOK || !strings.Contains(limited.Body.String(), "rate limit") {
+	if limited.Code != http.StatusTooManyRequests || !strings.Contains(limited.Body.String(), "rate-limit exceeded") {
 		t.Fatalf("expected second valid request to be rate-limited, code=%d body=%s", limited.Code, limited.Body.String())
 	}
 	if forwarded != 1 {
 		t.Fatalf("expected only one forwarded request, got %d", forwarded)
+	}
+}
+
+func TestAuthProxyNormalizesClientIPForNetworkAuth(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":"0x1"}`))
+	}))
+	defer backend.Close()
+
+	proxy := newTestAuthProxy(t, backend.URL, &common.AuthConfig{Strategies: []*common.AuthStrategyConfig{
+		{
+			Type:    common.AuthTypeNetwork,
+			Network: &common.NetworkStrategyConfig{AllowedIPs: []string{"192.0.2.1"}},
+		},
+	}}, nil)
+
+	resp := httptest.NewRecorder()
+	proxy.ServeHTTP(resp, rpcRequest("/cache/evm/1"))
+	if resp.Code != http.StatusOK || !strings.Contains(resp.Body.String(), `"result":"0x1"`) {
+		t.Fatalf("expected network auth to use host without port, code=%d body=%s", resp.Code, resp.Body.String())
 	}
 }
 
