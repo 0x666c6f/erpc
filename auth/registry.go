@@ -97,15 +97,32 @@ func (r *AuthRegistry) Authenticate(ctx context.Context, req *common.NormalizedR
 
 // FindDatabaseConnector finds a database connector by ID from the strategies
 func (r *AuthRegistry) FindDatabaseConnector(connectorId string) (data.Connector, error) {
+	dbStrategy, err := r.FindDatabaseStrategy(connectorId)
+	if err != nil {
+		return nil, err
+	}
+	return dbStrategy.GetConnector(), nil
+}
+
+func (r *AuthRegistry) FindDatabaseStrategy(connectorId string) (*DatabaseStrategy, error) {
 	for _, az := range r.strategies {
 		if az.cfg.Database != nil {
 			if az.cfg.Database.Connector != nil && az.cfg.Database.Connector.Id == connectorId {
 				// Access the connector from the DatabaseStrategy
 				if dbStrategy, ok := az.strategy.(*DatabaseStrategy); ok {
-					return dbStrategy.GetConnector(), nil
+					return dbStrategy, nil
 				}
 			}
 		}
 	}
 	return nil, fmt.Errorf("database connector with ID '%s' not found", connectorId)
+}
+
+func (r *AuthRegistry) InvalidateDatabaseAuthCache(connectorId string, apiKey string) error {
+	dbStrategy, err := r.FindDatabaseStrategy(connectorId)
+	if err != nil {
+		return err
+	}
+	dbStrategy.InvalidateCache(apiKey)
+	return nil
 }

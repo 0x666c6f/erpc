@@ -158,7 +158,7 @@ Authenticate: reads `req.ClientIP()` (proxy-resolved by HTTP ingress). Checks lo
 Looks up an API key against a connector-backed store (PostgreSQL, DynamoDB, Redis, memory, or gRPC). Includes an in-process Ristretto positive cache (default 1h TTL), a hardcoded 5-second negative cache for invalid/disabled keys, singleflight deduplication for concurrent misses, configurable retry/backoff, and a connector-down circuit-breaker with optional fail-open.
 
 Authenticate fast paths (in evaluation order):
-1. Positive Ristretto cache hit → return cached `User` immediately.
+1. Positive Ristretto cache hit → enforce cached method filters, then return cached `User`.
 2. Negative Ristretto cache hit → return `ErrAuthUnauthorized` immediately.
 3. Connector-down fast path (`tryFastFailOpen`) → return emergency user if fail-open enabled.
 4. Singleflight deduplicated DB lookup → parse JSON → cache or negative-cache.
@@ -168,10 +168,12 @@ Authenticate fast paths (in evaluation order):
 {
   "userId":          "string (required)",
   "enabled":         true,
-  "rateLimitBudget": "budget-id (optional)"
+  "rateLimitBudget": "budget-id (optional)",
+  "ignoreMethods":   ["debug_*"],
+  "allowMethods":    ["eth_call", "eth_chainId"]
 }
 ```
-`enabled: false` → `ErrAuthUnauthorized` + 5-second negative-cache entry. Missing `userId` → auth error. Missing `enabled` → treated as `true`.
+`enabled: false` → `ErrAuthUnauthorized` + 5-second negative-cache entry. Missing `userId` → auth error. Missing `enabled` → treated as `true`. `ignoreMethods` / `allowMethods` are per-key filters with the same wildcard matcher as file-based `secret` strategies. When `allowMethods` is present without `ignoreMethods`, database auth treats it as an allowlist and implicitly blocks non-matching methods. Method filters are stored with the positive cache entry so cached keys cannot bypass method restrictions.
 
 **Connector-down circuit-breaker** (added after 2026-05-13 production incident). The strategy tracks `connectorDown bool` and `connectorDownSince int64`. On transport/timeout/not-ready errors, `markConnectorDown()` sets the latch. While down, `tryFastFailOpen()` bypasses singleflight and the DB entirely — returning the emergency user (if `failOpen.enabled=true`) or rejecting immediately. One probe per second is elected via CAS to run the real DB path. A successful probe calls `markConnectorUp()`.
 
