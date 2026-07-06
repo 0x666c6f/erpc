@@ -1043,12 +1043,9 @@ export interface ConsensusPolicyConfig {
    * `tag`". The engine front-loads enough tag-matching upstreams into
    * the participant set so the first `maxParticipants` drawn satisfy
    * every entry — without changing `maxParticipants` itself.
-   * Best-effort and governed by the EXISTING consensus behaviors: if a
-   * required group has fewer healthy upstreams than requested (or the
-   * quotas can't all fit within `maxParticipants`), consensus simply
-   * runs with what it can promote and the resulting participation is
-   * handled by `lowParticipantsBehavior` / `agreementThreshold` exactly
-   * like any other low-participation tick. Empty (default) = disabled.
+   * Reordering is best-effort, but final analysis fails closed when valid
+   * consensus responses do not satisfy every required quota. Empty
+   * (default) = disabled.
    */
   requiredParticipants?: (ConsensusRequiredParticipant | undefined)[];
 }
