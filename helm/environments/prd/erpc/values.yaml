@@ -1330,7 +1330,7 @@ erpc:
 
   image:
     repository: 537124939463.dkr.ecr.eu-west-3.amazonaws.com/erpc
-    tag: "0.1.3"
+    tag: &erpcImageTag "0.1.3"
 
   postgresql:
     backup:
@@ -1381,7 +1381,7 @@ erpc:
   vault:
     jobImage:
       repository: 537124939463.dkr.ecr.eu-west-3.amazonaws.com/erpc-validator
-      tag: "0.1.3"
+      tag: &erpcValidatorImageTag "0.1.3"
 
   headlessService:
     enabled: true
@@ -1449,7 +1449,7 @@ erpc-dev:
 
   image:
     repository: 537124939463.dkr.ecr.eu-west-3.amazonaws.com/erpc
-    tag: "0.1.3"
+    tag: *erpcImageTag
 
   replicaCount: 1
 
@@ -1475,7 +1475,7 @@ erpc-dev:
     configPath: "secret/data/erpc/config-dev"
     jobImage:
       repository: 537124939463.dkr.ecr.eu-west-3.amazonaws.com/erpc-validator
-      tag: "0.1.3"
+      tag: *erpcValidatorImageTag
       pullPolicy: IfNotPresent
 
   # Public ingress for erpc-dev is managed in morpho-infra via CloudFront and
@@ -1585,7 +1585,7 @@ erpc-fallback:
     secretsPath: "secret/data/erpc/secrets"
     jobImage:
       repository: 537124939463.dkr.ecr.eu-west-3.amazonaws.com/erpc-validator
-      tag: "0.1.3"
+      tag: *erpcValidatorImageTag
       pullPolicy: IfNotPresent
     validationImage:
       enabled: true
@@ -1656,7 +1656,7 @@ erpc-processing:
 
   image:
     repository: 537124939463.dkr.ecr.eu-west-3.amazonaws.com/erpc
-    tag: "0.1.3"
+    tag: *erpcImageTag
 
   replicaCount: 3
 
@@ -1684,7 +1684,7 @@ erpc-processing:
     configPath: "secret/data/erpc/config-processing"
     jobImage:
       repository: 537124939463.dkr.ecr.eu-west-3.amazonaws.com/erpc-validator
-      tag: "0.1.3"
+      tag: *erpcValidatorImageTag
       pullPolicy: IfNotPresent
 
   extraEnvVars:
@@ -1743,7 +1743,7 @@ erpc-router:
 
   image:
     repository: 537124939463.dkr.ecr.eu-west-3.amazonaws.com/erpc
-    tag: "0.1.3"
+    tag: *erpcImageTag
 
   replicaCount: 3
 
@@ -1771,7 +1771,7 @@ erpc-router:
     configPath: "secret/data/erpc/config-router"
     jobImage:
       repository: 537124939463.dkr.ecr.eu-west-3.amazonaws.com/erpc-validator
-      tag: "0.1.3"
+      tag: *erpcValidatorImageTag
       pullPolicy: IfNotPresent
 
   extraEnvVars:
