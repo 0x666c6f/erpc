@@ -23,11 +23,11 @@ setup:
 
 .PHONY: run
 run:
-	@go run ./cmd/erpc/main.go
+	@go run ./cmd/erpc
 
 .PHONY: run-pprof
 run-pprof:
-	@go run ./cmd/erpc/main.go ./cmd/erpc/pprof.go
+	@go run -tags pprof ./cmd/erpc
 
 .PHONY: run-fake-rpcs
 run-fake-rpcs:
@@ -43,8 +43,8 @@ run-k6-evm-historical-randomized:
 
 .PHONY: build
 build:
-	@CGO_ENABLED=0 go build -ldflags="-w -s" -o ./bin/erpc-server ./cmd/erpc/main.go
-	@CGO_ENABLED=0 go build -ldflags="-w -s" -tags pprof -o ./bin/erpc-server-pprof ./cmd/erpc/*.go
+	@CGO_ENABLED=0 go build -ldflags="-w -s" -o ./bin/erpc-server ./cmd/erpc
+	@CGO_ENABLED=0 go build -ldflags="-w -s" -tags pprof -o ./bin/erpc-server-pprof ./cmd/erpc
 
 .PHONY: test
 test:

@@ -14,7 +14,7 @@ builds:
     ignore:
       - goos: windows
         goarch: arm64
-    main: ./cmd/erpc/main.go
+    main: ./cmd/erpc
     ldflags:
       - -s -w -X main.version={{.Version}} -X main.commit={{.Commit}} -X main.date={{.Date}}
 

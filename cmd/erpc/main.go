@@ -79,6 +79,11 @@ func main() {
 		Name:  "require-config",
 		Usage: "Enforce passing a config file instead of using a default project and public endpoints",
 	}
+	upstreamFlag := &cli.StringFlag{
+		Name:     "upstream",
+		Usage:    "Upstream URL to reverse-proxy after auth succeeds",
+		Required: true,
+	}
 
 	// Define the validate command
 	validateCmd := &cli.Command{
@@ -146,6 +151,29 @@ func main() {
 		}),
 	}
 
+	authProxyCmd := &cli.Command{
+		Name:  "auth-proxy",
+		Usage: "Start a lightweight auth-checking reverse proxy",
+		Flags: []cli.Flag{
+			configFileFlag,
+			upstreamFlag,
+			requireConfigFlag,
+		},
+		Action: func(ctx context.Context, cmd *cli.Command) error {
+			logger.Info().
+				Str("action", cmd.Name).
+				Str("version", common.ErpcVersion).
+				Str("commit", common.ErpcCommitSha).
+				Msg("executing command")
+			cfg, err := getConfig(logger, cmd)
+			if err != nil {
+				logger.Error().Err(err).Msg("failed to load configuration")
+				return err
+			}
+			return runAuthProxy(ctx, logger, cfg, cmd.String("upstream"))
+		},
+	}
+
 	// Define the main command
 	cmd := &cli.Command{
 		Name:      "erpc",
@@ -170,6 +198,7 @@ func main() {
 		Commands: []*cli.Command{
 			startCmd,
 			validateCmd,
+			authProxyCmd,
 		},
 	}
 	if err := cmd.Run(ctx, os.Args); err != nil {
