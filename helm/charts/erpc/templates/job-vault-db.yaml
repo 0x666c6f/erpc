@@ -75,12 +75,10 @@ spec:
 
               echo "Vault secrets file found. Creating Kubernetes Secret..."
 
-              DB_PASSWORD=$(cat /vault/secrets/secrets)
-
               kubectl create secret generic erpc-db-secret \
                 --namespace={{ .Release.Namespace }} \
                 --from-literal=username=postgres \
-                --from-literal=password="$DB_PASSWORD" \
+                --from-file=password=/vault/secrets/secrets \
                 --dry-run=client -o yaml | kubectl apply -f -
 
               echo "Secret erpc-db-secret created successfully"
