@@ -8,8 +8,7 @@ For local testing and development:
 
 ```bash
 # Navigate to chart directory
-cd charts/erpc/
-
+cd helm/charts/erpc/
 # Copy environment template and edit with your API keys
 cp .env.example .env
 # Edit .env with your actual API keys and AUTH_SECRET
