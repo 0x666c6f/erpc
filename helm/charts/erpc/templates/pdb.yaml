@@ -1,3 +1,4 @@
+{{- $replicas := ternary .Values.autoscaling.minReplicas .Values.replicaCount .Values.autoscaling.enabled -}}
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
@@ -5,7 +6,7 @@ metadata:
   labels:
     {{- include "erpc.labels" . | nindent 4 }}
 spec:
-  minAvailable: {{ sub .Values.autoscaling.minReplicas 1 }}
+  minAvailable: {{ sub $replicas 1 }}
   selector:
     matchLabels:
       {{- include "erpc.selectorLabels" . | nindent 6 }}
