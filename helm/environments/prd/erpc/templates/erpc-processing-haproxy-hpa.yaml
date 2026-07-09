@@ -1,0 +1,35 @@
+{{- if (index .Values "erpc-processing-haproxy-hpa" "enabled") }}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: erpc-erpc-processing-haproxy
+  labels:
+    app.kubernetes.io/name: haproxy
+    app.kubernetes.io/instance: erpc-erpc-processing-haproxy
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: erpc-erpc-processing-haproxy
+  minReplicas: {{ index .Values "erpc-processing-haproxy-hpa" "minReplicas" }}
+  maxReplicas: {{ index .Values "erpc-processing-haproxy-hpa" "maxReplicas" }}
+  metrics:
+    {{- if index .Values "erpc-processing-haproxy-hpa" "targetCPUUtilizationPercentage" }}
+    - type: Pods
+      pods:
+        metric:
+          name: cpu_utilization_percentage
+        target:
+          type: AverageValue
+          averageValue: {{ index .Values "erpc-processing-haproxy-hpa" "targetCPUUtilizationPercentage" }}
+    {{- end }}
+    {{- if index .Values "erpc-processing-haproxy-hpa" "targetMemoryUtilizationPercentage" }}
+    - type: Pods
+      pods:
+        metric:
+          name: memory_utilization_percentage
+        target:
+          type: AverageValue
+          averageValue: {{ index .Values "erpc-processing-haproxy-hpa" "targetMemoryUtilizationPercentage" }}
+    {{- end }}
+{{- end }}

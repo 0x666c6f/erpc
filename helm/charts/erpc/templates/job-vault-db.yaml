@@ -1,0 +1,87 @@
+{{- if ne (toString .Values.postgresql.enabled) "false" }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "erpc.fullname" . }}-db-secret-creator
+  labels:
+    {{- include "erpc.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": hook-succeeded
+    argocd.argoproj.io/sync-wave: "-3"
+    argocd.argoproj.io/sync-options: Force=true,Replace=true
+spec:
+  template:
+    metadata:
+      labels:
+        {{- include "erpc.selectorLabels" . | nindent 8 }}
+        job: db-secret-creator
+      annotations:
+        vault.hashicorp.com/agent-inject: "true"
+        vault.hashicorp.com/role: {{ include "erpc.vaultCreatorServiceAccountName" . | quote }}
+        vault.hashicorp.com/agent-inject-secret-secrets: {{ .Values.postgresql.vault.secretsPath | default "secret/data/erpc/db" | quote }}
+        vault.hashicorp.com/agent-inject-template-secrets: |
+          {{`{{- with secret "`}}{{ .Values.postgresql.vault.secretsPath | default "secret/data/erpc/db" }}{{`" -}}
+          {{- .Data.data.password -}}
+          {{- end }}`}}
+        vault.hashicorp.com/agent-pre-populate-only: "true"
+    spec:
+      serviceAccountName: {{ include "erpc.vaultCreatorServiceAccountName" . }}
+      automountServiceAccountToken: true
+      {{- if .Values.securityHardening.enabled }}
+      securityContext:
+        {{- toYaml .Values.securityHardening.podSecurityContext | nindent 8 }}
+      {{- end }}
+      restartPolicy: OnFailure
+      {{- if .Values.securityHardening.enabled }}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+      {{- end }}
+      containers:
+        - name: db-secret-creator
+          {{- if .Values.securityHardening.enabled }}
+          securityContext:
+            {{- toYaml .Values.securityHardening.containerSecurityContext | nindent 12 }}
+          {{- end }}
+          image: 537124939463.dkr.ecr.eu-west-3.amazonaws.com/docker-hub/alpine/k8s:1.31.0
+          {{- if .Values.securityHardening.enabled }}
+          env:
+            - name: HOME
+              value: /tmp
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          {{- end }}
+          command:
+            - sh
+            - -c
+            - |
+              echo "Creating ERPC database Kubernetes Secret from Vault..."
+
+              timeout=60
+              count=0
+              while [ ! -f /vault/secrets/secrets ] && [ $count -lt $timeout ]; do
+                echo "Waiting for vault secrets file... ($count/$timeout)"
+                sleep 2
+                count=$((count + 2))
+              done
+
+              if [ ! -f /vault/secrets/secrets ]; then
+                echo "ERROR: Vault secrets file not found after $timeout seconds"
+                exit 1
+              fi
+
+              echo "Vault secrets file found. Creating Kubernetes Secret..."
+
+              kubectl create secret generic erpc-db-secret \
+                --namespace={{ .Release.Namespace }} \
+                --from-literal=username=postgres \
+                --from-file=password=/vault/secrets/secrets \
+                --dry-run=client -o yaml | kubectl apply -f -
+
+              echo "Secret erpc-db-secret created successfully"
+
+              kubectl get secret erpc-db-secret -n {{ .Release.Namespace }}
+{{- end }}

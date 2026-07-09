@@ -1,0 +1,59 @@
+{{- if ne (toString .Values.postgresql.enabled) "false" }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "erpc.fullname" . }}-cnpg-recovery-health-monitoring
+  labels:
+    cnpg.io/reload: ""
+    {{- include "erpc.labels" . | nindent 4 }}
+data:
+  custom-queries: |
+    # PostgreSQL Recovery Health Metrics
+    # Detects conditions that prevent hot standby or cause recovery issues
+
+    pg_recovery_health:
+      query: |
+        SELECT
+          CASE WHEN pg_is_in_recovery() THEN 1 ELSE 0 END AS is_replica,
+          CASE WHEN pg_is_in_recovery() AND NOT pg_is_wal_replay_paused() THEN 1 ELSE 0 END AS recovery_active,
+          CASE WHEN pg_is_in_recovery() AND pg_is_wal_replay_paused() THEN 1 ELSE 0 END AS recovery_paused,
+          COALESCE(EXTRACT(EPOCH FROM (now() - pg_last_xact_replay_timestamp()))::bigint, 0) AS replication_lag_seconds
+      metrics:
+        - is_replica:
+            usage: "GAUGE"
+            description: "1 if this instance is a replica, 0 if primary"
+        - recovery_active:
+            usage: "GAUGE"
+            description: "1 if recovery is actively replaying WAL, 0 otherwise"
+        - recovery_paused:
+            usage: "GAUGE"
+            description: "1 if recovery is paused (critical - server will shut down if unpaused)"
+        - replication_lag_seconds:
+            usage: "GAUGE"
+            description: "Seconds since last replayed transaction"
+
+    pg_hot_standby_params:
+      query: |
+        SELECT
+          current_setting('max_connections')::int AS max_connections,
+          current_setting('max_worker_processes')::int AS max_worker_processes,
+          current_setting('max_wal_senders')::int AS max_wal_senders,
+          current_setting('max_prepared_transactions')::int AS max_prepared_transactions,
+          current_setting('max_locks_per_transaction')::int AS max_locks_per_transaction
+      metrics:
+        - max_connections:
+            usage: "GAUGE"
+            description: "Current max_connections setting"
+        - max_worker_processes:
+            usage: "GAUGE"
+            description: "Current max_worker_processes setting"
+        - max_wal_senders:
+            usage: "GAUGE"
+            description: "Current max_wal_senders setting"
+        - max_prepared_transactions:
+            usage: "GAUGE"
+            description: "Current max_prepared_transactions setting"
+        - max_locks_per_transaction:
+            usage: "GAUGE"
+            description: "Current max_locks_per_transaction setting"
+{{- end }}

@@ -1,0 +1,63 @@
+# Required status check that scopes the morpho-infra-deployer bot's review
+# bypass to values.yaml-only changes: it is skipped unless the deployer bot
+# authored the PR or triggered the run, and fails only when such a PR touches
+# anything other than values.yaml.
+name: only-values-yaml-guard
+
+on:
+  pull_request:
+    branches: [morpho-main]
+  merge_group:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  guard:
+    name: values-yaml-guard
+    runs-on: ubuntu-latest
+    # Skipped for non-bot PRs: a skipped job SATISFIES required status checks,
+    # so human PRs merge normally without spinning up a runner. Covers the bot
+    # both as PR author and as pusher on someone else's PR, matching on the
+    # immutable user id (not the login) so an app rename cannot silently turn
+    # the guard off while the bot keeps its review-bypass.
+    if: github.event.pull_request.user.id == 187494245 || github.actor_id == 187494245 # morpho-infra-deployer[bot]
+    steps:
+      - name: Enforce values.yaml-only changes for the deployer bot
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          MERGE_GROUP_HEAD_REF: ${{ github.event.merge_group.head_ref }}
+          REPO: ${{ github.repository }}
+        run: |
+          # merge_group events carry no pull_request.number; extract it from
+          # the head ref (refs/heads/gh-readonly-queue/<base>/pr-<N>-<sha>).
+          if [[ -z "$PR_NUMBER" && -n "$MERGE_GROUP_HEAD_REF" ]]; then
+            PR_NUMBER=$(echo "$MERGE_GROUP_HEAD_REF" | grep -oE '/pr-[0-9]+' | grep -oE '[0-9]+')
+          fi
+
+          # Include previous_filename so a rename cannot smuggle a non-values
+          # path out of sight (the files API only reports the new path).
+          if ! mapfile -t CHANGED < <(gh api --paginate "repos/${REPO}/pulls/${PR_NUMBER}/files" --jq '.[] | .filename, (.previous_filename // empty)'); then
+            echo "❌ Failed to fetch changed files from the GitHub API."
+            exit 1
+          fi
+          echo "Files changed by the deployer bot:"
+          printf '  %s\n' "${CHANGED[@]}"
+
+          OFFENDING=()
+          for file in "${CHANGED[@]}"; do
+            if [[ "$file" != "values.yaml" && "$file" != *"/values.yaml" ]]; then
+              OFFENDING+=("$file")
+            fi
+          done
+
+          if (( ${#OFFENDING[@]} > 0 )); then
+            echo "❌ Deployer bot PR modifies files other than values.yaml:"
+            printf '  %s\n' "${OFFENDING[@]}"
+            echo "The bot may only bypass review for values.yaml-only changes."
+            exit 1
+          fi
+
+          echo "✅ Deployer bot PR only modifies values.yaml files."
