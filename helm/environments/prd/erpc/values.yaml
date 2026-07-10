@@ -1330,7 +1330,7 @@ erpc:
 
   image:
     repository: 537124939463.dkr.ecr.eu-west-3.amazonaws.com/erpc
-    tag: &erpcImageTag "0.1.3"
+    tag: &erpcImageTag "0.1.6"
 
   postgresql:
     backup:
@@ -1381,7 +1381,7 @@ erpc:
   vault:
     jobImage:
       repository: 537124939463.dkr.ecr.eu-west-3.amazonaws.com/erpc-validator
-      tag: &erpcValidatorImageTag "0.1.3"
+      tag: &erpcValidatorImageTag "0.1.6"
 
   headlessService:
     enabled: true
