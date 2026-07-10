@@ -714,6 +714,58 @@ jobs:
           subject-digest: "${{ steps.release.outputs.digest_latest_validator }}"
           push-to-registry: true
 
+  # Once the multi-arch images are published (both GHCR and ECR), trigger the
+  # chart image-tag bump. This mirrors the `update` job in morpho-org/morpho-api
+  # (.github/workflows/push.yml): dispatch the local update-image-tag.yaml via
+  # github-script + createWorkflowDispatch, using the workflow GITHUB_TOKEN
+  # (workflow_dispatch is the documented exception that lets GITHUB_TOKEN start
+  # another workflow, so no App token is needed here).
+  #
+  # It depends only on docker-manifest, so a failing GoReleaser/npm `release`
+  # job never blocks the deployment. The release_url is derived from the tag
+  # that triggered this workflow, NOT from the `release` job that publishes the
+  # GoReleaser release.
+  update:
+    permissions:
+      actions: write
+      contents: read
+    runs-on: "${{ github.repository_owner == 'erpc' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-24.04' }}"
+    needs: [docker-manifest]
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
+      - name: Validate release tag
+        id: version
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME}"
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            printf 'Invalid release tag: %s\n' "$VERSION" >&2
+            exit 1
+          fi
+          printf 'VERSION=%s\n' "$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Dispatch local update-image-tag workflow
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        env:
+          VERSION_TAG: ${{ steps.version.outputs.VERSION }}
+        with:
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'update-image-tag.yaml',
+              ref: 'morpho-main',
+              inputs: {
+                version_tag: process.env.VERSION_TAG,
+                release_url: `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/releases/tag/${process.env.VERSION_TAG}`,
+              },
+            });
+
   # Cleanup sha256-* tags that are created when pushing by digest.
   # We keep only meaningful tags like "latest" and semver releases.
   docker-cleanup-sha256-tags:
