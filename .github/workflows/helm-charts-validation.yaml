@@ -14,7 +14,7 @@ on:
 
 jobs:
   helm-charts-validation:
-    uses: morpho-org/github-actions/.github/workflows/helm-charts-validation.yml@v1
+    uses: morpho-org/github-actions/.github/workflows/helm-charts-validation.yml@72e5bf50ba83b1b72eaa6285716d545ee032a03b # v1
     with:
       runner: ubuntu-latest
       skip-patterns: "*-db,*database*,*postgres*"
