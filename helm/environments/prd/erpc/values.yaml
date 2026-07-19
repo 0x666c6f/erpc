@@ -1431,8 +1431,18 @@ erpc:
       enabled: true
       additionalLabels:
         release: prometheus
-      interval: 5s
+      # PLA-1784: 5s emitted ~64k samples/scrape and exceeded the Prometheus
+      # enforcedSampleLimit (whole scrape dropped -> TargetDown). 15s cuts ingestion ~3x.
+      interval: 15s
       scrapeTimeout: 4s
+      # PLA-1784: drop high-cardinality internal telemetry unused by dashboards to
+      # get back under the enforcedSampleLimit (~64k -> ~43k samples/scrape).
+      # NB: drop the whole metric, never the `le` label (would create duplicate series).
+      # None of these families is consumed by prometheus-rules.yaml or a dashboard.
+      metricRelabelings:
+        - action: drop
+          sourceLabels: [__name__]
+          regex: "erpc_selection_.*|erpc_upstream_selection_total|erpc_upstream_response_size_bytes_.*"
 
 # =============================================================================
 # eRPC Dev Instance - Single pod, no HPA, no database
