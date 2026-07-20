@@ -202,9 +202,15 @@ func TestWaitCap_DoesNotReplaceShortCircuitWinner(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 	close(slowRelease)
 
+	// The number of slow participants is 1 or 2 depending on an internal
+	// timer race: the escalation timer (~50ms) may spawn a third participant
+	// before the wait-cap timer (50ms) breaks the collection loop. Assert
+	// against callCount — stable once the loop broke (both timers fired well
+	// before slowRelease closed) — so every started slow participant's late
+	// response is drained regardless of which timer won.
 	require.Eventually(t, func() bool {
-		return slowBodyClosed.Load() == 1
-	}, 5*time.Second, 10*time.Millisecond, "late response should still be drained")
+		return slowBodyClosed.Load() == callCount.Load()-1
+	}, 5*time.Second, 10*time.Millisecond, "every late response should still be drained")
 	assert.Never(t, func() bool {
 		return winnerBodyClosed.Load() != 0
 	}, 200*time.Millisecond, 10*time.Millisecond, "wait-cap finalization must not replace or release short-circuit winner")
