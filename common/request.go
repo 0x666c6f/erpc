@@ -981,7 +981,7 @@ func (r *NormalizedRequest) EnrichFromHttp(headers http.Header, queryArgs url.Va
 	if useUpstream := getQueryArg(queryDirectiveUseUpstream); useUpstream != "" {
 		r.directives.UseUpstream = strings.TrimSpace(useUpstream)
 	}
-	if checkAllUpstreams := queryArgs.Get(queryDirectiveCheckAllUpstreams); checkAllUpstreams != "" {
+	if checkAllUpstreams := getQueryArg(queryDirectiveCheckAllUpstreams); checkAllUpstreams != "" {
 		r.directives.CheckAllUpstreams = strings.ToLower(strings.TrimSpace(checkAllUpstreams)) == "true"
 	}
 
@@ -996,7 +996,7 @@ func (r *NormalizedRequest) EnrichFromHttp(headers http.Header, queryArgs url.Va
 	if skipCacheRead := getQueryArg(queryDirectiveSkipCacheRead); skipCacheRead != "" {
 		r.directives.SkipCacheRead = strings.TrimSpace(skipCacheRead)
 	}
-	if cacheMaxAge := queryArgs.Get(queryDirectiveCacheMaxAge); cacheMaxAge != "" {
+	if cacheMaxAge := getQueryArg(queryDirectiveCacheMaxAge); cacheMaxAge != "" {
 		trimmed := strings.TrimSpace(cacheMaxAge)
 		if v, err := strconv.ParseInt(trimmed, 10, 64); err == nil && v >= 0 {
 			r.directives.CacheMaxAgeSeconds = &v

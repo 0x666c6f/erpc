@@ -273,3 +273,36 @@ func TestTrackerBlockTimeReanchorsAfterHeadRollback(t *testing.T) {
 		"EMA must move toward the new 3s/block cadence instead of staying frozen")
 	assert.Less(t, int64(bt), int64(2*time.Second))
 }
+
+// A moderate rollback (larger than the network hysteresis window but far
+// below the shared-counter tolerance) must also re-anchor the EMA: fork
+// semantics accept such corrections immediately, so without re-anchoring
+// the anchor would stall until the chain re-passed it.
+func TestTrackerBlockTimeReanchorsAfterModerateRollback(t *testing.T) {
+	tracker := newRollbackTestTracker(t, "test-rollback-blocktime-moderate")
+	ups := common.NewFakeUpstream("a")
+	net := ups.NetworkId()
+	base := int64(1_700_000_000)
+
+	// Establish a ~1s/block EMA (4 observations → 3 samples).
+	tracker.SetLatestBlockNumber(ups, 100, base)
+	tracker.SetLatestBlockNumber(ups, 101, base+1)
+	tracker.SetLatestBlockNumber(ups, 102, base+2)
+	tracker.SetLatestBlockNumber(ups, 103, base+3)
+	assert.InDelta(t, float64(time.Second), float64(tracker.GetNetworkBlockTime(net)), float64(50*time.Millisecond))
+
+	// Correction 4 blocks back — beyond the hysteresis window, accepted
+	// immediately (no EMA sample of its own).
+	tracker.SetLatestBlockNumber(ups, 99, base+4)
+	assert.Equal(t, int64(99), networkLatest(tracker, net))
+
+	// First forward observation re-anchors; the next one samples again
+	// (3s/block here) and the EMA starts moving.
+	tracker.SetLatestBlockNumber(ups, 100, base+7)
+	tracker.SetLatestBlockNumber(ups, 101, base+10)
+
+	bt := tracker.GetNetworkBlockTime(net)
+	assert.Greater(t, int64(bt), int64(1050*time.Millisecond),
+		"EMA must move toward the new cadence instead of staying frozen behind a stale anchor")
+	assert.Less(t, int64(bt), int64(2*time.Second))
+}

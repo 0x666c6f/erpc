@@ -1493,8 +1493,11 @@ func (t *Tracker) SetLatestBlockNumber(upstream common.Upstream, blockNumber int
 		if nextNtwVal > oldNtwVal && blockTimestamp > 0 {
 			// Feed block.timestamp into the EMA for dynamic block time estimation.
 			// Uses on-chain timestamps (not local clock) so the EMA tracks actual
-			// chain production rate, not our polling cadence.
-			t.updateBlockTimeSample(ntwMeta, netLabel, nextNtwVal, blockTimestamp)
+			// chain production rate, not our polling cadence. Feed the CALLER's
+			// (blockNumber, blockTimestamp) pair — nextNtwVal may briefly belong
+			// to a concurrent poller's sample, and mixing its height with this
+			// caller's timestamp would corrupt the EMA input.
+			t.updateBlockTimeSample(ntwMeta, netLabel, blockNumber, blockTimestamp)
 
 			ntwMeta.evmLatestBlockTimestamp.Store(blockTimestamp)
 
@@ -1587,12 +1590,14 @@ func (t *Tracker) updateBlockTimeSample(ntwMeta *NetworkMetadata, netLabel strin
 		return
 	}
 
-	// Reject out-of-order or duplicate blocks. A block far behind prev means the
-	// head was corrected by a large rollback: re-anchor so sampling resumes
-	// instead of stalling until the chain re-passes the old (possibly bogus) prev.
+	// Reject duplicate blocks. A block behind prev means the head was
+	// corrected by an accepted rollback (the fork's hysteresis admits any
+	// gap > rollbackHysteresisBlocks, not just tolerance-sized ones):
+	// re-anchor so sampling resumes instead of stalling until the chain
+	// re-passes the old (possibly bogus) prev.
 	blockGap := blockNumber - prevBlock
 	if blockGap <= 0 {
-		if prevBlock-blockNumber > common.DefaultToleratedBlockHeadRollback {
+		if blockGap < 0 {
 			ntwMeta.evmBlockTimePrevBlock = blockNumber
 			ntwMeta.evmBlockTimePrevTimestamp = blockTimestamp
 		}
