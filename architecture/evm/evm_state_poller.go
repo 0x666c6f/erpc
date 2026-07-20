@@ -746,10 +746,13 @@ func (e *EvmStatePoller) FinalizedBlock() int64 {
 }
 
 func (e *EvmStatePoller) PollEarliestBlockNumber(ctx context.Context, probe common.EvmAvailabilityProbeType, staleness time.Duration) (int64, error) {
-	// Initialize storage for probe
+	// Initialize storage for probe. Same versioned key scheme as the earliest
+	// scheduler path — mixing sharedCounterKey with a legacy bare key here
+	// would split cross-instance coordination across two keys depending on
+	// which path initializes the probe first.
 	e.earliestMu.Lock()
 	if _, ok := e.earliestByProbe[probe]; !ok {
-		key := fmt.Sprintf("earliestBlock/%s/%s", common.UniqueUpstreamKey(e.upstream), string(probe))
+		key := sharedCounterKey("earliestBlock", common.UniqueUpstreamKey(e.upstream), string(probe))
 		e.earliestByProbe[probe] = e.sharedStateRegistry.GetCounterInt64(key, 0)
 	}
 	v := e.earliestByProbe[probe]
