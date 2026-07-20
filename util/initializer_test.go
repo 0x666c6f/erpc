@@ -1086,3 +1086,19 @@ func TestInitializer_FatalTaskWithSucceededSiblingExits(t *testing.T) {
 		t.Fatal("Stop did not return promptly after all tasks reached terminal states")
 	}
 }
+
+// MarkTaskAsFailed can set lastErr on a task that never began an attempt;
+// Error() must not panic on the never-stored lastAttempt (atomic.Value holds
+// nil until the first beginAttempt).
+func TestBootstrapTaskError_FailedBeforeFirstAttempt(t *testing.T) {
+	task := NewBootstrapTask("never-ran", func(ctx context.Context) error { return nil })
+	task.lastErr.Store(wrappedError{err: errors.New("cancelled before start")})
+
+	te := task.Error()
+	if te == nil {
+		t.Fatal("expected non-nil TaskError")
+	}
+	if !te.Timestamp.IsZero() {
+		t.Fatalf("expected zero timestamp for never-attempted task, got %v", te.Timestamp)
+	}
+}

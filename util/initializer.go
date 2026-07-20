@@ -79,10 +79,13 @@ func (t *BootstrapTask) Error() *TaskError {
 	if wr.err == nil {
 		return nil
 	}
+	// Comma-ok: MarkTaskAsFailed can set lastErr on a task that never began an
+	// attempt, so lastAttempt may hold nil — a bare assertion would panic.
+	lastAttempt, _ := t.lastAttempt.Load().(time.Time)
 	return &TaskError{
 		TaskName:  t.Name,
 		Err:       wr.err,
-		Timestamp: t.lastAttempt.Load().(time.Time),
+		Timestamp: lastAttempt,
 		Attempt:   int(t.attempts.Load()),
 	}
 }
