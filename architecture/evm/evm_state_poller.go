@@ -484,8 +484,11 @@ func (e *EvmStatePoller) PollLatestBlockNumber(ctx context.Context) (int64, erro
 
 		// A major move must pass a fresh chain-identity check before entering
 		// the shared counter / tracker (see verifyChainIdOnMajorHeadMove).
+		// Return an error (not (0, nil)): a nil-error 0 is treated as a real
+		// refresh result by TryUpdateIfStale and would be applied as a large
+		// rollback, resetting the shared head counter to 0.
 		if !e.verifyChainIdOnMajorHeadMove(ctx, "latest", e.latestBlockShared.GetValue(), blockNum) {
-			return 0, nil
+			return 0, fmt.Errorf("rejecting latest block %d: chain identity not verified on major head move", blockNum)
 		}
 
 		// Directly update tracker with the correct timestamp for this locally-fetched block
@@ -682,9 +685,10 @@ func (e *EvmStatePoller) PollFinalizedBlockNumber(ctx context.Context) (int64, e
 		e.finalizedBlockFailureCount = 0
 		e.stateMu.Unlock()
 
-		// Same chain-identity gate as the latest ratchet (see there).
+		// Same chain-identity gate as the latest ratchet (see there). Error,
+		// not (0, nil), so the rejected sample cannot be applied as a rollback.
 		if !e.verifyChainIdOnMajorHeadMove(ctx, "finalized", e.finalizedBlockShared.GetValue(), blockNum) {
-			return 0, nil
+			return 0, fmt.Errorf("rejecting finalized block %d: chain identity not verified on major head move", blockNum)
 		}
 
 		e.logger.Debug().
