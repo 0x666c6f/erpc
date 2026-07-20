@@ -500,6 +500,11 @@ func (c *ConnectorConfig) Validate() error {
 			return err
 		}
 	}
+	if c.Grpc != nil {
+		if err := c.Grpc.Validate(); err != nil {
+			return err
+		}
+	}
 
 	for i, fsCfg := range c.FailsafeForGets {
 		if err := validateConnectorFailsafe(c.Id, "failsafeForGets", i, fsCfg); err != nil {
@@ -513,6 +518,33 @@ func (c *ConnectorConfig) Validate() error {
 	}
 
 	return nil
+}
+
+// MaxGrpcConnPoolSize is the upper bound accepted for a gRPC connection-pool
+// size. It guards against a fat-fingered value opening an absurd number of
+// connections to each backing server; it is not a recommended operating point.
+const MaxGrpcConnPoolSize = 256
+
+func validateGrpcConnPoolSize(scope string, poolSize int) error {
+	if poolSize < 0 {
+		return fmt.Errorf("%s.poolSize must not be negative", scope)
+	}
+	if poolSize > MaxGrpcConnPoolSize {
+		return fmt.Errorf("%s.poolSize must be <= %d", scope, MaxGrpcConnPoolSize)
+	}
+	return nil
+}
+
+// Validate checks the gRPC cache-connector knobs. A zero PoolSize is valid and
+// means "use the built-in default".
+func (g *GrpcConnectorConfig) Validate() error {
+	return validateGrpcConnPoolSize("database.*.connector.grpc", g.PoolSize)
+}
+
+// Validate checks the gRPC upstream knobs. A zero PoolSize is valid and means
+// "use the built-in default".
+func (g *GrpcUpstreamConfig) Validate() error {
+	return validateGrpcConnPoolSize("upstream.*.grpc", g.PoolSize)
 }
 
 func validateConnectorFailsafe(connectorId, field string, index int, fsCfg *FailsafeConfig) error {
@@ -785,6 +817,11 @@ func (p *ProjectConfig) Validate(c *Config) error {
 			return err
 		}
 	}
+	if p.AllowClientDirectives != nil && *p.AllowClientDirectives != "" {
+		if _, err := NewWildcardMatcher(*p.AllowClientDirectives); err != nil {
+			return fmt.Errorf("project.*.allowClientDirectives pattern is invalid: %w", err)
+		}
+	}
 	if p.RateLimitBudget != "" {
 		if !c.HasRateLimiterBudget(p.RateLimitBudget) {
 			return fmt.Errorf("project.*.rateLimitBudget '%s' does not exist in config.rateLimiters", p.RateLimitBudget)
@@ -907,10 +944,28 @@ func (s *SecretStrategyConfig) Validate() error {
 }
 
 func (j *JwtStrategyConfig) Validate() error {
-	if len(j.VerificationKeys) == 0 {
-		return fmt.Errorf("auth.*.jwt.verificationKeys is required, add at least one verification key")
+	jwksURL := strings.TrimSpace(j.VerificationJwksUrl)
+	if len(j.VerificationKeys) == 0 && jwksURL == "" {
+		return fmt.Errorf("auth.*.jwt.verificationKeys or auth.*.jwt.verificationJwksUrl is required")
 	}
-	// No validation required for RateLimitBudgetClaimName; empty is allowed and defaulted in SetDefaults
+	if jwksURL != "" {
+		parsed, err := url.Parse(jwksURL)
+		// Prefer Hostname() over Host: values like "https://:443/jwks" parse with
+		// Host=":443" but an empty hostname, which cannot be fetched.
+		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Hostname() == "" {
+			return fmt.Errorf("auth.*.jwt.verificationJwksUrl must be a valid HTTP or HTTPS URL, got: %s", j.VerificationJwksUrl)
+		}
+	}
+	for claim, values := range j.ClaimMatchers {
+		if len(values) == 0 {
+			return fmt.Errorf("auth.*.jwt.claimMatchers.%s: must not be empty", claim)
+		}
+		for _, v := range values {
+			if strings.TrimSpace(v) == "" {
+				return fmt.Errorf("auth.*.jwt.claimMatchers.%s: empty value not allowed", claim)
+			}
+		}
+	}
 	return nil
 }
 
@@ -984,6 +1039,11 @@ func (u *UpstreamConfig) Validate(c *Config, skipEndpointCheck bool) error {
 	}
 	if u.JsonRpc != nil {
 		if err := u.JsonRpc.Validate(c); err != nil {
+			return err
+		}
+	}
+	if u.Grpc != nil {
+		if err := u.Grpc.Validate(); err != nil {
 			return err
 		}
 	}

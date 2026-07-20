@@ -14,6 +14,7 @@ import (
 type testNetwork struct {
 	cfg           *common.NetworkConfig
 	finalityState common.DataFinalityState
+	highestLatest int64
 }
 
 func (t *testNetwork) Architecture() common.NetworkArchitecture {
@@ -53,7 +54,7 @@ func (t *testNetwork) Logger() *zerolog.Logger {
 }
 
 func (t *testNetwork) EvmHighestLatestBlockNumber(ctx context.Context) int64 {
-	return 0
+	return t.highestLatest
 }
 
 func (t *testNetwork) EvmHighestFinalizedBlockNumber(ctx context.Context) int64 {

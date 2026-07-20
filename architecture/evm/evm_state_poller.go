@@ -5,7 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"runtime/debug"
+	"strconv"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/erpc/erpc/common"
@@ -24,12 +27,21 @@ const FullySyncedThreshold = 4
 // networks (not statically configured in erpc.yaml). at the moment an "evm state poller"
 // might be initiated "before" a network is physically created and configured
 // (e.g. when a new network is lazy-loaded from a Repository Provider)
-const DefaultToleratedBlockHeadRollback = 1024
+// Alias of the shared default so the poller counters and the health tracker
+// apply the same rollback tolerance to block heads.
+const DefaultToleratedBlockHeadRollback = common.DefaultToleratedBlockHeadRollback
 
 var _ common.EvmStatePoller = &EvmStatePoller{}
 
 type EvmStatePoller struct {
 	Enabled bool
+
+	// started guards the background ticker goroutine: Bootstrap may be called
+	// more than once on the same poller (upstream bootstrap tasks are retried
+	// and may be re-executed against an already-registered upstream). The
+	// ticker goroutine is bound to appCtx and has no other stop mechanism, so
+	// spawning a duplicate would poll the upstream forever.
+	started atomic.Bool
 
 	projectId    string
 	appCtx       context.Context
@@ -94,6 +106,18 @@ type EvmStatePoller struct {
 	earliestMu                   sync.RWMutex
 }
 
+// sharedCounterKey builds a shared-state counter key namespaced by the counter
+// value's wire-format version (data.CounterValueSchemaVersion). Namespacing by
+// version keeps erpc instances running incompatible counter formats from
+// reading or writing the same key — mixing the pre-0.0.63 bare-integer format
+// with the current JSON CounterInt64State on one key surfaces as an
+// "expected integer" parse error and breaks block-tip coordination. Crossing a
+// version boundary cold-starts the counter once; it re-seeds within a poll
+// interval, so requests are unaffected.
+func sharedCounterKey(parts ...string) string {
+	return data.CounterValueSchemaVersion + "/" + strings.Join(parts, "/")
+}
+
 func NewEvmStatePoller(
 	projectId string,
 	appCtx context.Context,
@@ -105,8 +129,8 @@ func NewEvmStatePoller(
 	networkId := up.NetworkId()
 	lg := logger.With().Str("component", "evmStatePoller").Str("networkId", networkId).Logger()
 
-	lbs := sharedState.GetCounterInt64(fmt.Sprintf("latestBlock/%s", common.UniqueUpstreamKey(up)), DefaultToleratedBlockHeadRollback)
-	fbs := sharedState.GetCounterInt64(fmt.Sprintf("finalizedBlock/%s", common.UniqueUpstreamKey(up)), DefaultToleratedBlockHeadRollback)
+	lbs := sharedState.GetCounterInt64(sharedCounterKey("latestBlock", common.UniqueUpstreamKey(up)), DefaultToleratedBlockHeadRollback)
+	fbs := sharedState.GetCounterInt64(sharedCounterKey("finalizedBlock", common.UniqueUpstreamKey(up)), DefaultToleratedBlockHeadRollback)
 
 	e := &EvmStatePoller{
 		projectId:                    projectId,
@@ -152,11 +176,22 @@ func (e *EvmStatePoller) Bootstrap(ctx context.Context) error {
 
 	if cfg.Evm != nil {
 		if cfg.Evm.StatePollerDebounce != 0 {
+			// Guarded by stateMu: live poll goroutines read this via
+			// resolveDebounce while Bootstrap may run again concurrently.
+			e.stateMu.Lock()
 			e.debounceInterval = cfg.Evm.StatePollerDebounce.Duration()
+			e.stateMu.Unlock()
 		}
 	}
 
 	e.logger.Debug().Msgf("bootstrapping evm state poller to track upstream latest/finalized blocks and syncing states")
+
+	if !e.started.CompareAndSwap(false, true) {
+		// A ticker goroutine is already running for this poller. Do not spawn
+		// another one — just refresh the state once so the caller still gets
+		// an up-to-date view.
+		return e.Poll(ctx)
+	}
 	e.Enabled = true
 
 	go (func() {
@@ -358,7 +393,10 @@ func (e *EvmStatePoller) Poll(ctx context.Context) error {
 //
 //	user config → block time → network FallbackStatePollerDebounce → 1s default
 func (e *EvmStatePoller) resolveDebounce(cfg *common.EvmNetworkConfig) time.Duration {
-	if dbi := e.debounceInterval; dbi != 0 {
+	e.stateMu.RLock()
+	dbi := e.debounceInterval
+	e.stateMu.RUnlock()
+	if dbi != 0 {
 		return dbi
 	}
 	if blockTime := e.tracker.GetNetworkBlockTime(e.upstream.NetworkId()); blockTime != 0 {
@@ -444,6 +482,12 @@ func (e *EvmStatePoller) PollLatestBlockNumber(ctx context.Context) (int64, erro
 		e.latestBlockFailureCount = 0
 		e.stateMu.Unlock()
 
+		// A major move must pass a fresh chain-identity check before entering
+		// the shared counter / tracker (see verifyChainIdOnMajorHeadMove).
+		if !e.verifyChainIdOnMajorHeadMove(ctx, "latest", e.latestBlockShared.GetValue(), blockNum) {
+			return 0, nil
+		}
+
 		// Directly update tracker with the correct timestamp for this locally-fetched block
 		// This happens BEFORE the OnValue callback is triggered, ensuring only the fetching node emits the metric
 		e.tracker.SetLatestBlockNumber(e.upstream, blockNum, blockTimestamp)
@@ -471,7 +515,6 @@ func (e *EvmStatePoller) SuggestLatestBlock(blockNumber int64) {
 			Msg("skipping latest block suggestion as it's not newer")
 		return
 	}
-
 	newValue := e.latestBlockShared.TryUpdate(e.appCtx, blockNumber)
 	e.logger.Trace().
 		Int64("blockNumber", blockNumber).
@@ -482,6 +525,98 @@ func (e *EvmStatePoller) SuggestLatestBlock(blockNumber int64) {
 
 func (e *EvmStatePoller) LatestBlock() int64 {
 	return e.latestBlockShared.GetValue()
+}
+
+// OnLatestBlock registers cb to fire on every forward advance of the latest block
+// number, regardless of source — a proactive poll, a SuggestLatestBlock
+// write-through from request traffic, or cross-node propagation of the shared
+// counter all flow through the same callback.
+//
+// IMPORTANT: cb runs synchronously inside the shared-variable update path, so it
+// MUST NOT block (do a non-blocking hand-off and return). Callbacks cannot be
+// unregistered, so register once per long-lived consumer, never per request.
+func (e *EvmStatePoller) OnLatestBlock(cb func(int64)) {
+	if e.latestBlockShared != nil {
+		e.latestBlockShared.OnValue(cb)
+	}
+}
+
+// verifyChainIdOnMajorHeadMove gates a polled head sample that moved beyond
+// the shared rollback tolerance (in either direction) behind a fresh chain
+// identity check. Such moves are exactly what a cross-wired endpoint — a DNS
+// record or load balancer briefly answering for another chain — produces, and
+// once a bogus sample enters the shared counters and the tracker, every
+// lag-based routing decision is skewed until corrected. Built from existing
+// primitives only: the shared tolerance constant, EvmGetChainId (always a
+// real upstream call), and Cordon on proven mismatch (the selection policy
+// already excludes cordoned upstreams). Legitimate deep reorgs and
+// post-downtime catch-ups pass the probe and are accepted unchanged; a failed
+// probe drops the sample for this cycle only — the next poll re-observes the
+// same height seconds later.
+//
+// The out-of-band Suggest* paths are deliberately NOT gated: suggestion-driven
+// upward bursts are designed behavior (response enrichment, halted-chain
+// resumes — see networks_served_tip_test.go) and cannot be verified in those
+// hot paths. A bogus suggestion self-heals within one poll cycle: the next
+// verified poll observes the real head and the >tolerance rollback is
+// accepted as a correction by both the shared counter and the tracker.
+func (e *EvmStatePoller) verifyChainIdOnMajorHeadMove(ctx context.Context, tag string, current, polled int64) bool {
+	if current <= 0 || absInt64(polled-current) <= common.DefaultToleratedBlockHeadRollback {
+		return true
+	}
+	cfgChainId := int64(0)
+	if cfg := e.upstream.Config(); cfg != nil && cfg.Evm != nil {
+		cfgChainId = cfg.Evm.ChainId
+	}
+	if cfgChainId <= 0 {
+		// Chain identity not pinned yet (auto-detection still in flight) —
+		// nothing trustworthy to verify against.
+		return true
+	}
+	eu, ok := e.upstream.(common.EvmUpstream)
+	if !ok {
+		return true
+	}
+	detected, err := eu.EvmGetChainId(ctx)
+	if err != nil {
+		// The gRPC BDS client surfaces a cross-wired server as a typed
+		// mismatch (it compares the ChainId response itself) — treat that as
+		// proof, same as a differing answer below.
+		if common.HasErrorCode(err, common.ErrCodeEndpointChainIdMismatch) {
+			e.cordonForChainIdMismatch(tag, current, polled, err)
+			return false
+		}
+		e.logger.Warn().Err(err).
+			Str("tag", tag).
+			Int64("currentValue", current).
+			Int64("polledValue", polled).
+			Msg("major head move: chainId re-validation failed, dropping sample until next poll")
+		return false
+	}
+	if detected != strconv.FormatInt(cfgChainId, 10) {
+		e.cordonForChainIdMismatch(tag, current, polled, fmt.Errorf("eth_chainId returned %s but upstream is configured for chainId %d", detected, cfgChainId))
+		return false
+	}
+	return true
+}
+
+// cordonForChainIdMismatch fails loud on a proven cross-wired endpoint: the
+// sample is rejected and the upstream is cordoned (admins uncordon via the
+// existing erpc_uncordonUpstream admin method once the endpoint is fixed).
+func (e *EvmStatePoller) cordonForChainIdMismatch(tag string, current, polled int64, cause error) {
+	e.logger.Error().Err(cause).
+		Str("tag", tag).
+		Int64("currentValue", current).
+		Int64("polledValue", polled).
+		Msg("major head move REJECTED: upstream answers for a different chain — cordoning upstream")
+	e.upstream.Cordon("*", fmt.Sprintf("chain identity mismatch on major %s head move: %s", tag, cause.Error()))
+}
+
+func absInt64(v int64) int64 {
+	if v < 0 {
+		return -v
+	}
+	return v
 }
 
 func (e *EvmStatePoller) PollFinalizedBlockNumber(ctx context.Context) (int64, error) {
@@ -546,6 +681,11 @@ func (e *EvmStatePoller) PollFinalizedBlockNumber(ctx context.Context) (int64, e
 		e.finalizedBlockSuccessfulOnce = true
 		e.finalizedBlockFailureCount = 0
 		e.stateMu.Unlock()
+
+		// Same chain-identity gate as the latest ratchet (see there).
+		if !e.verifyChainIdOnMajorHeadMove(ctx, "finalized", e.finalizedBlockShared.GetValue(), blockNum) {
+			return 0, nil
+		}
 
 		e.logger.Debug().
 			Int64("blockNumber", blockNum).
@@ -737,7 +877,7 @@ func (e *EvmStatePoller) initializeEarliestBlockDetectionAndStartScheduler(ctx c
 
 		// Initialize shared var if missing
 		if _, ok := e.earliestByProbe[probe]; !ok {
-			key := fmt.Sprintf("earliestBlock/%s/%s", common.UniqueUpstreamKey(e.upstream), string(probe))
+			key := sharedCounterKey("earliestBlock", common.UniqueUpstreamKey(e.upstream), string(probe))
 			e.earliestByProbe[probe] = e.sharedStateRegistry.GetCounterInt64(key, 0)
 		}
 

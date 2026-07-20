@@ -711,11 +711,13 @@ func TestRecordMetricsAndTracing_InfoSeverityNotCountedAsConsensusError(t *testi
 			category:    "eth_sendRawTransaction",
 			finalityStr: "latest",
 			method:      "eth_sendRawTransaction",
+			userId:      "n/a",
+			agentName:   "n/a",
 		}
 		errCounter := telemetry.MetricConsensusErrors.WithLabelValues(
-			labels.projectId, labels.networkId, labels.category, "consensus_on_error", labels.finalityStr)
+			labels.projectId, labels.networkId, labels.category, "consensus_on_error", labels.finalityStr, labels.userId, labels.agentName)
 		totalCounter := telemetry.MetricConsensusTotal.WithLabelValues(
-			labels.projectId, labels.networkId, labels.category, "consensus_on_error", labels.finalityStr)
+			labels.projectId, labels.networkId, labels.category, "consensus_on_error", labels.finalityStr, labels.userId, labels.agentName)
 		errBefore := testutil.ToFloat64(errCounter)
 		totalBefore := testutil.ToFloat64(totalCounter)
 
@@ -735,10 +737,12 @@ func TestRecordMetricsAndTracing_InfoSeverityNotCountedAsConsensusError(t *testi
 			category:    "eth_sendRawTransaction",
 			finalityStr: "latest",
 			method:      "eth_sendRawTransaction",
+			userId:      "n/a",
+			agentName:   "n/a",
 		}
 		serverErr := common.NewErrEndpointServerSideException(errors.New("boom"), nil, 500)
 		errCounter := telemetry.MetricConsensusErrors.WithLabelValues(
-			labels.projectId, labels.networkId, labels.category, "consensus_on_error", labels.finalityStr)
+			labels.projectId, labels.networkId, labels.category, "consensus_on_error", labels.finalityStr, labels.userId, labels.agentName)
 		errBefore := testutil.ToFloat64(errCounter)
 
 		e.recordMetricsAndTracing(newTestRequest(), time.Now(),

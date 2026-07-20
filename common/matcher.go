@@ -31,14 +31,20 @@ type parser struct {
 	pos    int
 }
 
-func WildcardMatch(pattern, value string) (bool, error) {
+type MatcherFunc func(string) bool
+
+func NewWildcardMatcher(pattern string) (MatcherFunc, error) {
 	tokens, err := tokenize(pattern)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 
 	p := &parser{tokens: tokens}
-	matcher, err := p.parseExpression()
+	return p.parseExpression()
+}
+
+func WildcardMatch(pattern, value string) (bool, error) {
+	matcher, err := NewWildcardMatcher(pattern)
 	if err != nil {
 		return false, err
 	}
@@ -109,6 +115,36 @@ func UpstreamMatchesSelector(pattern string, u Upstream) (bool, error) {
 		tags = cfg.Tags
 	}
 	return MatchesSelector(pattern, u.Id(), tags)
+}
+
+// SelectorAdmits reports whether `pattern` permits an entity identified by `id`
+// and carrying `tags`. It extends MatchesSelector with tag-level exclusion so a
+// negated selector can filter by tag — MatchesSelector deliberately matches
+// negation against the id only (see its doc), but a source-tagged cache
+// connector must be excludable by tag (a `!systx*` request must skip a
+// `systx`-tagged cache even though the connector id is e.g. `prism`).
+//
+//   - Positive patterns (no `!`): identical to MatchesSelector — admitted if the
+//     id matches, else if any tag matches.
+//   - Patterns containing `!`: admitted only if the id AND every tag satisfy the
+//     expression; one excluded tag rejects the entity. The `!`-branch mirrors
+//     MatchesSelector's own negation guard.
+func SelectorAdmits(pattern, id string, tags []string) (bool, error) {
+	if pattern == "" {
+		return false, nil
+	}
+	if !strings.ContainsRune(pattern, '!') {
+		return MatchesSelector(pattern, id, tags)
+	}
+	if ok, err := WildcardMatch(pattern, id); err != nil || !ok {
+		return false, err
+	}
+	for _, t := range tags {
+		if ok, err := WildcardMatch(pattern, t); err != nil || !ok {
+			return false, err
+		}
+	}
+	return true, nil
 }
 
 // ValidatePattern checks if a pattern string is syntactically valid.
