@@ -65,8 +65,12 @@ spec:
               1
             )
 
+    # PLA-1946: 5s caused rule-evaluation overruns on these heavy per-pod
+    # histogram aggregations -> Prometheus dropped duplicate/out-of-order samples.
+    # 15s matches the eRPC scrape interval (PLA-1784): no real resolution is lost
+    # (data refreshes every 15s) and evaluations comfortably fit their interval.
     - name: erpc.controller.rules
-      interval: 5s
+      interval: 15s
       rules:
         - record: erpc:network_request_duration_seconds_bucket:rate1m_by_pod
           expr: |

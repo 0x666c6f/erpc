@@ -226,9 +226,11 @@ erpc-haproxy:
         # Pod namespace for Kubernetes API lookups
         - name: POD_NAMESPACE
           value: "morpho-prd"
-        # Fast updates for responsive load balancing (matches pod scrape)
+        # Responsive load balancing, aligned with the 15s pod scrape / recording
+        # rules (PLA-1784/PLA-1946). Polling faster than 15s only re-reads the
+        # same recorded value and adds no freshness.
         - name: UPDATE_INTERVAL
-          value: "5s"
+          value: "15s"
         # Weight range
         - name: MIN_WEIGHT
           value: "10"
@@ -859,8 +861,9 @@ erpc-processing-haproxy:
           value: "erpc-processing-backend"
         - name: POD_NAMESPACE
           value: "morpho-prd"
+        # Aligned with the 15s scrape / recording rules (PLA-1784/PLA-1946).
         - name: UPDATE_INTERVAL
-          value: "5s"
+          value: "15s"
         - name: MIN_WEIGHT
           value: "10"
         - name: MAX_WEIGHT
@@ -1155,8 +1158,9 @@ erpc-router-haproxy:
           value: "erpc-router-backend"
         - name: POD_NAMESPACE
           value: "morpho-prd"
+        # Aligned with the 15s scrape / recording rules (PLA-1784/PLA-1946).
         - name: UPDATE_INTERVAL
-          value: "5s"
+          value: "15s"
         - name: MIN_WEIGHT
           value: "10"
         - name: MAX_WEIGHT
