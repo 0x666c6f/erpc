@@ -154,6 +154,7 @@ export interface ServerConfig {
     grpcPortV6?: number;
     grpcMaxRecvMsgSize?: number;
     grpcMaxSendMsgSize?: number;
+    grpcReflection?: boolean;
     maxTimeout?: Duration;
     readTimeout?: Duration;
     writeTimeout?: Duration;
@@ -177,6 +178,14 @@ export interface ServerConfig {
      * (useful for low-latency / bandwidth-constrained clients).
      */
     executionHeaders?: ExecutionHeadersMode;
+    /**
+     * CostHeaders opts into the cost/billing response headers
+     * (X-ERPC-Calls, X-ERPC-Billable, X-ERPC-Methods, X-ERPC-Credits,
+     * X-ERPC-Credits-Version) on single and batch responses. Off by
+     * default. Credit-unit pricing is vendor-level configuration — see
+     * CreditUnitsProvider and UpstreamConfig.CreditUnits.
+     */
+    costHeaders?: boolean;
 }
 /**
  * ExecutionHeadersMode controls how much per-request execution detail is
@@ -405,6 +414,14 @@ export interface GrpcConnectorConfig {
         [key: string]: string;
     };
     getTimeout?: Duration;
+    /**
+     * PoolSize is the number of independent gRPC connections opened to each
+     * backing server, selected round-robin per request. Larger values raise the
+     * concurrent-stream ceiling and shrink the blast radius of a single wedged
+     * connection, at the cost of more open connections per server. When unset
+     * (0) a built-in default is used.
+     */
+    poolSize?: number;
 }
 export interface MemoryConnectorConfig {
     maxItems: number;
@@ -464,6 +481,15 @@ export interface PostgreSQLConnectorConfig {
     getTimeout?: Duration;
     setTimeout?: Duration;
     iamAuth?: PostgreSQLIAMAuthConfig;
+    /**
+     * SkipSchemaSetup skips all startup DDL (CREATE TABLE/INDEX, column
+     * migrations, pg_cron) and the local expired-row cleanup DELETE loop. Set
+     * it for connectors whose ConnectionUri targets a read-only replica (e.g.
+     * an Aurora global-database secondary): DDL cannot execute there (SQLSTATE
+     * 25006) and is not write-forwarded, so the writer-region connector owns
+     * the schema and the replica receives it via storage replication.
+     */
+    skipSchemaSetup?: boolean;
 }
 export interface AwsAuthConfig {
     mode: 'file' | 'env' | 'secret';
@@ -575,7 +601,20 @@ export interface ProjectConfig {
      * Configure user agent tracking at the project level
      */
     userAgentMode?: UserAgentTrackingMode;
+    /**
+     * TrustUserIdHeader makes erpc read the caller's user identity from the
+     * X-ERPC-User-Id request header (see common.HeaderUserId) and use it for the
+     * `user` metric/log label — but only when no auth strategy resolved a user
+     * (auth wins) and only for attribution (no rate-limit budget is derived).
+     * This is for deployments that authenticate callers in front of erpc (e.g. a
+     * gateway) and want per-user erpc telemetry without erpc performing auth.
+     * erpc does NOT validate the header, so enable this ONLY when erpc is reachable
+     * solely by a trusted proxy that sets the header and strips any client copy —
+     * otherwise callers can spoof their own attribution. Default false.
+     */
+    trustUserIdHeader?: boolean;
     forwardHeaders?: string[];
+    allowClientDirectives?: string;
     ignoreMethods?: string[];
     allowMethods?: string[];
 }
@@ -675,6 +714,16 @@ export interface UpstreamConfig {
     rateLimitBudget?: string;
     rateLimitAutoTune?: RateLimitAutoTuneConfig;
     capabilities?: string[];
+    /**
+     * CreditUnits overrides the vendor's built-in per-method credit table
+     * (CreditUnitsProvider) for this upstream, merged per method over the
+     * vendor defaults ("*" = fallback for unlisted methods). Normally set
+     * once per provider via `providers[].settings.creditUnits`, which is
+     * copied onto every upstream the provider generates.
+     */
+    creditUnits?: {
+        [key: string]: number;
+    };
     shadow?: ShadowUpstreamConfig;
     /**
      * Routing holds per-upstream routing hints consumed by the selection
@@ -810,6 +859,12 @@ export interface GrpcUpstreamConfig {
     headers?: {
         [key: string]: string;
     };
+    /**
+     * PoolSize is the number of independent gRPC connections opened to this
+     * upstream, selected round-robin per request. See GrpcConnectorConfig.PoolSize.
+     * When unset (0) a built-in default is used.
+     */
+    poolSize?: number;
 }
 export interface EvmUpstreamConfig {
     chainId: number;
@@ -1586,6 +1641,10 @@ export interface JwtStrategyConfig {
     };
     verificationJwksUrl?: string;
     verificationJwksRefreshInterval?: Duration;
+    /**
+     * Skipping TLS verification is an explicit operator opt-in for the JWKS
+     * fetch, not a hardcoded bypass.
+     */
     verificationJwksTlsInsecureSkipVerify?: boolean;
     /**
      * RateLimitBudgetClaimName is the JWT claim name that, if present,
@@ -1811,6 +1870,14 @@ export interface UpstreamAttempt {
     attemptidx: number;
     errorcode: string;
     errordetail: string;
+    /**
+     * CreditUnits is the vendor credit-unit cost this attempt accrued
+     * (the upstream's resolved table — vendor defaults merged with config
+     * overrides; vendors with no table default to a flat 1 credit per
+     * request). 0 when the attempt provably never dialed the vendor
+     * (skipped / breaker-open) or the vendor was opted out ("*": 0).
+     */
+    creditunits: number;
 }
 /**
  * ExecState centralizes the per-request execution counters and the
@@ -1935,4 +2002,10 @@ export interface User {
     id: string;
     ratelimitbudget: string;
 }
+/**
+ * MaxGrpcConnPoolSize is the upper bound accepted for a gRPC connection-pool
+ * size. It guards against a fat-fingered value opening an absurd number of
+ * connections to each backing server; it is not a recommended operating point.
+ */
+export declare const MaxGrpcConnPoolSize = 256;
 //# sourceMappingURL=generated.d.ts.map
