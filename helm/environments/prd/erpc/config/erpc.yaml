@@ -1,0 +1,817 @@
+logLevel: error
+tracing:
+  enabled: true
+  endpoint: "otel-collector.opentelemetry.svc.cluster.local:4317"
+  protocol: "grpc"
+  sampleRate: 0.01
+  detailed: true
+server:
+  listenV4: true
+  httpHostV4: "0.0.0.0"
+  httpPortV4: 4000
+  maxTimeout: "120s"
+  executionHeaders: summary
+healthCheck:
+  mode: simple
+  defaultEval: "any:initializedUpstreams"
+metrics:
+  enabled: true
+  listenV4: true
+  hostV4: "0.0.0.0"
+  port: 4001
+  errorLabelMode: compact
+  histogramBuckets: "0.05,0.5,5,30"
+  histogramDropLabels:
+    - agent_name
+    - composite
+rateLimiters:
+  store:
+    driver: redis
+    redis:
+      uri: "redis://default:__SECRET_REDIS_PASSWORD__@erpc-redis-haproxy:6379"
+  budgets:
+    - id: lite-app
+      rules:
+        - method: "*"
+          maxCount: 20
+          period: 1s
+    - id: quicknode-budget
+      rules:
+        - method: "*"
+          maxCount: 500
+          period: 1s
+database:
+  evmJsonRpcCache:
+    envelope: true
+    compression:
+      enabled: true
+      algorithm: zstd
+      zstdLevel: fastest
+      threshold: 1024
+    connectors:
+      - id: "postgres-connector"
+        driver: "postgresql"
+        postgresql: &postgres-config
+          connectionUri: "postgres://postgres:__SECRET_POSTGRES_PASSWORD__@erpc-db-rw.morpho-prd.svc.cluster.local:5432/erpc"
+          table: rpc_cache
+          initTimeout: 5s
+          getTimeout: 5s
+          setTimeout: 5s
+          minConns: 2
+          maxConns: 15
+          readonlyConnectionUris:
+            - postgres://postgres:__SECRET_POSTGRES_PASSWORD__@erpc-db-r.morpho-prd.svc.cluster.local:5432/erpc
+      - id: "redis-connector"
+        driver: "redis"
+        redis:
+          uri: "redis://default:__SECRET_REDIS_PASSWORD__@erpc-redis-haproxy:6379"
+          getTimeout: 3s
+          setTimeout: 3s
+    policies:
+      # ===========================================
+      # Method-specific policies with numeric blocks
+      # These have longer TTLs because data at a specific block is immutable
+      # ===========================================
+
+      # Don't cache null/empty block responses in case nodes are late
+      - network: "*"
+        method: "eth_getBlockByNumber"
+        finality: "finalized"
+        empty: "ignore"
+        connector: "postgres-connector"
+        ttl: 0
+      # eth_call with numeric blocks - unfinalized
+      - network: "*"
+        method: "eth_call"
+        params: ["*", "0x*"]
+        finality: "unfinalized"
+        connector: "redis-connector"
+        ttl: 60s
+      # eth_getStorageAt with numeric blocks - unfinalized
+      - network: "*"
+        method: "eth_getStorageAt"
+        params: ["*", "*", "0x*"]
+        finality: "unfinalized"
+        connector: "redis-connector"
+        ttl: 60s
+      # eth_getBalance with numeric blocks - unfinalized
+      - network: "*"
+        method: "eth_getBalance"
+        params: ["*", "0x*"]
+        finality: "unfinalized"
+        connector: "redis-connector"
+        ttl: 60s
+      # eth_getBlockByNumber with numeric blocks - unfinalized
+      - network: "*"
+        method: "eth_getBlockByNumber"
+        params: ["0x*", "*"]
+        finality: "unfinalized"
+        connector: "redis-connector"
+        ttl: 60s
+      # eth_getCode with numeric blocks - unfinalized
+      - network: "*"
+        method: "eth_getCode"
+        params: ["*", "0x*"]
+        finality: "unfinalized"
+        connector: "redis-connector"
+        ttl: 60s
+      # eth_chainId - never changes
+      - network: "*"
+        method: "eth_chainId"
+        finality: "unknown"
+        connector: "postgres-connector"
+        ttl: 0
+      # ===========================================
+      # Default policies by finality
+      # ===========================================
+      - network: "*"
+        method: "*"
+        finality: "finalized"
+        empty: "allow"
+        connector: "postgres-connector"
+        ttl: 0
+      - network: "*"
+        method: "*"
+        finality: "unfinalized"
+        connector: "redis-connector"
+        ttl: 30s
+      - network: "*"
+        method: "*"
+        finality: "realtime"
+        connector: "redis-connector"
+        ttl:
+          blockTimeMultiplier: 1
+          fallback: 2s
+      - network: "*"
+        method: "*"
+        finality: "unknown"
+        connector: "redis-connector"
+        ttl: 5s
+  sharedState:
+    clusterKey: "erpc-morpho-cluster"
+    connector:
+      driver: "redis"
+      redis:
+        uri: "redis://default:__SECRET_REDIS_PASSWORD__@erpc-redis-haproxy:6379"
+projects:
+  - id: cache
+    scoreMetricsWindowSize: 4m
+    cors: &shared-cors
+      allowedOrigins:
+        - "https://*.morpho.org"
+        - "https://*.morpho.dev"
+        - "https://*morpho-blue-offchain-v2-server.netlify.app"
+        - "https://*-morpho-addmo.vercel.app"
+      allowedMethods:
+        - "GET"
+        - "POST"
+        - "OPTIONS"
+      allowedHeaders:
+        - "*"
+      allowCredentials: true
+      maxAge: 3600
+    auth: &shared-auth
+      strategies:
+        - type: database
+          database:
+            connector:
+              id: auth-postgresql
+              driver: postgresql
+              postgresql:
+                connectionUri: postgres://postgres:__SECRET_POSTGRES_PASSWORD__@erpc-db-rw.morpho-prd.svc.cluster.local:5432/erpc
+                table: erpc_auth
+    networks:
+      - architecture: evm
+        evm:
+          chainId: 143
+          integrity:
+            enforceHighestBlock: true
+        failsafe:
+          - matchMethod: "eth_call"
+            matchFinality:
+              - realtime
+              - unfinalized
+            timeout:
+              duration: "15s"
+            retry:
+              maxAttempts: 2
+              delay: "250ms"
+              backoffMaxDelay: "1s"
+              backoffFactor: 2
+              emptyResultDelay: "100ms"
+            hedge: ~
+      - architecture: evm
+        evm:
+          chainId: 2741
+        directiveDefaults:
+          # Abstract returns zero tx roots for non-empty blocks.
+          validateTransactionsRoot: false
+    upstreamDefaults: &upstream-defaults
+      evm:
+        statePollerInterval: 10s
+        statePollerDebounce: 5s
+      failsafe:
+        timeout:
+          duration: "120s"
+        retry:
+          maxAttempts: 2
+          delay: "500ms"
+          backoffMaxDelay: "5s"
+          backoffFactor: 3
+        hedge:
+          delay:
+            base: "2s"
+            quantile: 0.95
+            min: "1s"
+            max: "5s"
+          maxCount: 1
+        circuitBreaker:
+          failureThresholdCount: 10
+          failureThresholdCapacity: 20
+          halfOpenAfter: "15s"
+          successThresholdCount: 3
+          successThresholdCapacity: 5
+      routing:
+        scoreMultipliers:
+          - network: "*"
+            method: "*"
+            totalRequests: 0 # Disabled - pure performance mode
+            respLatency: 8.0 # Highest weight - fastest wins
+            errorRate: 4.0 # Penalize errors
+            misbehaviors: 5.0 # Penalize consensus violations
+            throttledRate: 3.0 # Penalize rate limits
+            blockHeadLag: 2.0 # Penalize stale block head
+            finalizationLag: 1.0 # Lowest weight
+    upstreams: &shared-upstreams
+      - id: camp
+        endpoint: https://rpc-mainnet.campnetwork.xyz
+        evm:
+          chainId: 484
+      - id: bitlayer
+        endpoint: https://rpc.bitlayer.org
+        evm:
+          chainId: 200901
+      - id: alchemy-robinhood-mainnet
+        endpoint: https://robinhood-mainnet.g.alchemy.com/v2/__SECRET_UPSTREAM_ALCHEMY_ROBINHOOD_MAINNET_ALCHEMY_KEY__
+        vendorName: alchemy
+        evm:
+          chainId: 4663
+      - id: alchemy-arc-mainnet
+        endpoint: https://arc-mainnet.g.alchemy.com/v2/__SECRET_UPSTREAM_ALCHEMY_ROBINHOOD_MAINNET_ALCHEMY_KEY__
+        vendorName: alchemy
+        evm:
+          chainId: 5042
+    providers: &shared-providers
+      - id: alchemy
+        vendor: alchemy
+        settings:
+          apiKey: "__SECRET_UPSTREAM_ALCHEMY_ROBINHOOD_MAINNET_ALCHEMY_KEY__"
+        overrides:
+          "*":
+            evm:
+              getLogsAutoSplittingRangeThreshold: 10000
+          "evm:1":
+            evm:
+              getLogsAutoSplittingRangeThreshold: 100000
+          "evm:10":
+            evm:
+              getLogsAutoSplittingRangeThreshold: 100000
+          "evm:137":
+            evm:
+              getLogsAutoSplittingRangeThreshold: 100000
+          "evm:324":
+            evm:
+              getLogsAutoSplittingRangeThreshold: 100000
+          "evm:480":
+            evm:
+              getLogsAutoSplittingRangeThreshold: 100000
+          "evm:1101":
+            evm:
+              getLogsAutoSplittingRangeThreshold: 20000
+          "evm:1329":
+            evm:
+              getLogsAutoSplittingRangeThreshold: 2000
+          "evm:143":
+            evm:
+              getLogsAutoSplittingRangeThreshold: 1000
+            routing:
+              scoreMultipliers: &monad-alchemy-143-routing
+                - method: "eth_call|eth_getBalance|eth_getCode|eth_getBlockByNumber"
+                  finality:
+                    - realtime
+                    - unfinalized
+                  overall: 0.8
+                  totalRequests: 0
+                  respLatency: 2.0
+                  errorRate: 5.0
+                  misbehaviors: 5.0
+                  throttledRate: 3.0
+                  blockHeadLag: 25.0
+                  finalizationLag: 3.0
+                - method: "*"
+                  totalRequests: 0
+                  respLatency: 2.0
+                  errorRate: 4.0
+                  misbehaviors: 5.0
+                  throttledRate: 3.0
+                  blockHeadLag: 10.0
+                  finalizationLag: 2.0
+          "evm:42161":
+            evm:
+              getLogsAutoSplittingRangeThreshold: 100000
+          "evm:8453":
+            evm:
+              getLogsAutoSplittingRangeThreshold: 100000
+          "evm:80094":
+            evm:
+              getLogsAutoSplittingRangeThreshold: 100000
+          "evm:9745":
+            evm:
+              getLogsAutoSplittingRangeThreshold: 100000
+          "evm:988":
+            evm:
+              getLogsAutoSplittingRangeThreshold: 10000
+      - id: quicknode
+        vendor: quicknode
+        ignoreNetworks:
+          - evm:988
+        settings:
+          apiKey: "__SECRET_PROVIDER_QUICKNODE_APIKEY__"
+        overrides:
+          "*":
+            rateLimitBudget: quicknode-budget
+            evm:
+              getLogsAutoSplittingRangeThreshold: 10000
+          "evm:1329":
+            rateLimitBudget: quicknode-budget
+            evm:
+              getLogsAutoSplittingRangeThreshold: 2000
+          "evm:143":
+            rateLimitBudget: quicknode-budget
+            routing:
+              scoreMultipliers: &monad-quicknode-143-routing
+                - method: "eth_call|eth_getBalance|eth_getCode|eth_getBlockByNumber"
+                  finality:
+                    - realtime
+                    - unfinalized
+                  overall: 2.5
+                  totalRequests: 0
+                  respLatency: 2.0
+                  errorRate: 5.0
+                  misbehaviors: 5.0
+                  throttledRate: 3.0
+                  blockHeadLag: 25.0
+                  finalizationLag: 1.0
+                - method: "*"
+                  totalRequests: 0
+                  respLatency: 2.0
+                  errorRate: 4.0
+                  misbehaviors: 5.0
+                  throttledRate: 3.0
+                  blockHeadLag: 10.0
+                  finalizationLag: 2.0
+      - id: erpc
+        vendor: erpc
+        settings:
+          endpoint: edge.goldsky.com/standard/evm
+          secret: "__SECRET_PROVIDER_ERPC_SECRET__"
+        ignoreNetworks:
+          - evm:143
+          - evm:484
+          - evm:988
+          - evm:200901
+          - evm:999
+        overrides:
+          "*":
+            evm:
+              getLogsAutoSplittingRangeThreshold: 30000
+          "evm:1329":
+            evm:
+              getLogsAutoSplittingRangeThreshold: 2000
+          "evm:143":
+            routing:
+              scoreMultipliers:
+                - method: "*"
+                  totalRequests: 0
+                  respLatency: 2.0
+                  errorRate: 4.0
+                  misbehaviors: 5.0
+                  throttledRate: 3.0
+                  blockHeadLag: 10.0
+                  finalizationLag: 2.0
+          "evm:239":
+            evm:
+              getLogsAutoSplittingRangeThreshold: 2000
+      - id: drpc
+        vendor: drpc
+        settings:
+          apiKey: "__SECRET_PROVIDER_DRPC_APIKEY__"
+        ignoreNetworks:
+          - evm:988
+        overrides:
+          "*":
+            evm:
+              getLogsAutoSplittingRangeThreshold: 10000
+          "evm:1329":
+            evm:
+              getLogsAutoSplittingRangeThreshold: 2000
+          "evm:143":
+            routing:
+              scoreMultipliers: &monad-drpc-143-routing
+                - method: "eth_call|eth_getBalance|eth_getCode|eth_getBlockByNumber"
+                  finality:
+                    - realtime
+                    - unfinalized
+                  overall: 0.25
+                  totalRequests: 0
+                  respLatency: 2.0
+                  errorRate: 6.0
+                  misbehaviors: 5.0
+                  throttledRate: 3.0
+                  blockHeadLag: 20.0
+                  finalizationLag: 8.0
+                - method: "*"
+                  totalRequests: 0
+                  respLatency: 2.0
+                  errorRate: 4.0
+                  misbehaviors: 5.0
+                  throttledRate: 3.0
+                  blockHeadLag: 10.0
+                  finalizationLag: 2.0
+      - id: conduit
+        vendor: conduit
+        settings:
+          apiKey: "__SECRET_PROVIDER_CONDUIT_APIKEY__"
+        onlyNetworks:
+          - evm:747474
+        overrides:
+          "*":
+            evm:
+              getLogsAutoSplittingRangeThreshold: 10000
+          "evm:1329":
+            evm:
+              getLogsAutoSplittingRangeThreshold: 2000
+      - id: ankr
+        vendor: ankr
+        settings:
+          apiKey: "__SECRET_PROVIDER_ANKR_APIKEY__"
+        onlyNetworks:
+          - evm:14
+          - evm:239
+          - evm:42793
+        overrides:
+          "*":
+            evm:
+              getLogsAutoSplittingRangeThreshold: 10000
+          "evm:1329":
+            evm:
+              getLogsAutoSplittingRangeThreshold: 2000
+          "evm:239":
+            evm:
+              getLogsAutoSplittingRangeThreshold: 2000
+    networkDefaults: &shared-network-defaults
+      selectionPolicy:
+        evalScope: network-method-finality
+        evalInterval: 15s
+        evalTimeout: 100ms
+      evm:
+        servedTip:
+          enabledFor:
+            - latest
+            - finalized
+        integrity:
+          enforceGetLogsBlockRange: true
+          enforceHighestBlock: false
+        getLogsSplitOnError: true
+        # Tank spikes: parallelize getLogs split sub-queries (split >> chunk).
+        getLogsSplitConcurrency: 200
+        # Cache-chunk concurrency: keep lower than split to avoid DB/Redis stampede.
+        getLogsCacheChunkConcurrency: 50
+        # Cap decompressed upstream response size; TooLarge triggers split instead of buffering/OOM.
+        getLogsMaxResponseBytes: 67108864
+        getLogsMaxAllowedRange: 150001
+        multicall3Aggregation:
+          enabled: true
+          windowMs: 50
+          minWaitMs: 5
+          maxCalls: 100
+          maxCalldataBytes: 262144
+          maxQueueSize: 5000
+          maxPendingBatches: 500
+          cachePerCall: true
+          allowCrossUserBatching: true
+          allowPendingTagBatching: false
+      failsafe:
+        timeout:
+          duration: "120s"
+        retry:
+          maxAttempts: 4
+          delay: "1s"
+          backoffMaxDelay: "10s"
+          backoffFactor: 3
+          emptyResultDelay: "200ms"
+        hedge:
+          delay:
+            base: "2s"
+            quantile: 0.95
+            min: "1s"
+            max: "5s"
+          maxCount: 1
+  - id: realtime
+    scoreMetricsWindowSize: 4m
+    cors: *shared-cors
+    auth: *shared-auth
+    networks:
+      - architecture: evm
+        evm:
+          chainId: 143
+          integrity:
+            enforceHighestBlock: true
+        failsafe:
+          - matchMethod: "eth_call"
+            matchFinality:
+              - realtime
+              - unfinalized
+            timeout:
+              duration: "15s"
+            retry:
+              maxAttempts: 2
+              delay: "250ms"
+              backoffMaxDelay: "1s"
+              backoffFactor: 2
+              emptyResultDelay: "100ms"
+            hedge: ~
+    upstreamDefaults: *upstream-defaults
+    upstreams: *shared-upstreams
+    providers: *shared-providers
+    networkDefaults:
+      !!merge <<: *shared-network-defaults
+      directiveDefaults:
+        skipCacheRead: true
+  - id: experimental
+    scoreMetricsMode: detailed
+    scoreGranularity: method
+    scoreMetricsWindowSize: 4m
+    cors: *shared-cors
+    auth: *shared-auth
+    networks:
+      - architecture: evm
+        evm:
+          chainId: 143
+          integrity:
+            enforceHighestBlock: true
+        failsafe:
+          - matchMethod: "eth_call"
+            matchFinality:
+              - realtime
+              - unfinalized
+            timeout:
+              duration: "15s"
+            retry:
+              maxAttempts: 2
+              delay: "250ms"
+              backoffMaxDelay: "1s"
+              backoffFactor: 2
+              emptyResultDelay: "100ms"
+            hedge: ~
+    upstreamDefaults: *upstream-defaults
+    upstreams: *shared-upstreams
+    providers:
+      # Include all shared providers
+      - id: alchemy
+        vendor: alchemy
+        settings:
+          apiKey: "__SECRET_UPSTREAM_ALCHEMY_ROBINHOOD_MAINNET_ALCHEMY_KEY__"
+        overrides:
+          "*":
+            evm:
+              getLogsAutoSplittingRangeThreshold: 10000
+          "evm:1":
+            evm:
+              getLogsAutoSplittingRangeThreshold: 100000
+          "evm:10":
+            evm:
+              getLogsAutoSplittingRangeThreshold: 100000
+          "evm:137":
+            evm:
+              getLogsAutoSplittingRangeThreshold: 100000
+          "evm:324":
+            evm:
+              getLogsAutoSplittingRangeThreshold: 100000
+          "evm:480":
+            evm:
+              getLogsAutoSplittingRangeThreshold: 100000
+          "evm:1101":
+            evm:
+              getLogsAutoSplittingRangeThreshold: 20000
+          "evm:1329":
+            evm:
+              getLogsAutoSplittingRangeThreshold: 2000
+          "evm:143":
+            evm:
+              getLogsAutoSplittingRangeThreshold: 1000
+            routing:
+              scoreMultipliers: *monad-alchemy-143-routing
+          "evm:42161":
+            evm:
+              getLogsAutoSplittingRangeThreshold: 100000
+          "evm:8453":
+            evm:
+              getLogsAutoSplittingRangeThreshold: 100000
+          "evm:80094":
+            evm:
+              getLogsAutoSplittingRangeThreshold: 100000
+          "evm:9745":
+            evm:
+              getLogsAutoSplittingRangeThreshold: 100000
+          "evm:988":
+            evm:
+              getLogsAutoSplittingRangeThreshold: 10000
+      - id: quicknode
+        vendor: quicknode
+        ignoreNetworks:
+          - evm:988
+        settings:
+          apiKey: "__SECRET_PROVIDER_QUICKNODE_APIKEY__"
+        overrides:
+          "*":
+            rateLimitBudget: quicknode-budget
+            evm:
+              getLogsAutoSplittingRangeThreshold: 10000
+          "evm:1329":
+            rateLimitBudget: quicknode-budget
+            evm:
+              getLogsAutoSplittingRangeThreshold: 2000
+          "evm:143":
+            rateLimitBudget: quicknode-budget
+            routing:
+              scoreMultipliers: *monad-quicknode-143-routing
+      - id: erpc
+        vendor: erpc
+        settings:
+          endpoint: edge.goldsky.com/standard/evm
+          secret: "__SECRET_PROVIDER_ERPC_SECRET_77053707__"
+        ignoreNetworks:
+          - evm:143
+          - evm:484
+          - evm:988
+          - evm:200901
+          - evm:999
+        overrides:
+          "*":
+            evm:
+              getLogsAutoSplittingRangeThreshold: 30000
+          "evm:1329":
+            evm:
+              getLogsAutoSplittingRangeThreshold: 2000
+          "evm:143":
+            routing:
+              scoreMultipliers:
+                - method: "*"
+                  totalRequests: 0
+                  respLatency: 2.0
+                  errorRate: 4.0
+                  misbehaviors: 5.0
+                  throttledRate: 3.0
+                  blockHeadLag: 10.0
+                  finalizationLag: 2.0
+          "evm:239":
+            evm:
+              getLogsAutoSplittingRangeThreshold: 2000
+      - id: drpc
+        vendor: drpc
+        settings:
+          apiKey: "__SECRET_PROVIDER_DRPC_APIKEY__"
+        ignoreNetworks:
+          - evm:988
+        overrides:
+          "*":
+            evm:
+              getLogsAutoSplittingRangeThreshold: 10000
+          "evm:1329":
+            evm:
+              getLogsAutoSplittingRangeThreshold: 2000
+          "evm:143":
+            routing:
+              scoreMultipliers: *monad-drpc-143-routing
+      - id: conduit
+        vendor: conduit
+        settings:
+          apiKey: "__SECRET_PROVIDER_CONDUIT_APIKEY__"
+        onlyNetworks:
+          - evm:747474
+        overrides:
+          "*":
+            evm:
+              getLogsAutoSplittingRangeThreshold: 10000
+          "evm:1329":
+            evm:
+              getLogsAutoSplittingRangeThreshold: 2000
+      - id: ankr
+        vendor: ankr
+        settings:
+          apiKey: "__SECRET_PROVIDER_ANKR_APIKEY__"
+        onlyNetworks:
+          - evm:14
+          - evm:239
+          - evm:42793
+        overrides:
+          "*":
+            evm:
+              getLogsAutoSplittingRangeThreshold: 10000
+          "evm:1329":
+            evm:
+              getLogsAutoSplittingRangeThreshold: 2000
+          "evm:239":
+            evm:
+              getLogsAutoSplittingRangeThreshold: 2000
+      # SQD Portal - force eth_getLogs, trace_block to SQD for supported chains
+      # Batch settings (supportsBatch, batchMaxWait: 1ns, batchMaxSize: 1000) are set by default
+      # NOTE: routing.scoreMultipliers in overrides fully replaces upstreamDefaults.routing,
+      # so component multipliers must be repeated here alongside overall.
+      - id: sqd-portal
+        vendor: sqd
+        settings:
+          endpoint: "https://morpho.portal.sqd.dev/rpc/v1/evm/{chainId}"
+          apiKey: "__SECRET_PROVIDER_SQD_PORTAL_APIKEY__"
+        onlyNetworks:
+          - evm:1 # Ethereum
+          - evm:8453 # Base
+          - evm:137 # Polygon
+          - evm:42161 # Arbitrum
+          - evm:10 # Optimism
+          - evm:1301 # Unichain
+          - evm:998 # Hyperliquid
+          - evm:747474 # Katana
+          - evm:480 # Worldchain
+        overrides:
+          "*":
+            routing:
+              scoreMultipliers:
+                - method: "eth_chainId"
+                  overall: 100
+                  totalRequests: 0
+                  respLatency: 8.0
+                  errorRate: 4.0
+                  misbehaviors: 5.0
+                  throttledRate: 3.0
+                  blockHeadLag: 2.0
+                  finalizationLag: 1.0
+                - method: "eth_blockNumber"
+                  overall: 100
+                  totalRequests: 0
+                  respLatency: 8.0
+                  errorRate: 4.0
+                  misbehaviors: 5.0
+                  throttledRate: 3.0
+                  blockHeadLag: 2.0
+                  finalizationLag: 1.0
+                - method: "eth_getBlockByNumber"
+                  overall: 100
+                  totalRequests: 0
+                  respLatency: 8.0
+                  errorRate: 4.0
+                  misbehaviors: 5.0
+                  throttledRate: 3.0
+                  blockHeadLag: 2.0
+                  finalizationLag: 1.0
+                - method: "eth_getTransactionByBlockNumberAndIndex"
+                  overall: 100
+                  totalRequests: 0
+                  respLatency: 8.0
+                  errorRate: 4.0
+                  misbehaviors: 5.0
+                  throttledRate: 3.0
+                  blockHeadLag: 2.0
+                  finalizationLag: 1.0
+                - method: "eth_getLogs"
+                  overall: 1000
+                  totalRequests: 0
+                  respLatency: 8.0
+                  errorRate: 4.0
+                  misbehaviors: 5.0
+                  throttledRate: 3.0
+                  blockHeadLag: 2.0
+                  finalizationLag: 1.0
+                - method: "trace_block"
+                  overall: 1000
+                  totalRequests: 0
+                  respLatency: 8.0
+                  errorRate: 4.0
+                  misbehaviors: 5.0
+                  throttledRate: 3.0
+                  blockHeadLag: 2.0
+                  finalizationLag: 1.0
+                - method: "*"
+                  totalRequests: 0
+                  respLatency: 8.0
+                  errorRate: 4.0
+                  misbehaviors: 5.0
+                  throttledRate: 3.0
+                  blockHeadLag: 2.0
+                  finalizationLag: 1.0
+    networkDefaults:
+      !!merge <<: *shared-network-defaults
+      directiveDefaults:
+        cacheMaxAgeSeconds: 60
+

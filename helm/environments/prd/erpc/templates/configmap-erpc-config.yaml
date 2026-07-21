@@ -1,0 +1,33 @@
+{{/*
+Render one ConfigMap per eRPC config file under config/. The file basename
+becomes the ConfigMap name suffixed with "-config" (config/erpc.yaml ->
+ConfigMap "erpc-config"); each erpc subchart instance points at its ConfigMap
+via vault.configMapName.
+
+These ConfigMaps hold the non-secret eRPC configuration (PLA-2003). Secret
+values stay in Vault (secret/data/erpc/secrets) and are substituted into the
+__SECRET_<KEY>__ placeholders by the vault-config-creator job.
+
+Rendered as a pre-install/pre-upgrade hook (weight 0, sync-wave -4) so the
+ConfigMap is updated before the vault-config-creator job (weight 1,
+sync-wave -3) renders the final config Secret.
+*/}}
+{{- range $path, $bytes := .Files.Glob "config/*.yaml" }}
+{{- $name := trimSuffix ".yaml" (base $path) }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ printf "%s-config" $name }}
+  labels:
+    app.kubernetes.io/name: {{ printf "%s-config" $name }}
+    app.kubernetes.io/instance: {{ $.Release.Name }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation
+    argocd.argoproj.io/sync-wave: "-4"
+data:
+  erpc.yaml: |
+{{ $.Files.Get $path | indent 4 }}
+{{- end }}

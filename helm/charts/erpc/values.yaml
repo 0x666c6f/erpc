@@ -8,6 +8,13 @@ vault:
   # Non-secret eRPC config template. Secret placeholders use __SECRET_<KEY>__;
   # the API-key auth list can be generated from __SECRET_API_KEY_STRATEGIES__.
   configPath: "secret/data/erpc/config"
+  # When set, the non-secret config template is read from this ConfigMap
+  # (key "erpc.yaml") instead of Vault's configPath. Secrets are still
+  # injected from secretsPath and substituted into __SECRET_<KEY>__
+  # placeholders. The ConfigMap must be created before the
+  # vault-config-creator job runs (pre-install/pre-upgrade hook with a
+  # lower hook-weight / earlier sync-wave than the job).
+  configMapName: ""
   # Dedicated secret-only entry shared by all eRPC config variants.
   secretsPath: "secret/data/erpc/secrets"
   jobImage:
