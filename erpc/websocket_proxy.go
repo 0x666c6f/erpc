@@ -41,7 +41,6 @@ func (s *HttpServer) handleWebsocket(
 	}
 
 	nq := common.NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","id":null,"method":"websocket_connect"}`))
-	defer nq.Release()
 	nq.SetClientIP(s.resolveRealClientIP(r))
 	nq.SetNetwork(network)
 

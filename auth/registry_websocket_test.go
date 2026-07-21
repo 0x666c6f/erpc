@@ -28,7 +28,6 @@ func TestAuthRegistryAuthenticateWebsocketRequiresExplicitAccess(t *testing.T) {
 	require.NoError(t, err)
 
 	req := common.NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","id":1,"method":"eth_subscribe","params":["newHeads"]}`))
-	defer req.Release()
 
 	_, err = registry.AuthenticateWebsocket(context.Background(), req, "eth_subscribe", &AuthPayload{
 		Type: common.AuthTypeSecret, Secret: &SecretPayload{Value: "denied-key"},
