@@ -33,6 +33,48 @@ const (
 const RequestContextKey ContextKey = "rq"
 const UpstreamsContextKey ContextKey = "ups"
 
+// Context markers for selection reasons only the spawning executor knows.
+// The attempt recorder (upstream tryForward's deferred record) runs at the
+// bottom of the failsafe chain and cannot see WHICH executor caused this
+// attempt to exist, so fan-out executors tag the context they hand each
+// attempt: the consensus executor marks every participant slot
+// (consensus_slot) and the network sweep marks its non-first picks (sweep).
+// They live here with the other ContextKey constants — request.go is
+// excluded from tygo generation, and these keys are server-internal (the
+// ContextKey type has no TypeScript counterpart).
+
+// ConsensusSlotContextKey marks a context executing inside one consensus
+// participant slot.
+const ConsensusSlotContextKey ContextKey = "consensusSlot"
+
+// SweepIterationContextKey marks a context executing a non-first pick of
+// the try-all-upstreams sweep within one execution.
+const SweepIterationContextKey ContextKey = "sweepIteration"
+
+// WithConsensusSlot returns ctx marked as a consensus participant slot.
+func WithConsensusSlot(ctx context.Context) context.Context {
+	return context.WithValue(ctx, ConsensusSlotContextKey, true)
+}
+
+// IsConsensusSlot reports whether ctx executes inside a consensus
+// participant slot.
+func IsConsensusSlot(ctx context.Context) bool {
+	v, _ := ctx.Value(ConsensusSlotContextKey).(bool)
+	return v
+}
+
+// WithSweepIteration returns ctx marked as a non-first sweep pick.
+func WithSweepIteration(ctx context.Context) context.Context {
+	return context.WithValue(ctx, SweepIterationContextKey, true)
+}
+
+// IsSweepIteration reports whether ctx executes a non-first pick of the
+// try-all-upstreams sweep.
+func IsSweepIteration(ctx context.Context) bool {
+	v, _ := ctx.Value(SweepIterationContextKey).(bool)
+	return v
+}
+
 type directiveKeyNames struct {
 	header string
 	query  string
@@ -65,6 +107,14 @@ const (
 	headerDirectiveValidateTxBlockInfo        = "X-ERPC-Validate-Transaction-Block-Info"
 	headerDirectiveValidateLogFields          = "X-ERPC-Validate-Log-Fields"
 )
+
+// HeaderUserId is the request header erpc reads as the caller's user identity
+// when a project enables ProjectConfig.TrustUserIdHeader. It lets a deployment
+// that authenticates callers *in front of* erpc (e.g. an API gateway) attribute
+// erpc's per-user metrics and logs without erpc performing auth itself. erpc
+// does NOT validate the value — the gateway is trusted to set it and to strip
+// any client-supplied copy. See [NormalizedRequest.SetUserFromTrustedHeader].
+const HeaderUserId = "X-ERPC-User-Id"
 
 const (
 	queryDirectiveRetryEmpty                 = "retry-empty"
@@ -120,6 +170,18 @@ var directiveKeyRegistry = []directiveKeyNames{
 	{header: headerDirectiveValidateTxFields, query: queryDirectiveValidateTxFields},
 	{header: headerDirectiveValidateTxBlockInfo, query: queryDirectiveValidateTxBlockInfo},
 	{header: headerDirectiveValidateLogFields, query: queryDirectiveValidateLogFields},
+}
+
+var DenyAllClientDirectives MatcherFunc = func(_ string) bool { return false }
+
+// headerToQueryKey is used to normalize header keys to query keys
+var headerToQueryKey map[string]string
+
+func init() {
+	headerToQueryKey = make(map[string]string, len(directiveKeyRegistry))
+	for _, k := range directiveKeyRegistry {
+		headerToQueryKey[k.header] = k.query
+	}
 }
 
 type RequestDirectives struct {
@@ -363,9 +425,10 @@ type NormalizedRequest struct {
 	body           []byte
 	ForwardHeaders http.Header
 
-	method         string
-	directives     *RequestDirectives
-	jsonRpcRequest atomic.Pointer[JsonRpcRequest]
+	method                      string
+	directives                  *RequestDirectives
+	allowClientDirectiveMatcher MatcherFunc
+	jsonRpcRequest              atomic.Pointer[JsonRpcRequest]
 
 	// Upstream selection fields - protected by upstreamMutex
 	upstreamMutex    sync.Mutex
@@ -444,6 +507,26 @@ func (r *NormalizedRequest) SetUser(user *User) {
 		return
 	}
 	r.user.Store(user)
+}
+
+// SetUserFromTrustedHeader assigns the request's user identity from a value
+// supplied by a trusted upstream (the [HeaderUserId] header), for deployments
+// that authenticate callers in front of erpc and want per-user metrics/logs
+// without erpc doing auth. It is a no-op when value is empty (after trimming)
+// or when an auth strategy already resolved a user — auth always wins. Only the
+// Id is set; no rate-limit budget is attached, so this never enables user-level
+// rate limiting. erpc does not validate value; gate it behind
+// ProjectConfig.TrustUserIdHeader and only trust the header from a proxy that
+// strips any client-supplied copy.
+func (r *NormalizedRequest) SetUserFromTrustedHeader(value string) {
+	if r == nil || r.User() != nil {
+		return
+	}
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return
+	}
+	r.user.Store(&User{Id: value})
 }
 
 func (r *NormalizedRequest) User() *User {
@@ -592,6 +675,13 @@ func (r *NormalizedRequest) SetDirectives(directives *RequestDirectives) {
 	r.Lock()
 	defer r.Unlock()
 	r.directives = directives
+}
+
+func (r *NormalizedRequest) SetAllowClientDirectiveMatcher(matcher MatcherFunc) {
+	if r == nil {
+		return
+	}
+	r.allowClientDirectiveMatcher = matcher
 }
 
 // ApplyDirectiveDefaults applies the default directives from the network configuration.
@@ -743,6 +833,16 @@ func hasDirectiveInQueryParams(queryArgs url.Values) bool {
 	return false
 }
 
+func (r *NormalizedRequest) isDirectiveAllowed(queryKey string) bool {
+	if r.allowClientDirectiveMatcher == nil {
+		return true
+	}
+	if queryKey == "" {
+		return false
+	}
+	return r.allowClientDirectiveMatcher(queryKey)
+}
+
 func (r *NormalizedRequest) EnrichFromHttp(headers http.Header, queryArgs url.Values, mode UserAgentTrackingMode) {
 	hasDirectives := hasDirectiveInHeaders(headers) || hasDirectiveInQueryParams(queryArgs)
 
@@ -772,115 +872,131 @@ func (r *NormalizedRequest) EnrichFromHttp(headers http.Header, queryArgs url.Va
 	}
 
 	// Headers have precedence over directive defaults, but should only override when explicitly provided.
-	if hv := headers.Get(headerDirectiveRetryEmpty); hv != "" {
+
+	getHeader := func(key string) string {
+		if hv := headers.Get(key); hv != "" && r.isDirectiveAllowed(headerToQueryKey[key]) {
+			return hv
+		}
+		return ""
+	}
+
+	if hv := getHeader(headerDirectiveRetryEmpty); hv != "" {
 		r.directives.RetryEmpty = strings.ToLower(strings.TrimSpace(hv)) == "true"
 	}
-	if hv := headers.Get(headerDirectiveRetryPending); hv != "" {
+	if hv := getHeader(headerDirectiveRetryPending); hv != "" {
 		r.directives.RetryPending = strings.ToLower(strings.TrimSpace(hv)) == "true"
 	}
-	if hv := headers.Get(headerDirectiveSkipCacheRead); hv != "" {
+	if hv := getHeader(headerDirectiveSkipCacheRead); hv != "" {
 		r.directives.SkipCacheRead = strings.TrimSpace(hv)
 	}
-	if hv := headers.Get(headerDirectiveCacheMaxAge); hv != "" {
+	if hv := getHeader(headerDirectiveCacheMaxAge); hv != "" {
 		trimmed := strings.TrimSpace(hv)
 		if v, err := strconv.ParseInt(trimmed, 10, 64); err == nil && v >= 0 {
 			r.directives.CacheMaxAgeSeconds = &v
 			r.directives.CacheMaxAgeExplicit = true
 		}
 	}
-	if hv := headers.Get(headerDirectiveUseUpstream); hv != "" {
+	if hv := getHeader(headerDirectiveUseUpstream); hv != "" {
 		r.directives.UseUpstream = hv
 	}
-	if hv := headers.Get(headerDirectiveCheckAllUpstreams); hv != "" {
+	if hv := getHeader(headerDirectiveCheckAllUpstreams); hv != "" {
 		r.directives.CheckAllUpstreams = strings.ToLower(strings.TrimSpace(hv)) == "true"
 	}
-	if hv := headers.Get(headerDirectiveSkipInterpolation); hv != "" {
+	if hv := getHeader(headerDirectiveSkipInterpolation); hv != "" {
 		r.directives.SkipInterpolation = strings.ToLower(strings.TrimSpace(hv)) == "true"
 	}
-	if hv := headers.Get(headerDirectiveSkipConsensus); hv != "" {
+	if hv := getHeader(headerDirectiveSkipConsensus); hv != "" {
 		r.directives.SkipConsensus = strings.ToLower(strings.TrimSpace(hv)) == "true"
 	}
 
 	// Validation Headers
-	if hv := headers.Get(headerDirectiveEnforceHighestBlock); hv != "" {
+	if hv := getHeader(headerDirectiveEnforceHighestBlock); hv != "" {
 		r.directives.EnforceHighestBlock = strings.ToLower(strings.TrimSpace(hv)) == "true"
 	}
-	if hv := headers.Get(headerDirectiveEnforceGetLogsRange); hv != "" {
+	if hv := getHeader(headerDirectiveEnforceGetLogsRange); hv != "" {
 		r.directives.EnforceGetLogsBlockRange = strings.ToLower(strings.TrimSpace(hv)) == "true"
 	}
-	if hv := headers.Get(headerDirectiveEnforceNonNullTaggedBlocks); hv != "" {
+	if hv := getHeader(headerDirectiveEnforceNonNullTaggedBlocks); hv != "" {
 		r.directives.EnforceNonNullTaggedBlocks = strings.ToLower(strings.TrimSpace(hv)) == "true"
 	}
-	if hv := headers.Get(headerDirectiveEnforceLogIndexStrict); hv != "" {
+	if hv := getHeader(headerDirectiveEnforceLogIndexStrict); hv != "" {
 		r.directives.EnforceLogIndexStrictIncrements = strings.ToLower(strings.TrimSpace(hv)) == "true"
 	}
-	if hv := headers.Get(headerDirectiveValidateLogsBloomEmpty); hv != "" {
+	if hv := getHeader(headerDirectiveValidateLogsBloomEmpty); hv != "" {
 		r.directives.ValidateLogsBloomEmptiness = strings.ToLower(strings.TrimSpace(hv)) == "true"
 	}
-	if hv := headers.Get(headerDirectiveValidateLogsBloomMatch); hv != "" {
+	if hv := getHeader(headerDirectiveValidateLogsBloomMatch); hv != "" {
 		r.directives.ValidateLogsBloomMatch = strings.ToLower(strings.TrimSpace(hv)) == "true"
 	}
-	if hv := headers.Get(headerDirectiveValidateTxHashUniq); hv != "" {
+	if hv := getHeader(headerDirectiveValidateTxHashUniq); hv != "" {
 		r.directives.ValidateTxHashUniqueness = strings.ToLower(strings.TrimSpace(hv)) == "true"
 	}
-	if hv := headers.Get(headerDirectiveValidateTxIndex); hv != "" {
+	if hv := getHeader(headerDirectiveValidateTxIndex); hv != "" {
 		r.directives.ValidateTransactionIndex = strings.ToLower(strings.TrimSpace(hv)) == "true"
 	}
 
-	if hv := headers.Get(headerDirectiveReceiptsCountExact); hv != "" {
+	if hv := getHeader(headerDirectiveReceiptsCountExact); hv != "" {
 		if v, err := strconv.ParseInt(hv, 10, 64); err == nil {
 			r.directives.ReceiptsCountExact = &v
 		}
 	}
-	if hv := headers.Get(headerDirectiveReceiptsCountAtLeast); hv != "" {
+	if hv := getHeader(headerDirectiveReceiptsCountAtLeast); hv != "" {
 		if v, err := strconv.ParseInt(hv, 10, 64); err == nil {
 			r.directives.ReceiptsCountAtLeast = &v
 		}
 	}
-	if hv := headers.Get(headerDirectiveValidationBlockHash); hv != "" {
+	if hv := getHeader(headerDirectiveValidationBlockHash); hv != "" {
 		r.directives.ValidationExpectedBlockHash = hv
 	}
-	if hv := headers.Get(headerDirectiveValidationBlockNumber); hv != "" {
+	if hv := getHeader(headerDirectiveValidationBlockNumber); hv != "" {
 		if v, err := strconv.ParseInt(hv, 10, 64); err == nil {
 			r.directives.ValidationExpectedBlockNumber = &v
 		}
 	}
-	if hv := headers.Get(headerDirectiveValidateTransactionsRoot); hv != "" {
+	if hv := getHeader(headerDirectiveValidateTransactionsRoot); hv != "" {
 		r.directives.ValidateTransactionsRoot = strings.ToLower(strings.TrimSpace(hv)) == "true"
 	}
-	if hv := headers.Get(headerDirectiveValidateHeaderFieldLengths); hv != "" {
+	if hv := getHeader(headerDirectiveValidateHeaderFieldLengths); hv != "" {
 		r.directives.ValidateHeaderFieldLengths = strings.ToLower(hv) == "true"
 	}
-	if hv := headers.Get(headerDirectiveValidateTxFields); hv != "" {
+	if hv := getHeader(headerDirectiveValidateTxFields); hv != "" {
 		r.directives.ValidateTransactionFields = strings.ToLower(hv) == "true"
 	}
-	if hv := headers.Get(headerDirectiveValidateTxBlockInfo); hv != "" {
+	if hv := getHeader(headerDirectiveValidateTxBlockInfo); hv != "" {
 		r.directives.ValidateTransactionBlockInfo = strings.ToLower(hv) == "true"
 	}
-	if hv := headers.Get(headerDirectiveValidateLogFields); hv != "" {
+	if hv := getHeader(headerDirectiveValidateLogFields); hv != "" {
 		r.directives.ValidateLogFields = strings.ToLower(hv) == "true"
 	}
 
 	// Query parameters come after headers so they can still override when explicitly present in URL.
-	if useUpstream := queryArgs.Get(queryDirectiveUseUpstream); useUpstream != "" {
+
+	getQueryArg := func(key string) string {
+		if hv := queryArgs.Get(key); hv != "" && r.isDirectiveAllowed(key) {
+			return hv
+		}
+		return ""
+	}
+
+	if useUpstream := getQueryArg(queryDirectiveUseUpstream); useUpstream != "" {
 		r.directives.UseUpstream = strings.TrimSpace(useUpstream)
 	}
-	if checkAllUpstreams := queryArgs.Get(queryDirectiveCheckAllUpstreams); checkAllUpstreams != "" {
+	if checkAllUpstreams := getQueryArg(queryDirectiveCheckAllUpstreams); checkAllUpstreams != "" {
 		r.directives.CheckAllUpstreams = strings.ToLower(strings.TrimSpace(checkAllUpstreams)) == "true"
 	}
 
-	if retryEmpty := queryArgs.Get(queryDirectiveRetryEmpty); retryEmpty != "" {
+	if retryEmpty := getQueryArg(queryDirectiveRetryEmpty); retryEmpty != "" {
 		r.directives.RetryEmpty = strings.ToLower(strings.TrimSpace(retryEmpty)) == "true"
 	}
 
-	if retryPending := queryArgs.Get(queryDirectiveRetryPending); retryPending != "" {
+	if retryPending := getQueryArg(queryDirectiveRetryPending); retryPending != "" {
 		r.directives.RetryPending = strings.ToLower(strings.TrimSpace(retryPending)) == "true"
 	}
 
-	if skipCacheRead := queryArgs.Get(queryDirectiveSkipCacheRead); skipCacheRead != "" {
+	if skipCacheRead := getQueryArg(queryDirectiveSkipCacheRead); skipCacheRead != "" {
 		r.directives.SkipCacheRead = strings.TrimSpace(skipCacheRead)
 	}
-	if cacheMaxAge := queryArgs.Get(queryDirectiveCacheMaxAge); cacheMaxAge != "" {
+	if cacheMaxAge := getQueryArg(queryDirectiveCacheMaxAge); cacheMaxAge != "" {
 		trimmed := strings.TrimSpace(cacheMaxAge)
 		if v, err := strconv.ParseInt(trimmed, 10, 64); err == nil && v >= 0 {
 			r.directives.CacheMaxAgeSeconds = &v
@@ -888,70 +1004,70 @@ func (r *NormalizedRequest) EnrichFromHttp(headers http.Header, queryArgs url.Va
 		}
 	}
 
-	if skipInterpolation := queryArgs.Get(queryDirectiveSkipInterpolation); skipInterpolation != "" {
+	if skipInterpolation := getQueryArg(queryDirectiveSkipInterpolation); skipInterpolation != "" {
 		r.directives.SkipInterpolation = strings.ToLower(strings.TrimSpace(skipInterpolation)) == "true"
 	}
 
-	if skipConsensus := queryArgs.Get(queryDirectiveSkipConsensus); skipConsensus != "" {
+	if skipConsensus := getQueryArg(queryDirectiveSkipConsensus); skipConsensus != "" {
 		r.directives.SkipConsensus = strings.ToLower(strings.TrimSpace(skipConsensus)) == "true"
 	}
 
 	// Validation query parameters
-	if v := queryArgs.Get(queryDirectiveEnforceHighestBlock); v != "" {
+	if v := getQueryArg(queryDirectiveEnforceHighestBlock); v != "" {
 		r.directives.EnforceHighestBlock = strings.ToLower(strings.TrimSpace(v)) == "true"
 	}
-	if v := queryArgs.Get(queryDirectiveEnforceGetLogsRange); v != "" {
+	if v := getQueryArg(queryDirectiveEnforceGetLogsRange); v != "" {
 		r.directives.EnforceGetLogsBlockRange = strings.ToLower(strings.TrimSpace(v)) == "true"
 	}
-	if v := queryArgs.Get(queryDirectiveEnforceNonNullTaggedBlocks); v != "" {
+	if v := getQueryArg(queryDirectiveEnforceNonNullTaggedBlocks); v != "" {
 		r.directives.EnforceNonNullTaggedBlocks = strings.ToLower(strings.TrimSpace(v)) == "true"
 	}
-	if v := queryArgs.Get(queryDirectiveEnforceLogIndexStrict); v != "" {
+	if v := getQueryArg(queryDirectiveEnforceLogIndexStrict); v != "" {
 		r.directives.EnforceLogIndexStrictIncrements = strings.ToLower(strings.TrimSpace(v)) == "true"
 	}
-	if v := queryArgs.Get(queryDirectiveValidateLogsBloomEmpty); v != "" {
+	if v := getQueryArg(queryDirectiveValidateLogsBloomEmpty); v != "" {
 		r.directives.ValidateLogsBloomEmptiness = strings.ToLower(strings.TrimSpace(v)) == "true"
 	}
-	if v := queryArgs.Get(queryDirectiveValidateLogsBloomMatch); v != "" {
+	if v := getQueryArg(queryDirectiveValidateLogsBloomMatch); v != "" {
 		r.directives.ValidateLogsBloomMatch = strings.ToLower(strings.TrimSpace(v)) == "true"
 	}
-	if v := queryArgs.Get(queryDirectiveValidateTxHashUniq); v != "" {
+	if v := getQueryArg(queryDirectiveValidateTxHashUniq); v != "" {
 		r.directives.ValidateTxHashUniqueness = strings.ToLower(strings.TrimSpace(v)) == "true"
 	}
-	if v := queryArgs.Get(queryDirectiveValidateTxIndex); v != "" {
+	if v := getQueryArg(queryDirectiveValidateTxIndex); v != "" {
 		r.directives.ValidateTransactionIndex = strings.ToLower(strings.TrimSpace(v)) == "true"
 	}
-	if v := queryArgs.Get(queryDirectiveReceiptsCountExact); v != "" {
+	if v := getQueryArg(queryDirectiveReceiptsCountExact); v != "" {
 		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
 			r.directives.ReceiptsCountExact = &n
 		}
 	}
-	if v := queryArgs.Get(queryDirectiveReceiptsCountAtLeast); v != "" {
+	if v := getQueryArg(queryDirectiveReceiptsCountAtLeast); v != "" {
 		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
 			r.directives.ReceiptsCountAtLeast = &n
 		}
 	}
-	if v := queryArgs.Get(queryDirectiveValidationBlockHash); v != "" {
+	if v := getQueryArg(queryDirectiveValidationBlockHash); v != "" {
 		r.directives.ValidationExpectedBlockHash = v
 	}
-	if v := queryArgs.Get(queryDirectiveValidationBlockNumber); v != "" {
+	if v := getQueryArg(queryDirectiveValidationBlockNumber); v != "" {
 		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
 			r.directives.ValidationExpectedBlockNumber = &n
 		}
 	}
-	if v := queryArgs.Get(queryDirectiveValidateTransactionsRoot); v != "" {
+	if v := getQueryArg(queryDirectiveValidateTransactionsRoot); v != "" {
 		r.directives.ValidateTransactionsRoot = strings.ToLower(strings.TrimSpace(v)) == "true"
 	}
-	if v := queryArgs.Get(queryDirectiveValidateHeaderFieldLengths); v != "" {
+	if v := getQueryArg(queryDirectiveValidateHeaderFieldLengths); v != "" {
 		r.directives.ValidateHeaderFieldLengths = strings.ToLower(strings.TrimSpace(v)) == "true"
 	}
-	if v := queryArgs.Get(queryDirectiveValidateTxFields); v != "" {
+	if v := getQueryArg(queryDirectiveValidateTxFields); v != "" {
 		r.directives.ValidateTransactionFields = strings.ToLower(strings.TrimSpace(v)) == "true"
 	}
-	if v := queryArgs.Get(queryDirectiveValidateTxBlockInfo); v != "" {
+	if v := getQueryArg(queryDirectiveValidateTxBlockInfo); v != "" {
 		r.directives.ValidateTransactionBlockInfo = strings.ToLower(strings.TrimSpace(v)) == "true"
 	}
-	if v := queryArgs.Get(queryDirectiveValidateLogFields); v != "" {
+	if v := getQueryArg(queryDirectiveValidateLogFields); v != "" {
 		r.directives.ValidateLogFields = strings.ToLower(strings.TrimSpace(v)) == "true"
 	}
 }

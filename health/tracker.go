@@ -1491,6 +1491,14 @@ func (t *Tracker) SetLatestBlockNumber(upstream common.Upstream, blockNumber int
 
 		// Update timestamp when network-level block advances and timestamp is valid.
 		if nextNtwVal > oldNtwVal && blockTimestamp > 0 {
+			// Feed block.timestamp into the EMA for dynamic block time estimation.
+			// Uses on-chain timestamps (not local clock) so the EMA tracks actual
+			// chain production rate, not our polling cadence. Feed the CALLER's
+			// (blockNumber, blockTimestamp) pair — nextNtwVal may briefly belong
+			// to a concurrent poller's sample, and mixing its height with this
+			// caller's timestamp would corrupt the EMA input.
+			t.updateBlockTimeSample(ntwMeta, netLabel, blockNumber, blockTimestamp)
+
 			ntwMeta.evmLatestBlockTimestamp.Store(blockTimestamp)
 
 			currentTime := time.Now().Unix()
@@ -1582,9 +1590,17 @@ func (t *Tracker) updateBlockTimeSample(ntwMeta *NetworkMetadata, netLabel strin
 		return
 	}
 
-	// Reject out-of-order or duplicate blocks.
+	// Reject duplicate blocks. A block behind prev means the head was
+	// corrected by an accepted rollback (the fork's hysteresis admits any
+	// gap > rollbackHysteresisBlocks, not just tolerance-sized ones):
+	// re-anchor so sampling resumes instead of stalling until the chain
+	// re-passes the old (possibly bogus) prev.
 	blockGap := blockNumber - prevBlock
 	if blockGap <= 0 {
+		if blockGap < 0 {
+			ntwMeta.evmBlockTimePrevBlock = blockNumber
+			ntwMeta.evmBlockTimePrevTimestamp = blockTimestamp
+		}
 		return
 	}
 

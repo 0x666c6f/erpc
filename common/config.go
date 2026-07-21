@@ -147,6 +147,7 @@ type ServerConfig struct {
 	GrpcPortV6          *int              `yaml:"grpcPortV6,omitempty" json:"grpcPortV6"`
 	GrpcMaxRecvMsgSize  *int              `yaml:"grpcMaxRecvMsgSize,omitempty" json:"grpcMaxRecvMsgSize"`
 	GrpcMaxSendMsgSize  *int              `yaml:"grpcMaxSendMsgSize,omitempty" json:"grpcMaxSendMsgSize"`
+	GrpcReflection      *bool             `yaml:"grpcReflection,omitempty" json:"grpcReflection"`
 	MaxTimeout          *Duration         `yaml:"maxTimeout,omitempty" json:"maxTimeout" tstype:"Duration"`
 	ReadTimeout         *Duration         `yaml:"readTimeout,omitempty" json:"readTimeout" tstype:"Duration"`
 	WriteTimeout        *Duration         `yaml:"writeTimeout,omitempty" json:"writeTimeout" tstype:"Duration"`
@@ -167,6 +168,13 @@ type ServerConfig struct {
 	// "summary" to keep only counters, or "off" to disable entirely
 	// (useful for low-latency / bandwidth-constrained clients).
 	ExecutionHeaders *ExecutionHeadersMode `yaml:"executionHeaders,omitempty" json:"executionHeaders" tstype:"ExecutionHeadersMode"`
+
+	// CostHeaders opts into the cost/billing response headers
+	// (X-ERPC-Calls, X-ERPC-Billable, X-ERPC-Methods, X-ERPC-Credits,
+	// X-ERPC-Credits-Version) on single and batch responses. Off by
+	// default. Credit-unit pricing is vendor-level configuration — see
+	// CreditUnitsProvider and UpstreamConfig.CreditUnits.
+	CostHeaders *bool `yaml:"costHeaders,omitempty" json:"costHeaders"`
 }
 
 // ExecutionHeadersMode controls how much per-request execution detail is
@@ -356,8 +364,15 @@ const (
 )
 
 type ConnectorConfig struct {
-	Id              string                     `yaml:"id,omitempty" json:"id"`
-	Driver          ConnectorDriverType        `yaml:"driver" json:"driver" tstype:"TsConnectorDriverType"`
+	Id     string              `yaml:"id,omitempty" json:"id"`
+	Driver ConnectorDriverType `yaml:"driver" json:"driver" tstype:"TsConnectorDriverType"`
+	// Tags label the data source a connector caches, so the `use-upstream`
+	// directive can gate which connector is read/written — e.g. a connector
+	// fed by a system-transaction node tagged `systx` is only used when the
+	// request's selector admits it. Same glob/`!negation` grammar as upstream
+	// tags. Untagged connectors are always eligible (a use-upstream pin meant
+	// for upstreams must not disable a normal cache).
+	Tags            []string                   `yaml:"tags,omitempty" json:"tags,omitempty"`
 	Memory          *MemoryConnectorConfig     `yaml:"memory,omitempty" json:"memory"`
 	Redis           *RedisConnectorConfig      `yaml:"redis,omitempty" json:"redis"`
 	DynamoDB        *DynamoDBConnectorConfig   `yaml:"dynamodb,omitempty" json:"dynamodb"`
@@ -373,6 +388,13 @@ type GrpcConnectorConfig struct {
 	Servers    []string          `yaml:"servers,omitempty" json:"servers"`
 	Headers    map[string]string `yaml:"headers,omitempty" json:"headers"`
 	GetTimeout Duration          `yaml:"getTimeout,omitempty" json:"getTimeout" tstype:"Duration"`
+
+	// PoolSize is the number of independent gRPC connections opened to each
+	// backing server, selected round-robin per request. Larger values raise the
+	// concurrent-stream ceiling and shrink the blast radius of a single wedged
+	// connection, at the cost of more open connections per server. When unset
+	// (0) a built-in default is used.
+	PoolSize int `yaml:"poolSize,omitempty" json:"poolSize"`
 }
 
 type MemoryConnectorConfig struct {
@@ -472,6 +494,13 @@ type PostgreSQLConnectorConfig struct {
 	GetTimeout             Duration                 `yaml:"getTimeout,omitempty" json:"getTimeout" tstype:"Duration"`
 	SetTimeout             Duration                 `yaml:"setTimeout,omitempty" json:"setTimeout" tstype:"Duration"`
 	IAMAuth                *PostgreSQLIAMAuthConfig `yaml:"iamAuth,omitempty" json:"iamAuth,omitempty"`
+	// SkipSchemaSetup skips all startup DDL (CREATE TABLE/INDEX, column
+	// migrations, pg_cron) and the local expired-row cleanup DELETE loop. Set
+	// it for connectors whose ConnectionUri targets a read-only replica (e.g.
+	// an Aurora global-database secondary): DDL cannot execute there (SQLSTATE
+	// 25006) and is not write-forwarded, so the writer-region connector owns
+	// the schema and the replica receives it via storage replication.
+	SkipSchemaSetup bool `yaml:"skipSchemaSetup,omitempty" json:"skipSchemaSetup"`
 }
 
 func (p *PostgreSQLConnectorConfig) MarshalJSON() ([]byte, error) {
@@ -485,6 +514,7 @@ func (p *PostgreSQLConnectorConfig) MarshalJSON() ([]byte, error) {
 		"getTimeout":             p.GetTimeout.String(),
 		"setTimeout":             p.SetTimeout.String(),
 		"iamAuth":                p.IAMAuth,
+		"skipSchemaSetup":        p.SkipSchemaSetup,
 	})
 }
 
@@ -499,6 +529,7 @@ func (p *PostgreSQLConnectorConfig) MarshalYAML() (interface{}, error) {
 		"getTimeout":             p.GetTimeout.String(),
 		"setTimeout":             p.SetTimeout.String(),
 		"iamAuth":                p.IAMAuth,
+		"skipSchemaSetup":        p.SkipSchemaSetup,
 	}, nil
 }
 
@@ -615,10 +646,21 @@ type ProjectConfig struct {
 	ScoreMetricsMode      string                              `yaml:"scoreMetricsMode,omitempty" json:"scoreMetricsMode"`
 	DeprecatedHealthCheck *DeprecatedProjectHealthCheckConfig `yaml:"healthCheck,omitempty" json:"healthCheck"`
 	// Configure user agent tracking at the project level
-	UserAgentMode  UserAgentTrackingMode `yaml:"userAgentMode,omitempty" json:"userAgentMode"`
-	ForwardHeaders []string              `yaml:"forwardHeaders,omitempty" json:"forwardHeaders"`
-	IgnoreMethods  []string              `yaml:"ignoreMethods,omitempty" json:"ignoreMethods"`
-	AllowMethods   []string              `yaml:"allowMethods,omitempty" json:"allowMethods"`
+	UserAgentMode UserAgentTrackingMode `yaml:"userAgentMode,omitempty" json:"userAgentMode"`
+	// TrustUserIdHeader makes erpc read the caller's user identity from the
+	// X-ERPC-User-Id request header (see common.HeaderUserId) and use it for the
+	// `user` metric/log label — but only when no auth strategy resolved a user
+	// (auth wins) and only for attribution (no rate-limit budget is derived).
+	// This is for deployments that authenticate callers in front of erpc (e.g. a
+	// gateway) and want per-user erpc telemetry without erpc performing auth.
+	// erpc does NOT validate the header, so enable this ONLY when erpc is reachable
+	// solely by a trusted proxy that sets the header and strips any client copy —
+	// otherwise callers can spoof their own attribution. Default false.
+	TrustUserIdHeader     bool     `yaml:"trustUserIdHeader,omitempty" json:"trustUserIdHeader"`
+	ForwardHeaders        []string `yaml:"forwardHeaders,omitempty" json:"forwardHeaders"`
+	AllowClientDirectives *string  `yaml:"allowClientDirectives,omitempty" json:"allowClientDirectives"`
+	IgnoreMethods         []string `yaml:"ignoreMethods,omitempty" json:"ignoreMethods"`
+	AllowMethods          []string `yaml:"allowMethods,omitempty" json:"allowMethods"`
 
 	// LegacyProject captures deprecated project-level scoring / routing
 	// keys that used to live directly on ProjectConfig. Consumed by the
@@ -764,6 +806,33 @@ type CORSConfig struct {
 
 type VendorSettings map[string]interface{}
 
+// CreditUnits extracts the `creditUnits` override dictionary from vendor
+// settings (`providers[].settings.creditUnits`): JSON-RPC method → credit
+// units, with "*" as the vendor's fallback for unlisted methods. YAML
+// decodes numbers as int or float64 — both normalize to int64. Nil when
+// absent or empty.
+func (s VendorSettings) CreditUnits() map[string]int64 {
+	raw, ok := s["creditUnits"].(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	out := make(map[string]int64, len(raw))
+	for method, v := range raw {
+		switch n := v.(type) {
+		case int:
+			out[method] = int64(n)
+		case int64:
+			out[method] = n
+		case float64:
+			out[method] = int64(n)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 type ProviderConfig struct {
 	Id                 string                     `yaml:"id,omitempty" json:"id"`
 	Vendor             string                     `yaml:"vendor" json:"vendor"`
@@ -833,7 +902,13 @@ type UpstreamConfig struct {
 	RateLimitBudget              string                   `yaml:"rateLimitBudget,omitempty" json:"rateLimitBudget"`
 	RateLimitAutoTune            *RateLimitAutoTuneConfig `yaml:"rateLimitAutoTune,omitempty" json:"rateLimitAutoTune"`
 	Capabilities                 []string                 `yaml:"capabilities,omitempty" json:"capabilities,omitempty"`
-	Shadow                       *ShadowUpstreamConfig    `yaml:"shadow,omitempty" json:"shadow"`
+	// CreditUnits overrides the vendor's built-in per-method credit table
+	// (CreditUnitsProvider) for this upstream, merged per method over the
+	// vendor defaults ("*" = fallback for unlisted methods). Normally set
+	// once per provider via `providers[].settings.creditUnits`, which is
+	// copied onto every upstream the provider generates.
+	CreditUnits map[string]int64      `yaml:"creditUnits,omitempty" json:"creditUnits,omitempty"`
+	Shadow      *ShadowUpstreamConfig `yaml:"shadow,omitempty" json:"shadow"`
 
 	// Routing holds per-upstream routing hints consumed by the selection
 	// policy. `scoreMultipliers` bias this upstream's rank inside
@@ -1205,6 +1280,11 @@ func (c *JsonRpcUpstreamConfig) Copy() *JsonRpcUpstreamConfig {
 // every outbound request (e.g. an edge-api auth key: authorization: Bearer ...).
 type GrpcUpstreamConfig struct {
 	Headers map[string]string `yaml:"headers,omitempty" json:"headers"`
+
+	// PoolSize is the number of independent gRPC connections opened to this
+	// upstream, selected round-robin per request. See GrpcConnectorConfig.PoolSize.
+	// When unset (0) a built-in default is used.
+	PoolSize int `yaml:"poolSize,omitempty" json:"poolSize"`
 }
 
 func (c *GrpcUpstreamConfig) MarshalJSON() ([]byte, error) {
@@ -2841,11 +2921,18 @@ type DatabaseFailOpenConfig struct {
 }
 
 type JwtStrategyConfig struct {
-	AllowedIssuers    []string          `yaml:"allowedIssuers" json:"allowedIssuers"`
-	AllowedAudiences  []string          `yaml:"allowedAudiences" json:"allowedAudiences"`
-	AllowedAlgorithms []string          `yaml:"allowedAlgorithms" json:"allowedAlgorithms"`
-	RequiredClaims    []string          `yaml:"requiredClaims" json:"requiredClaims"`
-	VerificationKeys  map[string]string `yaml:"verificationKeys" json:"verificationKeys"`
+	AllowedIssuers                  []string            `yaml:"allowedIssuers" json:"allowedIssuers"`
+	AllowedAudiences                []string            `yaml:"allowedAudiences" json:"allowedAudiences"`
+	AllowedAlgorithms               []string            `yaml:"allowedAlgorithms" json:"allowedAlgorithms"`
+	RequiredClaims                  []string            `yaml:"requiredClaims" json:"requiredClaims"`
+	ClaimMatchers                   map[string][]string `yaml:"claimMatchers,omitempty" json:"claimMatchers,omitempty"`
+	VerificationKeys                map[string]string   `yaml:"verificationKeys,omitempty" json:"verificationKeys,omitempty"`
+	VerificationJwksUrl             string              `yaml:"verificationJwksUrl,omitempty" json:"verificationJwksUrl,omitempty"`
+	VerificationJwksRefreshInterval Duration            `yaml:"verificationJwksRefreshInterval,omitempty" json:"verificationJwksRefreshInterval" tstype:"Duration"`
+	// Skipping TLS verification is an explicit operator opt-in for the JWKS
+	// fetch, not a hardcoded bypass.
+	//nolint:gosec
+	VerificationJwksTlsInsecureSkipVerify bool `yaml:"verificationJwksTlsInsecureSkipVerify,omitempty" json:"verificationJwksTlsInsecureSkipVerify,omitempty"`
 	// RateLimitBudgetClaimName is the JWT claim name that, if present,
 	// will be used to set the per-user RateLimitBudget override.
 	// Defaults to "rlm".

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"sync/atomic"
 
 	_ "github.com/blockchain-data-standards/manifesto/common"
 	"github.com/blockchain-data-standards/manifesto/evm"
@@ -51,14 +52,43 @@ type GenericGrpcBdsClient struct {
 	appCtx          context.Context
 	logger          *zerolog.Logger
 	isLogLevelTrace bool
+
+	// expectedChainId is the chainId this client is configured to serve
+	// (0 = unknown). When set, it is (a) stamped into every BDS request that
+	// carries an optional chainId field — a chain-aware server then REJECTS
+	// requests reaching the wrong chain's backend, so a cross-wired endpoint
+	// (a stale DNS record or reused address answering for another chain)
+	// fails loudly per request instead of silently answering with another
+	// chain's data — and (b) verified by the pool's connection maintainer via
+	// the ChainId RPC (see grpc_bds_resilience.go). Atomic: the cache
+	// connector arms it via SetExpectedChainId after probing.
+	expectedChainId atomic.Uint64
 }
 
+// SetExpectedChainId arms chain-identity enforcement after construction —
+// for callers that only learn the server's chain by probing it (the gRPC
+// cache connector). From then on every request carries the chainId assertion
+// and the pool maintainer keeps re-verifying the connections. Deliberately
+// NOT part of the GrpcBdsClient interface (callers type-assert) so existing
+// interface implementations stay compatible. Safe to call concurrently with
+// in-flight requests.
+func (c *GenericGrpcBdsClient) SetExpectedChainId(chainId uint64) {
+	c.expectedChainId.Store(chainId)
+	if c.pool != nil {
+		c.pool.expectedChainId.Store(chainId)
+	}
+}
+
+// NewGrpcBdsClient builds a BDS gRPC client backed by a round-robin connection
+// pool. poolSize sets the number of connections; <= 0 uses the built-in default
+// (bdsPoolSize).
 func NewGrpcBdsClient(
 	appCtx context.Context,
 	logger *zerolog.Logger,
 	projectId string,
 	upstream common.Upstream,
 	parsedUrl *url.URL,
+	poolSize int,
 ) (GrpcBdsClient, error) {
 	upsId := "n/a"
 	if upstream != nil {
@@ -73,6 +103,11 @@ func NewGrpcBdsClient(
 		upstreamId:      upsId,
 		isLogLevelTrace: logger.GetLevel() == zerolog.TraceLevel,
 		headers:         make(map[string]string),
+	}
+	if upstream != nil {
+		if cfg := upstream.Config(); cfg != nil && cfg.Evm != nil && cfg.Evm.ChainId > 0 {
+			client.expectedChainId.Store(uint64(cfg.Evm.ChainId))
+		}
 	}
 
 	// Apply any grpc.headers configured on the upstream as gRPC metadata on
@@ -123,7 +158,7 @@ func NewGrpcBdsClient(
 		}]
 	}`
 
-	pool, err := newBdsPool(logger, projectId, upsId, target, transportCredentials, serviceConfig)
+	pool, err := newBdsPool(appCtx, logger, projectId, upsId, target, transportCredentials, serviceConfig, poolSize, client.expectedChainId.Load())
 	if err != nil {
 		return nil, err
 	}
@@ -137,11 +172,24 @@ func NewGrpcBdsClient(
 
 	logger.Debug().
 		Str("target", target).
-		Int("pool_size", bdsPoolSize).
+		Int("pool_size", pool.Size()).
 		Dur("hard_call_timeout", bdsHardCallTimeout).
 		Msg("created gRPC BDS client")
 
 	return client, nil
+}
+
+// chainIdParam returns the configured chainId as the optional per-request
+// chain assertion, or nil when unknown. Chain-aware BDS servers validate
+// this field on every RPC and reject mismatches, so a request that lands on
+// the wrong chain's backend errors loudly instead of being answered with
+// another chain's data.
+func (c *GenericGrpcBdsClient) chainIdParam() *uint64 {
+	v := c.expectedChainId.Load()
+	if v == 0 {
+		return nil
+	}
+	return &v
 }
 
 // grpcResponseMetadataInterceptor captures all response metadata (headers)
@@ -368,6 +416,7 @@ func (c *GenericGrpcBdsClient) handleGetBlockByNumber(ctx context.Context, conn 
 		grpcReq := &evm.GetBlockByHashRequest{
 			BlockHash:           blockHash,
 			IncludeTransactions: includeTransactions,
+			ChainId:             c.chainIdParam(),
 		}
 
 		hashHex := hex.EncodeToString(blockHash)
@@ -425,6 +474,7 @@ func (c *GenericGrpcBdsClient) handleGetBlockByNumber(ctx context.Context, conn 
 	grpcReq := &evm.GetBlockByNumberRequest{
 		BlockNumber:         blockNumber,
 		IncludeTransactions: includeTransactions,
+		ChainId:             c.chainIdParam(),
 	}
 
 	c.logger.Debug().
@@ -520,6 +570,7 @@ func (c *GenericGrpcBdsClient) handleGetBlockByHash(ctx context.Context, conn *b
 	grpcReq := &evm.GetBlockByHashRequest{
 		BlockHash:           blockHash,
 		IncludeTransactions: includeTransactions,
+		ChainId:             c.chainIdParam(),
 	}
 
 	c.logger.Debug().
@@ -635,6 +686,7 @@ func (c *GenericGrpcBdsClient) handleGetLogs(ctx context.Context, conn *bdsConn,
 		ToBlock:   toBlock,
 		Addresses: addresses,
 		Topics:    topics,
+		ChainId:   c.chainIdParam(),
 	}
 
 	c.logger.Debug().
@@ -714,6 +766,7 @@ func (c *GenericGrpcBdsClient) handleGetTransactionByHash(ctx context.Context, c
 
 	grpcReq := &evm.GetTransactionByHashRequest{
 		TransactionHash: txHash,
+		ChainId:         c.chainIdParam(),
 	}
 
 	c.logger.Debug().
@@ -781,6 +834,7 @@ func (c *GenericGrpcBdsClient) handleGetTransactionReceipt(ctx context.Context, 
 
 	grpcReq := &evm.GetTransactionReceiptRequest{
 		TransactionHash: txHash,
+		ChainId:         c.chainIdParam(),
 	}
 
 	c.logger.Debug().
@@ -833,6 +887,16 @@ func (c *GenericGrpcBdsClient) handleChainId(ctx context.Context, conn *bdsConn,
 		return nil, fmt.Errorf("gRPC call failed: %w", err)
 	}
 
+	// A server answering for a different chain than this client is configured
+	// for is a cross-wired endpoint (stale DNS record / reused address) — fail
+	// loudly instead of propagating another chain's identity (and, through the
+	// state poller, its heads).
+	if expected := c.expectedChainId.Load(); expected > 0 && grpcResp.ChainId != expected {
+		mismatchErr := common.NewErrEndpointChainIdMismatch(grpcResp.ChainId, expected)
+		c.logger.Error().Err(mismatchErr).Str("target", c.Url.String()).Msg("chainId mismatch from BDS server")
+		return nil, common.NewErrEndpointTransportFailure(c.Url, mismatchErr)
+	}
+
 	// Convert chain ID to hex string per JSON-RPC standard
 	result := fmt.Sprintf("0x%x", grpcResp.ChainId)
 
@@ -875,7 +939,7 @@ func (c *GenericGrpcBdsClient) handleGetBlockReceipts(ctx context.Context, conn 
 		return nil, fmt.Errorf("failed to parse block parameter: %w", err)
 	}
 
-	grpcReq := &evm.GetBlockReceiptsRequest{}
+	grpcReq := &evm.GetBlockReceiptsRequest{ChainId: c.chainIdParam()}
 
 	// If we got a block hash, use it directly
 	if blockHash != nil {
@@ -1108,6 +1172,9 @@ func (c *GenericGrpcBdsClient) handleQueryBlocks(ctx context.Context, conn *bdsC
 	if err != nil {
 		return nil, fmt.Errorf("invalid eth_queryBlocks params: %w", err)
 	}
+	if grpcReq.ChainId == nil {
+		grpcReq.ChainId = c.chainIdParam()
+	}
 
 	ctx, span := common.StartDetailSpan(ctx, "GrpcBdsClient.QueryBlocks")
 	defer span.End()
@@ -1149,6 +1216,9 @@ func (c *GenericGrpcBdsClient) handleQueryTransactions(ctx context.Context, conn
 	if err != nil {
 		return nil, fmt.Errorf("invalid eth_queryTransactions params: %w", err)
 	}
+	if grpcReq.ChainId == nil {
+		grpcReq.ChainId = c.chainIdParam()
+	}
 
 	ctx, span := common.StartDetailSpan(ctx, "GrpcBdsClient.QueryTransactions")
 	defer span.End()
@@ -1183,6 +1253,9 @@ func (c *GenericGrpcBdsClient) handleQueryLogs(ctx context.Context, conn *bdsCon
 	grpcReq, err := evm.QueryLogsRequestFromJsonRpc(rawParams)
 	if err != nil {
 		return nil, fmt.Errorf("invalid eth_queryLogs params: %w", err)
+	}
+	if grpcReq.ChainId == nil {
+		grpcReq.ChainId = c.chainIdParam()
 	}
 
 	ctx, span := common.StartDetailSpan(ctx, "GrpcBdsClient.QueryLogs")
@@ -1220,6 +1293,9 @@ func (c *GenericGrpcBdsClient) handleQueryTraces(ctx context.Context, conn *bdsC
 	if err != nil {
 		return nil, fmt.Errorf("invalid eth_queryTraces params: %w", err)
 	}
+	if grpcReq.ChainId == nil {
+		grpcReq.ChainId = c.chainIdParam()
+	}
 
 	ctx, span := common.StartDetailSpan(ctx, "GrpcBdsClient.QueryTraces")
 	defer span.End()
@@ -1255,6 +1331,9 @@ func (c *GenericGrpcBdsClient) handleQueryTransfers(ctx context.Context, conn *b
 	grpcReq, err := evm.QueryTransfersRequestFromJsonRpc(rawParams)
 	if err != nil {
 		return nil, fmt.Errorf("invalid eth_queryTransfers params: %w", err)
+	}
+	if grpcReq.ChainId == nil {
+		grpcReq.ChainId = c.chainIdParam()
 	}
 
 	ctx, span := common.StartDetailSpan(ctx, "GrpcBdsClient.QueryTransfers")

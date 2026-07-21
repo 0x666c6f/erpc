@@ -11,12 +11,9 @@ import { LLMsTxtLink, AISection, ConfigTabs, ConfigCode, SourceLink, PromptExamp
 
 Every request can carry its own instructions. Add an `X-ERPC-*` header or a `?param=` query string and eRPC instantly shifts routing, caching, integrity checks, or consensus behavior for that call only. No server restart. No config change. The same 23 directives can also be pinned as `directiveDefaults` on any network so every call starts with a sensible baseline.
 
-* [Retry empty responses](#retry-empty-responses)
-* [Retry pending transactions](#retry-pending-transactions)
-* [Skip cache read](#skip-cache-read)
-* [Cache max age](#cache-max-age)
-* [Use specific upstream(s)](#use-specific-upstreams)
-* [Validation directives](/config/failsafe/integrity#validations-directives) — Control response validation (bloom filters, receipts, logs)
+For production-facing projects, [`allowClientDirectives`](/config/projects) can restrict which directives clients may send — block cache-bypass or upstream-pinning headers while keeping validation directives available.
+
+After each response, eRPC echoes back what actually happened — which upstream won, cache hit or miss, retry and hedge counts — so you always know exactly what the proxy did.
 
 ## Quick taste
 
@@ -123,11 +120,20 @@ per-attempt trace while keeping the counter headers for dashboards. Work with my
 Reference: https://docs.erpc.cloud/operation/directives.llms.txt`}
 />
 
+<PromptExample
+	n={6}
+	title="lock down client directives on a public-facing project"
+	prompt={`My eRPC project serves public traffic and I want to prevent clients from sending
+X-ERPC-Skip-Cache-Read or X-ERPC-Use-Upstream headers to bypass caching or pin upstreams.
+Configure allowClientDirectives so validation directives are still allowed but operational
+ones are blocked. Reference: https://docs.erpc.cloud/operation/directives.llms.txt`}
+/>
+
 <AISection title="Directives — full agent reference">
 
 ### How it works
 
-**Parsing pipeline.** For every HTTP request eRPC runs two passes. First, `ApplyDirectiveDefaults` copies any `directiveDefaults` config block into the request struct (lowest priority). Second, `EnrichFromHttp` scans all 23 registered header and query names. If none are present it returns immediately after extracting User-Agent — zero allocations, zero locks. When directive inputs are present the struct is cloned before mutation so batch sub-requests that share the same pointer do not race.
+**Parsing pipeline.** For every HTTP request eRPC runs three steps. First, `ApplyDirectiveDefaults` copies any `directiveDefaults` config block into the request struct (lowest priority). Second, `SetAllowClientDirectiveMatcher` stores a pre-compiled matcher function from the project-level `allowClientDirectives` pattern (compiled once at project registration via `NewWildcardMatcher`). Third, `EnrichFromHttp` scans all 23 registered header and query names, skipping any directive whose query-param key is rejected by the matcher. If no directives are present it returns immediately after extracting User-Agent — zero allocations, zero locks. When directive inputs are present the struct is cloned before mutation so batch sub-requests that share the same pointer do not race.
 
 Precedence from lowest to highest: `directiveDefaults` config → HTTP header → URL query parameter. A query-param value always wins over the same header, which always wins over config. `ApplyDirectiveDefaults` is idempotent — once `r.directives` is non-nil every subsequent call is a no-op, so per-request overrides can never be clobbered by a second config pass. Source: [`common/request.go:563-676`](https://github.com/erpc/erpc/blob/main/common/request.go#L563-L676).
 
@@ -326,7 +332,72 @@ Retry, hedge, circuit-breaker, and timeout still apply — only the dispute/agre
 | `X-ERPC-Commit` | git commit SHA | [`erpc/http_server.go:261`](https://github.com/erpc/erpc/blob/main/erpc/http_server.go#L261) |
 | custom `server.responseHeaders` | static values, env-expanded at startup | [`erpc/http_server.go:263-266`](https://github.com/erpc/erpc/blob/main/erpc/http_server.go#L263-L266) |
 
-**Execution diagnostic headers** (single responses only; controlled by `server.executionHeaders`; never emitted for batch):
+**Execution diagnostic headers** (controlled by `server.executionHeaders`; single responses get the per-response set, batch responses get ONE aggregated set — counters summed across sub-calls, `X-ERPC-Duration` = slowest sub-call, no `X-ERPC-Upstream`):
+
+| Header | Value | When |
+|---|---|---|
+| `X-ERPC-Attempts` | total physical ops (upstream + cache) | always |
+| `X-ERPC-Upstream-Attempts` / `X-ERPC-Upstream-Retries` / `X-ERPC-Upstream-Hedges` | counters | always |
+| `X-ERPC-Network-Attempts` / `X-ERPC-Network-Retries` / `X-ERPC-Network-Hedges` | counters | always |
+| `X-ERPC-Cache-Attempts` / `X-ERPC-Cache-Retries` / `X-ERPC-Cache-Hedges` | counters | only when &gt; 0 |
+| `X-ERPC-Consensus-Slots` / `X-ERPC-Consensus-Disputes` / `X-ERPC-Consensus-Low-Participants` | counters | only when &gt; 0 |
+| `X-ERPC-Cache` | `HIT` or `MISS`; on batch responses also `PARTIAL:<n>` (n sub-calls served from cache) | when response metadata present |
+| `X-ERPC-Upstream` | winning upstream id | single responses only, when known |
+| `X-ERPC-Duration` | milliseconds (batch: the slowest sub-call) | NormalizedResponse only |
+| `X-ERPC-Upstreams` | per-attempt trace: `upstreamId=reason:outcome:durationMs[:won]` segments joined by `;`. Known `reason` values: `primary`, `hedge`, `retry`, `consensus_slot`, `sweep`. Known `outcome` values: `success`, `timeout`, `exec_revert`, `rate_limited`. `:won` suffix appended only when the attempt's response contributed to the final answer (in a batch: to its own sub-call's answer). Batch: segments concatenate in sub-call order, capped at 50 with `X-ERPC-Upstreams-Truncated: <dropped>`. | `all` mode only; when `len(attempts) > 0` |
+
+Example `X-ERPC-Upstreams` value: `alchemy=primary:success:50ms:won;quicknode=hedge:timeout:5000ms;drpc=consensus_slot:exec_revert:20ms`.
+
+`reason` precedence when several apply to one attempt: `consensus_slot` &gt; `hedge` &gt; `sweep` &gt; `retry` &gt; `primary` — the outermost fan-out cause wins, so an attempt that hedged or retried *inside* a consensus participant slot still reads `consensus_slot` (the attempt record's `IsHedge`/`IsRetry` fields preserve the inner mechanics).
+
+**Cost / billing headers** (opt-in via `server.costHeaders: true`; emitted on single AND batch responses; omitted on early errors that never routed a call):
+
+| Header | Value |
+|---|---|
+| `X-ERPC-Calls` | routed JSON-RPC sub-calls in this HTTP response (batch size; `1` for a single request) |
+| `X-ERPC-Billable` | how many of them were billable. Successful, empty-but-valid and execution-revert responses bill (cache hits included — their *cost* is zero, not their billability; a revert is real work the node performed); protocol, transport, rate-limit and cancellation failures do not |
+| `X-ERPC-Methods` | distinct JSON-RPC methods, sorted, comma-joined |
+| `X-ERPC-Credits` | `vendor:method=<units>` segments, sorted, `;`-joined — the vendor credit units consumed by **every physical upstream attempt** (retries, hedges and consensus slots included; skipped / breaker-open attempts provably never dialed and cost 0). Omitted when nothing accrued (e.g. pure cache hits). Units come from vendors implementing `CreditUnitsProvider` (built-in tables: Alchemy CUs, QuickNode credits), merged per method with `providers[].settings.creditUnits` overrides; vendors with no table default to a **flat 1 credit per request** (opt out with `creditUnits: {"*": 0}`) |
+| `X-ERPC-Credits-Version` | the eRPC version the built-in vendor tables shipped with; only present alongside `X-ERPC-Credits` |
+
+Example: `X-ERPC-Calls: 5` · `X-ERPC-Billable: 4` · `X-ERPC-Cache: PARTIAL:2` · `X-ERPC-Credits: alchemy:eth_call=52;quicknode:eth_getLogs=40`.
+
+Cost-header gotchas: emitted only for routed requests — early parse/auth errors get none (there is no routed call to account for). Pricing is the **vendor's** logic (`common.CreditUnitsProvider.CreditUnits(req, upstreamCfg)`; nothing is hard-coded in the eRPC layer). A timed-out attempt still accrues credits — it dialed the vendor — while `skipped`/`breaker_open` attempts provably never left the process and cost 0. Vendors without pricing cost a flat 1 credit per request unless opted out (`creditUnits: {"*": 0}`). Source: `writeCostHeaders` in [`erpc/http_server.go`](https://github.com/erpc/erpc/blob/main/erpc/http_server.go), `attemptCreditUnits` in [`upstream/upstream.go`](https://github.com/erpc/erpc/blob/main/upstream/upstream.go), tests in [`erpc/http_server_cost_test.go`](https://github.com/erpc/erpc/blob/main/erpc/http_server_cost_test.go) and [`upstream/credit_units_test.go`](https://github.com/erpc/erpc/blob/main/upstream/credit_units_test.go).
+
+**Error shapes produced by directive checks.** Failed validation directives return `ErrEndpointContentValidation`. A `UseUpstream` selector that matches no upstream returns `ErrUpstreamsExhausted` (wrapping `ErrUpstreamNotAllowed` per candidate) — there is no distinct "selector matched nothing" error code.
+
+### Best practices
+
+- **Start with `enforceHighestBlock: true` and `validateTransactionsRoot: true`** — both are on by default and catch the most common upstream data-quality issues with negligible overhead.
+- **Turn on the receipt-validation cluster only for indexing workloads** — `validateLogsBloomMatch`, `enforceLogIndexStrictIncrements`, `validateLogFields` are CPU-intensive; they penalize latency for general-purpose proxy traffic.
+- **Use `retryEmpty: true` for block-polling calls** but verify `EmptyResultMaxAttempts` is set appropriately; unbounded retries on a degraded upstream can exhaust the timeout budget.
+- **Never set `retryPending: true` globally** — it converts every pending-tx lookup into a polling loop. Pin it per request (`X-ERPC-Retry-Pending: true`) or to a dedicated network for transaction-tracking flows.
+- **Pin `useUpstream` at config via `directiveDefaults` for known-good archival nodes** rather than relying on callers to send the header — this prevents a misconfigured client from silently routing archival calls to full nodes.
+- **Always send `"true"`, never `"1"` or `"yes"`**, for all `X-ERPC-*` directive headers. Four of the 23 headers (#20–23) lack `TrimSpace` — a value like `"  true  "` (with spaces) evaluates to `false` on those.
+- **On gRPC, per-request overrides are not available.** Wire all desired defaults into `directiveDefaults` in config; `EnrichFromHttp` is never called on the gRPC path.
+- **Lock down client directives on public-facing projects** with `allowClientDirectives: "!skip-cache-read & !use-upstream"` to prevent clients from bypassing your cache or pinning to specific upstreams while still allowing validation directives.
+
+### Edge cases & gotchas
+
+1. **`RetryPending` default is `false`, not `true`.** The struct comment at `common/request.go:125` ("true by default") is stale. No `SetDefaults` entry exists. Must be explicitly enabled via `directiveDefaults.retryPending: true` or `X-ERPC-Retry-Pending: true`.
+2. **`X-ERPC-Use-Upstream` header is NOT trimmed; query IS.** A header with leading/trailing spaces will not match any upstream. Source: [`common/request.go:741`](https://github.com/erpc/erpc/blob/main/common/request.go#L741) vs [`:812`](https://github.com/erpc/erpc/blob/main/common/request.go#L812).
+3. **Headers #20–23 lack `TrimSpace`.** `"  true  "` → `false` for `X-ERPC-Validate-Header-Field-Lengths`, `X-ERPC-Validate-Transaction-Fields`, `X-ERPC-Validate-Transaction-Block-Info`, `X-ERPC-Validate-Log-Fields`. All other boolean directive headers do trim. Source: [`common/request.go:798,801,804,807`](https://github.com/erpc/erpc/blob/main/common/request.go#L798-L807).
+4. **`"1"` and `"yes"` are NOT truthy for directive headers.** Only `"true"` (any case). This differs from `X-ERPC-Force-Trace`. Source: [`common/request_test.go:406-427`](https://github.com/erpc/erpc/blob/main/common/request_test.go#L406-L427).
+5. **`UseUpstream` failure produces `ErrUpstreamsExhausted`, not a selector-specific error.** Operators must parse the error message text to diagnose selector mismatches. Source: [`common/errors.go:1432-1440`](https://github.com/erpc/erpc/blob/main/common/errors.go#L1432-L1440).
+6. **`X-ERPC-Skip-Consensus: false` actively disables consensus bypass.** Sending the header with the value `"false"` is NOT the same as omitting the header. A header value `"false"` parses to `false` and overrides a `directiveDefaults.skipConsensus: true` config entry — the consensus branch then runs normally. Omitting the header leaves `SkipConsensus` at its config-default value. Tested: [`common/request_test.go:409`](https://github.com/erpc/erpc/blob/main/common/request_test.go#L409), [`erpc/skip_consensus_directive_test.go:125-153`](https://github.com/erpc/erpc/blob/main/erpc/skip_consensus_directive_test.go#L125-L153).
+7. **`EnforceGetLogsBlockRange` cannot be overridden per-request via HTTP.** `SetDefaults` copies `DirectiveDefaults` values into `Evm.Integrity`; the architecture layer reads from the network config struct, not the per-request directive. Source: [`common/defaults.go:1957-1964`](https://github.com/erpc/erpc/blob/main/common/defaults.go#L1957-L1964).
+8. **`EnforceLogIndexStrictIncrements` counts globally, not per-receipt.** Indices must be contiguous across all receipts in the block response. Upstreams that reset `logIndex` per-receipt fail this check.
+9. **`ValidateTxHashUniqueness` rejects empty hashes; always-on dedup does not.** Enabling this on a chain that legitimately omits transaction hashes causes all responses to fail.
+10. **`ReceiptsCountExact` / `ReceiptsCountAtLeast` parse failures are silent.** A non-integer value leaves the pointer nil; no check fires and no warning is logged.
+11. **`ValidateReceiptTransactionMatch` and `ValidateContractCreation` are silently no-ops over HTTP.** `GroundTruthTransactions` cannot be supplied via headers; both directives only activate in Go library mode.
+12. **`ValidateTransactionFields` and `ValidateTransactionBlockInfo` skip hash-only blocks.** When `eth_getBlockByNumber` returns hash-only transactions, the validation loop is entirely bypassed.
+13. **Batch responses emit ONE aggregated `X-ERPC-*` header set.** Counters sum across sub-calls, `X-ERPC-Cache` becomes `PARTIAL:<n>` when mixed, `X-ERPC-Duration` is the slowest sub-call, the trace caps at 50 segments (`X-ERPC-Upstreams-Truncated` carries the overflow count), and the single-winner `X-ERPC-Upstream` is not emitted. Per-sub-call attribution still needs the per-response `id` fields in the body.
+14. **`executionHeaders: summary` removes only `X-ERPC-Upstreams`.** All counter and metadata headers still emit. Use `"off"` to suppress everything.
+15. **Selector-scoped served-tip partitions are capped.** Beyond `maxServedTipPartitions` per network, no partition is created and the stateless fallback is used silently — no error. Source: [`erpc/networks.go:429`](https://github.com/erpc/erpc/blob/main/erpc/networks.go#L429).
+16. **`ValidateLogFields` cross-checks log fields against the enclosing receipt, not the block.** Absent log context fields (e.g., `blockHash` missing from a log entry) pass silently even when the receipt's field is set.
+17. **`nil *bool` in `DirectiveDefaultsConfig` ≠ `false *bool`.** Nil means "not set — skip"; a `*false` pointer means "explicitly disable". Only non-nil pointers are applied in `ApplyDirectiveDefaults`. Source: [`common/request.go:570-580`](https://github.com/erpc/erpc/blob/main/common/request.go#L570-L580).
+18. **`ValidateHeaderFieldLengths` struct comment is stale.** `common/request.go:172` says "only via config/library, not HTTP headers" — incorrect. The directive is fully HTTP-settable. Source: [`common/request.go:797-798`](https://github.com/erpc/erpc/blob/main/common/request.go#L797-L798).
+19. **`allowClientDirectives` filters HTTP-supplied directives only.** Config-set `directiveDefaults` always apply regardless of the filter. The pattern is pre-compiled at project registration via `NewWildcardMatcher` and evaluated against each directive's query-param key (e.g. `skip-cache-read`, `use-upstream`). `nil` = all allowed; `""` = none allowed; `"!skip-cache-read & !use-upstream"` = all except those two. Does not filter `X-ERPC-Force-Trace` (processed before project resolution). Source: `isDirectiveAllowed` method on `NormalizedRequest` in `common/request.go`, `NewWildcardMatcher` in `common/matcher.go`, `AllowClientDirectives` in `common/config.go`. See [projects config](/config/projects).
 
 ## Cache max age
 
@@ -375,24 +446,6 @@ These headers are only present when the response is served from cache.
 # X-ERPC-Cache-At: 1706000000
 ```
 
-## Use specific upstream(s)
-
-Example `X-ERPC-Upstreams` value: `alchemy=primary:success:50ms:won;quicknode=hedge:timeout:5000ms;drpc=consensus_slot:exec_revert:20ms`.
-
-**Error shapes produced by directive checks.** Failed validation directives return `ErrEndpointContentValidation`. A `UseUpstream` selector that matches no upstream returns `ErrUpstreamsExhausted` (wrapping `ErrUpstreamNotAllowed` per candidate) — there is no distinct "selector matched nothing" error code.
-
-### Best practices
-
-- **Start with `enforceHighestBlock: true` and `validateTransactionsRoot: true`** — both are on by default and catch the most common upstream data-quality issues with negligible overhead.
-- **Turn on the receipt-validation cluster only for indexing workloads** — `validateLogsBloomMatch`, `enforceLogIndexStrictIncrements`, `validateLogFields` are CPU-intensive; they penalize latency for general-purpose proxy traffic.
-- **Use `retryEmpty: true` for block-polling calls** but verify `EmptyResultMaxAttempts` is set appropriately; unbounded retries on a degraded upstream can exhaust the timeout budget.
-- **Never set `retryPending: true` globally** — it converts every pending-tx lookup into a polling loop. Pin it per request (`X-ERPC-Retry-Pending: true`) or to a dedicated network for transaction-tracking flows.
-- **Pin `useUpstream` at config via `directiveDefaults` for known-good archival nodes** rather than relying on callers to send the header — this prevents a misconfigured client from silently routing archival calls to full nodes.
-- **Always send `"true"`, never `"1"` or `"yes"`**, for all `X-ERPC-*` directive headers. Four of the 23 headers (#20–23) lack `TrimSpace` — a value like `"  true  "` (with spaces) evaluates to `false` on those.
-- **On gRPC, per-request overrides are not available.** Wire all desired defaults into `directiveDefaults` in config; `EnrichFromHttp` is never called on the gRPC path.
-
-### Edge cases & gotchas
-
 ## Check every selected upstream
 
 For compatibility investigations you can ask eRPC to run the same request against every selected upstream and return a diagnostic result instead of the first usable upstream response.
@@ -421,8 +474,6 @@ curl --location 'http://localhost:4000/main/evm/42161?check-all-upstreams=true' 
     "jsonrpc": "2.0"
 }'
 ```
-
-## Validation directives
 
 ### Observability
 

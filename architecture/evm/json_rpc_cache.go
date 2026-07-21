@@ -60,12 +60,14 @@ func NewEvmJsonRpcCache(ctx context.Context, logger *zerolog.Logger, cfg *common
 
 	// Create connectors map
 	connectors := make(map[string]data.Connector)
+	connectorTags := make(map[string][]string)
 	for _, connCfg := range cfg.Connectors {
 		c, err := data.NewConnector(ctx, logger, connCfg)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create connector %s: %w", connCfg.Id, err)
 		}
 		connectors[connCfg.Id] = c
+		connectorTags[connCfg.Id] = connCfg.Tags
 	}
 
 	// Create policies
@@ -80,6 +82,8 @@ func NewEvmJsonRpcCache(ctx context.Context, logger *zerolog.Logger, cfg *common
 		if err != nil {
 			return nil, fmt.Errorf("failed to create policy: %w", err)
 		}
+		// Connector tags drive use-upstream gating of this policy's cache.
+		policy.SetConnectorTags(connectorTags[policyCfg.Connector])
 		policies = append(policies, policy)
 	}
 
@@ -196,6 +200,28 @@ func (c *EvmJsonRpcCache) currentPolicySnapshot() *cachePolicySnapshot {
 	return snapshot
 }
 
+// observeGetLogsRange records the concrete block-range size of an eth_getLogs
+// request into MetricCacheEvmGetLogsRange, tagged by the connector/policy/ttl
+// involved and the hit/miss outcome. It is a no-op for non-getLogs methods and
+// for requests whose range is not concrete (block tags, blockHash, malformed).
+func (c *EvmJsonRpcCache) observeGetLogsRange(ctx context.Context, req *common.NormalizedRequest, rpcReq *common.JsonRpcRequest, connectorId, policy, ttl, outcome string) {
+	if rpcReq == nil || rpcReq.Method != "eth_getLogs" {
+		return
+	}
+	rangeSize, ok := getLogsConcreteRangeSize(ctx, rpcReq)
+	if !ok {
+		return
+	}
+	telemetry.MetricCacheEvmGetLogsRange.WithLabelValues(
+		c.projectId,
+		req.NetworkLabel(),
+		connectorId,
+		policy,
+		ttl,
+		outcome,
+	).Observe(rangeSize)
+}
+
 func (c *EvmJsonRpcCache) Get(ctx context.Context, req *common.NormalizedRequest) (*common.NormalizedResponse, error) {
 	ctx, span := common.StartSpan(ctx, "Cache.Get",
 		trace.WithAttributes(
@@ -275,10 +301,15 @@ func (c *EvmJsonRpcCache) Get(ctx context.Context, req *common.NormalizedRequest
 	results := make(chan fanResult, len(policies))
 	spawned := 0
 
+	useUpstream := useUpstreamSelector(req)
 	for _, p := range policies {
 		conn := p.GetConnector()
 		if req.ShouldSkipCacheRead(conn.Id()) {
 			c.logger.Debug().Str("connector", conn.Id()).Interface("id", req.ID()).Msg("skipping cache connector due to skip-cache-read directive pattern")
+			continue
+		}
+		if eligible, _ := p.MatchesUpstreamSelector(useUpstream); !eligible {
+			c.logger.Debug().Str("connector", conn.Id()).Str("useUpstream", useUpstream).Interface("id", req.ID()).Msg("skipping cache connector due to use-upstream directive selector")
 			continue
 		}
 		spawned++
@@ -387,6 +418,7 @@ func (c *EvmJsonRpcCache) Get(ctx context.Context, req *common.NormalizedRequest
 		lastMiss   *fanResult
 		lastReject *fanResult
 		lastError  *fanResult
+		aborted    bool
 	)
 drain:
 	for received := 0; received < spawned && jrr == nil; {
@@ -426,6 +458,16 @@ drain:
 			// so the hit IS in the channel — Go's select just happened to
 			// pick the Done branch over the receive branch. Picking up
 			// that hit here avoids a phantom miss under the race.
+			//
+			// Mark the fan-out aborted: if no hit surfaces from the buffer
+			// below, we exited because of cancellation (a)/(b), not because
+			// every connector confirmed a genuine miss. The post-fan-out
+			// block uses this to avoid recording a cancelled read as a
+			// success_miss (which would inflate the miss count and attribute
+			// the cancellation latency — e.g. a request-level failsafe
+			// timeout ceiling — to the connector). Case (c) sets jrr below,
+			// so this flag is irrelevant there.
+			aborted = true
 		drainBuffer:
 			for {
 				select {
@@ -459,6 +501,22 @@ drain:
 	}
 
 	if jrr == nil {
+		// The fan-out was aborted by context cancellation (caller cancelled
+		// the parent ctx, or the 30s defensive backstop fired) rather than
+		// every connector confirming a genuine miss. This is NOT a cache
+		// miss: counting it inflates success_miss with cancelled reads and
+		// records the cancellation latency (often a fixed request-level
+		// failsafe/hedge timeout ceiling) against the connector. Fall through
+		// to the upstream layer without emitting a miss metric — mirroring the
+		// per-goroutine "cancelled" guard above.
+		if aborted {
+			span.SetAttributes(
+				attribute.Bool("cache.hit", false),
+				attribute.String("cache.miss_reason", "cancelled"),
+			)
+			return nil, nil
+		}
+
 		// All connectors confirmed miss / errored / age-rejected. Attribute the
 		// fall-through metric to the most informative outcome we observed,
 		// preferring rejections over plain misses over errors.
@@ -516,6 +574,7 @@ drain:
 			labelPolicyStr,
 			labelTTL,
 		).Observe(time.Since(start).Seconds())
+		c.observeGetLogsRange(ctx, req, rpcReq, labelConnectorId, labelPolicyStr, labelTTL, "miss")
 		span.SetAttributes(attribute.Bool("cache.hit", false))
 		return nil, nil
 	}
@@ -541,6 +600,7 @@ drain:
 				policy.String(),
 				policy.GetTTL().String(),
 			).Observe(time.Since(start).Seconds())
+			c.observeGetLogsRange(ctx, req, rpcReq, connector.Id(), policy.String(), policy.GetTTL().String(), "miss")
 			span.SetAttributes(attribute.Bool("cache.hit", false))
 			return nil, nil
 		case common.CacheEmptyBehaviorAllow, common.CacheEmptyBehaviorOnly:
@@ -574,6 +634,7 @@ drain:
 		policy.String(),
 		policy.GetTTL().String(),
 	).Observe(time.Since(start).Seconds())
+	c.observeGetLogsRange(ctx, req, rpcReq, connector.Id(), policy.String(), policy.GetTTL().String(), "hit")
 	span.SetAttributes(attribute.Bool("cache.hit", true))
 	if c.logger.GetLevel() <= zerolog.DebugLevel {
 		result := jrr.GetResultBytes()
@@ -712,7 +773,14 @@ func (c *EvmJsonRpcCache) Set(ctx context.Context, req *common.NormalizedRequest
 	wg := sync.WaitGroup{}
 	errs := []error{}
 	errsMu := sync.Mutex{}
+	useUpstream := useUpstreamSelector(req)
 	for _, policy := range policies {
+		// Don't write a response into a cache the request's use-upstream selector
+		// excludes, so a source-tagged connector only stores matching data.
+		if eligible, _ := policy.MatchesUpstreamSelector(useUpstream); !eligible {
+			lg.Debug().Str("connector", policy.GetConnector().Id()).Str("useUpstream", useUpstream).Msg("skipping cache write due to use-upstream directive selector")
+			continue
+		}
 		wg.Add(1)
 		go func(policy *data.CachePolicy) {
 			defer wg.Done()
@@ -1288,6 +1356,15 @@ func shouldCacheResponse(
 	default:
 		return false, fmt.Errorf("unknown cache empty behavior: %s", policy.EmptyState())
 	}
+}
+
+// useUpstreamSelector returns the request's use-upstream directive, used to gate
+// which cache connectors may serve/store it (empty = no gating).
+func useUpstreamSelector(req *common.NormalizedRequest) string {
+	if d := req.Directives(); d != nil {
+		return d.UseUpstream
+	}
+	return ""
 }
 
 func generateKeysForJsonRpcRequest(

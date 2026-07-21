@@ -110,19 +110,26 @@ func NewPostgreSQLConnector(
 	}
 
 	connector := &PostgreSQLConnector{
-		id:            id,
-		logger:        &lg,
-		appCtx:        ctx,
-		table:         tableIdentifier.sql,
-		tableSchema:   tableIdentifier.schema,
-		tableName:     tableIdentifier.name,
-		minConns:      cfg.MinConns,
-		maxConns:      cfg.MaxConns,
-		initTimeout:   cfg.InitTimeout.Duration(),
-		getTimeout:    cfg.GetTimeout.Duration(),
-		setTimeout:    cfg.SetTimeout.Duration(),
-		cleanupTicker: time.NewTicker(5 * time.Minute),
-		connMu:        sync.RWMutex{},
+		id:          id,
+		logger:      &lg,
+		appCtx:      ctx,
+		table:       tableIdentifier.sql,
+		tableSchema: tableIdentifier.schema,
+		tableName:   tableIdentifier.name,
+		minConns:    cfg.MinConns,
+		maxConns:    cfg.MaxConns,
+		initTimeout: cfg.InitTimeout.Duration(),
+		getTimeout:  cfg.GetTimeout.Duration(),
+		setTimeout:  cfg.SetTimeout.Duration(),
+		connMu:      sync.RWMutex{},
+	}
+
+	// Only arm the local expired-row cleanup ticker when this connector owns
+	// the schema (writer region). On a read-only replica the periodic DELETE
+	// either fails or gets needlessly cross-region write-forwarded, so leave
+	// the ticker nil — startCleanup and the cleanupOnce gate both handle it.
+	if !cfg.SkipSchemaSetup {
+		connector.cleanupTicker = time.NewTicker(5 * time.Minute)
 	}
 
 	// create an Initializer to handle (re)connecting
@@ -196,12 +203,19 @@ func (p *PostgreSQLConnector) connectTask(ctx context.Context, cfg *common.Postg
 	// the `CREATE TABLE IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS` parts
 	// are safe under that race; the TEXT→BYTEA `DROP COLUMN` and
 	// `cron.schedule` steps are not.
-	if err := p.ensureSchema(connectCtx, newConn, cfg); err != nil {
-		// The pool we just opened is about to be discarded — close it
-		// synchronously so its connections are released back to the
-		// pooler rather than lingering until GC.
-		newConn.Close()
-		return err
+	// Schema setup issues DDL (CREATE TABLE/INDEX, ALTER, pg_cron) that a
+	// read-only replica cannot execute (SQLSTATE 25006) and that Aurora global
+	// write-forwarding does not forward. SkipSchemaSetup lets a reader-region
+	// connector come up without it; the writer-region connector owns the
+	// schema and it arrives via storage replication.
+	if !cfg.SkipSchemaSetup {
+		if err := p.ensureSchema(connectCtx, newConn, cfg); err != nil {
+			// The pool we just opened is about to be discarded — close it
+			// synchronously so its connections are released back to the
+			// pooler rather than lingering until GC.
+			newConn.Close()
+			return err
+		}
 	}
 
 	newReadonlyConns := p.connectReadonlyPools(connectCtx, cfg, iamSession, pgxpool.ConnectConfig)
