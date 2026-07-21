@@ -270,7 +270,7 @@ func authorizeWebsocketFrame(ctx context.Context, messageType websocket.MessageT
 		return fmt.Errorf("empty WebSocket frame")
 	}
 	requests := []json.RawMessage{trimmed}
-	if trimmed[0] == byte([) {
+	if trimmed[0] == byte(91) {
 		if err := common.SonicCfg.Unmarshal(trimmed, &requests); err != nil || len(requests) == 0 {
 			return fmt.Errorf("invalid JSON-RPC batch")
 		}
