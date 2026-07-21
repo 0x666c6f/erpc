@@ -105,6 +105,21 @@ func (p *PreparedProject) AuthenticateWebsocket(ctx context.Context, req *common
 	return nil, common.NewErrAuthUnauthorized("n/a", "WebSocket access requires an explicitly enabled auth strategy")
 }
 
+func (p *PreparedProject) SupportsMethod(method string) (bool, error) {
+	allowed := true
+	for _, pattern := range p.Config.IgnoreMethods {
+		match, err := common.WildcardMatch(pattern, method)
+		if err != nil { return false, err }
+		if match { allowed = false; break }
+	}
+	for _, pattern := range p.Config.AllowMethods {
+		match, err := common.WildcardMatch(pattern, method)
+		if err != nil { return false, err }
+		if match { allowed = true; break }
+	}
+	return allowed, nil
+}
+
 func (p *PreparedProject) Forward(ctx context.Context, networkId string, nq *common.NormalizedRequest) (*common.NormalizedResponse, error) {
 	start := time.Now()
 	ctx, span := common.StartDetailSpan(ctx, "Project.Forward")

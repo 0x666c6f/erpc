@@ -57,6 +57,7 @@ type HttpServer struct {
 	trustedForwarderIPs     map[string]struct{}
 	trustedIPHeaders        []string
 	resolvedResponseHeaders map[string]string
+	websocketManager        *websocketManager
 }
 
 func logHttpRequestBody(lg *zerolog.Logger, body []byte) {
@@ -145,7 +146,8 @@ func NewHttpServer(
 		adminCfg:       adminCfg,
 		erpc:           erpc,
 		draining:       &draining,
-		gzipPool:       gzipPool,
+		gzipPool:         gzipPool,
+		websocketManager: newWebsocketManager(cfg.Websocket),
 	}
 
 	if cfg != nil {
@@ -1829,6 +1831,7 @@ func (s *HttpServer) createTLSConfig() (*tls.Config, error) {
 
 func (s *HttpServer) Shutdown(logger *zerolog.Logger) error {
 	logger.Info().Msg("stopping http servers...")
+	if s.websocketManager != nil { s.websocketManager.shutdown() }
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()

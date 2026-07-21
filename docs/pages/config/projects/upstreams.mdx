@@ -120,7 +120,7 @@ projects:
         websocketEndpoint: wss://eth-mainnet.example/v2/key
 ```
 
-WebSocket connections use the normal `/<project>/<architecture>/<chainId>` route with the same `secret`, `X-ERPC-Secret-Token`, Basic, Bearer, SIWE, or network credentials as HTTP. eRPC selects the highest-ranked upstream that defines `websocketEndpoint` and proxies frames bidirectionally for the life of the connection. WebSocket traffic is stateful: it is not cached, retried, hedged, or failed over after connection establishment.
+WebSocket connections use the normal `/<project>/<architecture>/<chainId>` route with the same `secret`, `X-ERPC-Secret-Token`, Basic, Bearer, SIWE, or network credentials as HTTP. eRPC checks method filters and project/auth rate limits on every client frame, including each request in a JSON-RPC batch; binary and malformed frames are rejected. It tries eligible `eth_subscribe` upstreams in current policy order until one connects. WebSocket traffic is stateful: it is not cached, retried, hedged, or failed over after connection establishment. Connections are bounded by per-user concurrency, idle, maximum-lifetime, and dial limits and are closed during graceful shutdown. Database-auth fail-open users are rejected for WebSocket upgrades.
 
 ### How it works
 

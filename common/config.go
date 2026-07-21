@@ -160,6 +160,7 @@ type ServerConfig struct {
 	TrustedIPForwarders []string          `yaml:"trustedIPForwarders,omitempty" json:"trustedIPForwarders"`
 	TrustedIPHeaders    []string          `yaml:"trustedIPHeaders,omitempty" json:"trustedIPHeaders"`
 	ResponseHeaders     map[string]string `yaml:"responseHeaders,omitempty" json:"responseHeaders"`
+	Websocket           *WebsocketServerConfig `yaml:"websocket,omitempty" json:"websocket,omitempty"`
 
 	// ExecutionHeaders controls the per-request diagnostic headers
 	// (X-ERPC-Attempts, X-ERPC-Upstreams-Tried, etc.) that expose how
@@ -167,6 +168,13 @@ type ServerConfig struct {
 	// "summary" to keep only counters, or "off" to disable entirely
 	// (useful for low-latency / bandwidth-constrained clients).
 	ExecutionHeaders *ExecutionHeadersMode `yaml:"executionHeaders,omitempty" json:"executionHeaders" tstype:"ExecutionHeadersMode"`
+}
+
+type WebsocketServerConfig struct {
+	DialTimeout           *Duration `yaml:"dialTimeout,omitempty" json:"dialTimeout" tstype:"Duration"`
+	IdleTimeout           *Duration `yaml:"idleTimeout,omitempty" json:"idleTimeout" tstype:"Duration"`
+	MaxLifetime           *Duration `yaml:"maxLifetime,omitempty" json:"maxLifetime" tstype:"Duration"`
+	MaxConnectionsPerUser *int      `yaml:"maxConnectionsPerUser,omitempty" json:"maxConnectionsPerUser"`
 }
 
 // ExecutionHeadersMode controls how much per-request execution detail is

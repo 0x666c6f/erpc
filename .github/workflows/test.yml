@@ -66,7 +66,7 @@ jobs:
         run: make test-fast PKG_EXCLUDE_REGEX='^github\.com/erpc/erpc/(cmd|test|erpc)($$|/)'
       - name: Test erpc critical paths
         run: |
-          go test ./erpc -run '^(TestConsensusPolicy|TestConsensusPolicy_DSLScenarios|TestBridgeWebsocketsProxiesBidirectionally|TestParseUrlPathAcceptsWebsocketUpgrade|TestWebsocketOriginAllowedUsesProjectCORS)$' -count=1 -parallel 1 -timeout 3m -v
+          go test ./erpc -run '^(TestConsensusPolicy|TestConsensusPolicy_DSLScenarios|TestBridgeWebsocketsProxiesBidirectionally|TestParseUrlPathAcceptsWebsocketUpgrade|TestWebsocketOriginAllowedUsesProjectCORS|TestAuthorizeWebsocketFrameEnforcesMethodFilters|TestDialWebsocketUpstreamFailsOver|TestWebsocketManagerLimitsAndShutsDownConnections)$' -count=1 -parallel 1 -timeout 3m -v
           make test-fallback-config
       - name: Validate Go modules
         run: git diff --exit-code -- go.mod go.sum

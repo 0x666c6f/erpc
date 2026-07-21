@@ -140,6 +140,10 @@ All fields live under `server.` unless noted. `Duration` accepts Go duration str
 | `server.readTimeout` | `*Duration` | `30s` | `http.Server.ReadTimeout` — covers reading headers and body. <SourceLink file="common/defaults.go" lines="698-701" /> |
 | `server.writeTimeout` | `*Duration` | `120s` | `http.Server.WriteTimeout` — covers writing the response. The entire response is buffered by `TimeoutHandler` before reaching the socket, so this only matters at final flush. <SourceLink file="common/defaults.go" lines="702-705" /> |
 | `server.enableGzip` | `*bool` | `true` | Wraps handler in `gzipHandler` for response compression. Inbound gzip is always accepted regardless of this flag. <SourceLink file="common/defaults.go" lines="706-708" /> |
+| `server.websocket.dialTimeout` | `*Duration` | `10s` | Per-upstream WebSocket dial timeout before trying the next eligible candidate. |
+| `server.websocket.idleTimeout` | `*Duration` | `5m` | Closes a WebSocket connection when neither side sends a frame for this duration. |
+| `server.websocket.maxLifetime` | `*Duration` | `24h` | Hard lifetime for a WebSocket connection. |
+| `server.websocket.maxConnectionsPerUser` | `*int` | `10` | Maximum concurrent WebSocket connections per authenticated user/API-key ID. |
 | `server.tls.enabled` | `bool` | `false` | When true, both listeners use `ListenAndServeTLS` with TLS 1.2 minimum; gRPC also uses TLS. Disables h2c on the shared port. <SourceLink file="erpc/http_server.go" lines="1537-1554" /> |
 | `server.tls.certFile` | `string` | `""` | PEM cert path. Load failure → "failed to load TLS certificate and key". |
 | `server.tls.keyFile` | `string` | `""` | PEM key path. |

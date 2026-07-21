@@ -21,6 +21,8 @@ func TestAuthRegistryAuthenticateWebsocketRequiresExplicitAccess(t *testing.T) {
 			{
 				Type:           common.AuthTypeSecret,
 				AllowWebsocket: true,
+				IgnoreMethods:  []string{"*"},
+				AllowMethods:   []string{"eth_subscribe"},
 				Secret:         &common.SecretStrategyConfig{Id: "websocket", Value: "allowed-key"},
 			},
 		},
@@ -40,4 +42,6 @@ func TestAuthRegistryAuthenticateWebsocketRequiresExplicitAccess(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Equal(t, "websocket", user.Id)
+	_, err = registry.AuthenticateWebsocket(context.Background(), req, "eth_sendRawTransaction", &AuthPayload{Type: common.AuthTypeSecret, Secret: &SecretPayload{Value: "allowed-key"}})
+	require.Error(t, err)
 }

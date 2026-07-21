@@ -43,3 +43,16 @@ func assertGrpcConfigSecretsRedacted(t *testing.T, text string) {
 	assert.Contains(t, text, "REDACTED")
 	assert.Contains(t, text, "redacted=")
 }
+
+
+func TestUpstreamConfigRedactsWebsocketEndpoint(t *testing.T) {
+	cfg := &UpstreamConfig{Id: "websocket-secure", Endpoint: "https://example.internal/rpc?token=http-secret", WebsocketEndpoint: "wss://example.internal/private/ws?token=websocket-secret"}
+	jsonBytes, err := json.Marshal(cfg); require.NoError(t, err)
+	sonicBytes, err := SonicCfg.Marshal(cfg); require.NoError(t, err)
+	yamlBytes, err := yaml.Marshal(cfg); require.NoError(t, err)
+	for _, text := range []string{string(jsonBytes), string(sonicBytes), string(yamlBytes)} {
+		assert.NotContains(t, text, "http-secret")
+		assert.NotContains(t, text, "websocket-secret")
+		assert.Contains(t, text, "redacted=")
+	}
+}

@@ -486,6 +486,7 @@ func TestAuthenticate_FastPathDuringOutage(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, u)
 	assert.Equal(t, "emergency-failopen", u.Id)
+	assert.True(t, u.AuthFailOpen)
 	assert.Equal(t, int64(1), fc.getCalls.Load())
 	assert.True(t, s.connectorDown.Load(), "first failure must latch connectorDown")
 

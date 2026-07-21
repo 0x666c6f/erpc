@@ -69,7 +69,7 @@ func (r *AuthRegistry) authenticate(ctx context.Context, req *common.NormalizedR
 			continue
 		}
 
-		if !requireWebsocket && !az.shouldApplyToMethod(method) {
+		if (!requireWebsocket || method != "websocket_connect") && !az.shouldApplyToMethod(method) {
 			continue
 		}
 
@@ -80,6 +80,10 @@ func (r *AuthRegistry) authenticate(ctx context.Context, req *common.NormalizedR
 		user, err := az.strategy.Authenticate(ctx, req, ap)
 		if err != nil {
 			errs = append(errs, err)
+			continue
+		}
+		if requireWebsocket && user != nil && user.AuthFailOpen {
+			errs = append(errs, common.NewErrAuthUnauthorized("database", "WebSocket access is disabled during database auth fail-open"))
 			continue
 		}
 

@@ -897,6 +897,11 @@ func (s *ServerConfig) SetDefaults() error {
 	if s.EnableGzip == nil {
 		s.EnableGzip = util.BoolPtr(true)
 	}
+	if s.Websocket == nil { s.Websocket = &WebsocketServerConfig{} }
+	if s.Websocket.DialTimeout == nil { d := Duration(10 * time.Second); s.Websocket.DialTimeout = &d }
+	if s.Websocket.IdleTimeout == nil { d := Duration(5 * time.Minute); s.Websocket.IdleTimeout = &d }
+	if s.Websocket.MaxLifetime == nil { d := Duration(24 * time.Hour); s.Websocket.MaxLifetime = &d }
+	if s.Websocket.MaxConnectionsPerUser == nil { s.Websocket.MaxConnectionsPerUser = util.IntPtr(10) }
 	if s.WaitBeforeShutdown == nil {
 		d := Duration(10 * time.Second)
 		s.WaitBeforeShutdown = &d
