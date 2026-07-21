@@ -98,6 +98,13 @@ func (p *PreparedProject) AuthenticateConsumer(ctx context.Context, req *common.
 	return nil, nil
 }
 
+func (p *PreparedProject) AuthenticateWebsocket(ctx context.Context, req *common.NormalizedRequest, method string, ap *auth.AuthPayload) (*common.User, error) {
+	if p.consumerAuthRegistry != nil {
+		return p.consumerAuthRegistry.AuthenticateWebsocket(ctx, req, method, ap)
+	}
+	return nil, common.NewErrAuthUnauthorized("n/a", "WebSocket access requires an explicitly enabled auth strategy")
+}
+
 func (p *PreparedProject) Forward(ctx context.Context, networkId string, nq *common.NormalizedRequest) (*common.NormalizedResponse, error) {
 	start := time.Now()
 	ctx, span := common.StartDetailSpan(ctx, "Project.Forward")

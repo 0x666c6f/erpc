@@ -200,16 +200,25 @@ func NewHttpServer(
 		}
 	}
 
-	h := srv.createRequestHandler()
+	requestHandler := srv.createRequestHandler()
+	normalHandler := requestHandler
 
 	if cfg.EnableGzip != nil && *cfg.EnableGzip {
-		h = gzipHandler(h)
+		normalHandler = gzipHandler(normalHandler)
 	}
 
-	// Create handler with timeout
-	httpHandler := TimeoutHandler(logger, h, reqMaxTimeout)
-	handlerV4 := httpHandler
-	handlerV6 := httpHandler
+	// WebSocket upgrades must bypass the buffering timeout and gzip wrappers,
+	// which do not implement http.Hijacker.
+	httpHandler := TimeoutHandler(logger, normalHandler, reqMaxTimeout)
+	websocketAwareHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if websocketUpgradeRequested(r) {
+			requestHandler.ServeHTTP(w, r)
+			return
+		}
+		httpHandler.ServeHTTP(w, r)
+	})
+	handlerV4 := http.Handler(websocketAwareHandler)
+	handlerV6 := http.Handler(websocketAwareHandler)
 
 	if grpcSharesHttpV4(cfg) {
 		sharedGrpcServer, err := NewGrpcServer(ctx, logger, cfg, erpc)
@@ -222,7 +231,7 @@ func NewHttpServer(
 				sharedGrpcServer.server.ServeHTTP(w, r)
 				return
 			}
-			httpHandler.ServeHTTP(w, r)
+			websocketAwareHandler.ServeHTTP(w, r)
 		})
 		if cfg.TLS == nil || !cfg.TLS.Enabled {
 			handlerV4 = h2c.NewHandler(handlerV4, &http2.Server{})
@@ -397,6 +406,11 @@ func (s *HttpServer) createRequestHandler() http.Handler {
 			if !s.handleCORS(httpCtx, w, r, project.Config.CORS) || r.Method == http.MethodOptions {
 				return
 			}
+		}
+
+		if websocketUpgradeRequested(r) {
+			s.handleWebsocket(httpCtx, w, r, project, architecture, chainId)
+			return
 		}
 
 		// Handle gzipped request bodies
@@ -990,6 +1004,7 @@ func (s *HttpServer) parseUrlPath(
 
 	isPost := r.Method == http.MethodPost
 	isOptions := r.Method == http.MethodOptions
+	isWebsocket := websocketUpgradeRequested(r)
 
 	// Initialize with preselected values
 	projectId = preSelectedProjectId
@@ -1006,7 +1021,7 @@ func (s *HttpServer) parseUrlPath(
 		isHealthCheck = true
 		segments = segments[:len(segments)-1] // Remove healthcheck segment
 	} else if len(segments) == 0 || (len(segments) == 1 && segments[0] == "") {
-		if !(isPost || isOptions) {
+		if !(isPost || isOptions || isWebsocket) {
 			isHealthCheck = true
 			segments = nil
 		}
@@ -1162,7 +1177,7 @@ func (s *HttpServer) parseUrlPath(
 		return "", "", "", false, false, common.NewErrInvalidUrlPath("architecture is not valid (must be 'evm')", ps)
 	}
 
-	if !isPost && !isOptions {
+	if !isPost && !isOptions && !isWebsocket {
 		isHealthCheck = true
 	}
 

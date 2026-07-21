@@ -966,6 +966,12 @@ func (u *UpstreamConfig) Validate(c *Config, skipEndpointCheck bool) error {
 	if !skipEndpointCheck && u.Endpoint == "" {
 		return fmt.Errorf("upstream.*.endpoint is required")
 	}
+	if u.WebsocketEndpoint != "" {
+		parsed, err := url.Parse(u.WebsocketEndpoint)
+		if err != nil || (parsed.Scheme != "ws" && parsed.Scheme != "wss") {
+			return fmt.Errorf("upstream.*.websocketEndpoint must use ws:// or wss://")
+		}
+	}
 	if err := validateCapabilityTags("upstream.*.capabilities", u.Capabilities); err != nil {
 		return err
 	}

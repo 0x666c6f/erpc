@@ -9,6 +9,7 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
+	"github.com/erpc/erpc/common"
 	"github.com/stretchr/testify/require"
 )
 
@@ -53,4 +54,30 @@ func TestBridgeWebsocketsProxiesBidirectionally(t *testing.T) {
 	var got map[string]any
 	require.NoError(t, wsjson.Read(ctx, client, &got))
 	require.Equal(t, want, got)
+}
+
+func TestParseUrlPathAcceptsWebsocketUpgrade(t *testing.T) {
+	t.Parallel()
+	req := httptest.NewRequest(http.MethodGet, "/main/evm/1", nil)
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Upgrade", "websocket")
+
+	projectID, architecture, chainID, isAdmin, isHealthCheck, err := (&HttpServer{}).parseUrlPath(req, "", "", "")
+	require.NoError(t, err)
+	require.Equal(t, "main", projectID)
+	require.Equal(t, "evm", architecture)
+	require.Equal(t, "1", chainID)
+	require.False(t, isAdmin)
+	require.False(t, isHealthCheck)
+}
+
+func TestWebsocketOriginAllowedUsesProjectCORS(t *testing.T) {
+	t.Parallel()
+	req := httptest.NewRequest(http.MethodGet, "/main/evm/1", nil)
+	req.Header.Set("Origin", "https://app.example.com")
+	cors := &common.CORSConfig{AllowedOrigins: []string{"https://*.example.com"}}
+	require.True(t, websocketOriginAllowed(req, cors))
+
+	req.Header.Set("Origin", "https://evil.example")
+	require.False(t, websocketOriginAllowed(req, cors))
 }

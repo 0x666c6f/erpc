@@ -201,6 +201,7 @@ Authenticate fast paths (in evaluation order):
 | `strategies[*].ignoreMethods` | `[]string` | `nil` | Wildcard patterns (supports `*`, `\|`, `&`, `!`). Applied before `allowMethods`. <SourceLink file="auth/authorizer.go" lines="86-98" /> |
 | `strategies[*].allowMethods` | `[]string` | `nil` | Overrides `ignoreMethods`; any matching allow re-enables the strategy for that method. <SourceLink file="auth/authorizer.go" lines="100-113" /> |
 | `strategies[*].rateLimitBudget` | `string` | `""` | Strategy-level budget ID. Overridden by per-user budget when non-empty. <SourceLink file="auth/authorizer.go" lines="119-127" /> |
+| `strategies[*].allowWebsocket` | `bool` | `false` | Explicitly permits this strategy to authenticate WebSocket upgrades. Keep false for HTTP-only API keys. WebSocket access is denied unless a matching strategy opts in. |
 
 **`secret` strategy — `SecretStrategyConfig`**
 

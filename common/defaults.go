@@ -1757,6 +1757,9 @@ func (u *UpstreamConfig) ApplyDefaults(defaults *UpstreamConfig) error {
 	if u.Endpoint == "" {
 		u.Endpoint = defaults.Endpoint
 	}
+	if u.WebsocketEndpoint == "" {
+		u.WebsocketEndpoint = defaults.WebsocketEndpoint
+	}
 	if u.Type == "" {
 		u.Type = defaults.Type
 	}

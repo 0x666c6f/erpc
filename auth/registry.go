@@ -44,6 +44,15 @@ func NewAuthRegistry(appCtx context.Context, logger *zerolog.Logger, projectId s
 
 // Authenticate checks the authentication payload against all registered strategies
 func (r *AuthRegistry) Authenticate(ctx context.Context, req *common.NormalizedRequest, method string, ap *AuthPayload) (*common.User, error) {
+	return r.authenticate(ctx, req, method, ap, false)
+}
+
+// AuthenticateWebsocket authenticates only against strategies explicitly enabled for WebSocket access.
+func (r *AuthRegistry) AuthenticateWebsocket(ctx context.Context, req *common.NormalizedRequest, method string, ap *AuthPayload) (*common.User, error) {
+	return r.authenticate(ctx, req, method, ap, true)
+}
+
+func (r *AuthRegistry) authenticate(ctx context.Context, req *common.NormalizedRequest, method string, ap *AuthPayload, requireWebsocket bool) (*common.User, error) {
 	if ap == nil {
 		return nil, common.NewErrAuthUnauthorized("n/a", "auth payload is nil")
 	}
@@ -56,7 +65,11 @@ func (r *AuthRegistry) Authenticate(ctx context.Context, req *common.NormalizedR
 	var errs []error
 
 	for _, az := range r.strategies {
-		if !az.shouldApplyToMethod(method) {
+		if requireWebsocket && !az.cfg.AllowWebsocket {
+			continue
+		}
+
+		if !requireWebsocket && !az.shouldApplyToMethod(method) {
 			continue
 		}
 
