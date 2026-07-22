@@ -3,6 +3,8 @@
 {{- fail "vault.validationImage.repository and vault.validationImage.tag are required when vault.validationImage.enabled=true" }}
 {{- end }}
 {{- $useDedicatedValidator := $validationImage.enabled }}
+{{- $configMapName := .Values.vault.configMapName | default "" }}
+{{- $configTemplatePath := ternary "/erpc-config/erpc.yaml" "/vault/secrets/erpc-config" (ne $configMapName "") }}
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -22,15 +24,18 @@ spec:
         {{- include "erpc.selectorLabels" . | nindent 8 }}
         job: vault-config-creator
       annotations:
-        # Vault Agent annotations for config injection (on pod template)
+        # Vault Agent annotations for secrets (and, without configMapName,
+        # config) injection (on pod template)
         vault.hashicorp.com/agent-inject: "true"
         vault.hashicorp.com/role: {{ include "erpc.vaultCreatorServiceAccountName" . | quote }}
+        {{- if not $configMapName }}
         vault.hashicorp.com/agent-inject-secret-erpc-config: {{ .Values.vault.configPath | default "secret/data/erpc/config" | quote }}
-        vault.hashicorp.com/agent-inject-secret-erpc-secrets: {{ .Values.vault.secretsPath | default "secret/data/erpc/secrets" | quote }}
         vault.hashicorp.com/agent-inject-template-erpc-config: |
           {{`{{- with secret "`}}{{ .Values.vault.configPath | default "secret/data/erpc/config" }}{{`" -}}
           {{- .Data.data.config -}}
           {{- end }}`}}
+        {{- end }}
+        vault.hashicorp.com/agent-inject-secret-erpc-secrets: {{ .Values.vault.secretsPath | default "secret/data/erpc/secrets" | quote }}
         vault.hashicorp.com/agent-inject-template-erpc-secrets: |
           {{`{{- with secret "`}}{{ .Values.vault.secretsPath | default "secret/data/erpc/secrets" }}{{`" -}}
           {{- range $key, $value := .Data.data -}}
@@ -50,6 +55,11 @@ spec:
       volumes:
         - name: rendered-config
           emptyDir: {}
+        {{- if $configMapName }}
+        - name: erpc-config-template
+          configMap:
+            name: {{ $configMapName | quote }}
+        {{- end }}
         {{- if .Values.securityHardening.enabled }}
         - name: tmp
           emptyDir: {}
@@ -64,14 +74,21 @@ spec:
           imagePullPolicy: {{ .Values.vault.jobImage.pullPolicy }}
           resources:
             {{- toYaml .Values.vault.jobResources | nindent 12 }}
-          {{- if .Values.securityHardening.enabled }}
           env:
+            - name: CONFIG_TEMPLATE_PATH
+              value: {{ $configTemplatePath | quote }}
+            {{- if .Values.securityHardening.enabled }}
             - name: HOME
               value: /tmp
-          {{- end }}
+            {{- end }}
           volumeMounts:
             - name: rendered-config
               mountPath: /work
+            {{- if $configMapName }}
+            - name: erpc-config-template
+              mountPath: /erpc-config
+              readOnly: true
+            {{- end }}
             {{- if .Values.securityHardening.enabled }}
             - name: tmp
               mountPath: /tmp
@@ -85,18 +102,18 @@ spec:
                 set -o pipefail
               fi
 
-              echo "Rendering ERPC configuration from vault config and secrets..."
+              echo "Rendering ERPC configuration from config template $CONFIG_TEMPLATE_PATH and vault secrets..."
 
               timeout=60
               count=0
-              while { [ ! -f /vault/secrets/erpc-config ] || [ ! -f /vault/secrets/erpc-secrets ]; } && [ $count -lt $timeout ]; do
-                echo "Waiting for vault config and secrets files... ($count/$timeout)"
+              while { [ ! -f "$CONFIG_TEMPLATE_PATH" ] || [ ! -f /vault/secrets/erpc-secrets ]; } && [ $count -lt $timeout ]; do
+                echo "Waiting for config template and vault secrets files... ($count/$timeout)"
                 sleep 2
                 count=$((count + 2))
               done
 
-              if [ ! -f /vault/secrets/erpc-config ]; then
-                echo "ERROR: Vault config file not found after $timeout seconds"
+              if [ ! -f "$CONFIG_TEMPLATE_PATH" ]; then
+                echo "ERROR: Config template file $CONFIG_TEMPLATE_PATH not found after $timeout seconds"
                 exit 1
               fi
 
@@ -346,7 +363,7 @@ spec:
                     exit 1
                   }
                 }
-              ' /vault/secrets/erpc-config > "$tmp_rendered_config"
+              ' "$CONFIG_TEMPLATE_PATH" > "$tmp_rendered_config"
               mv "$tmp_rendered_config" "$rendered_config"
 
               echo "ERPC configuration rendered to $rendered_config"

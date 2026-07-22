@@ -1383,6 +1383,11 @@ erpc:
     autovacuumMaxWorkers: "4"
 
   vault:
+    # PLA-2003: non-secret config now lives in the repo
+    # (helm/environments/prd/erpc/config/erpc.yaml -> ConfigMap "erpc-config").
+    # Vault keeps only secrets (secret/data/erpc/secrets) substituted into
+    # __SECRET_<KEY>__ placeholders.
+    configMapName: "erpc-config"
     jobImage:
       repository: 537124939463.dkr.ecr.eu-west-3.amazonaws.com/erpc-validator
       tag: &erpcValidatorImageTag "0.1.3"

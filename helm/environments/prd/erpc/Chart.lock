@@ -1,19 +1,19 @@
 dependencies:
 - name: erpc
   repository: file://../../../charts/erpc
-  version: 0.1.35
+  version: 0.1.36
 - name: erpc
   repository: file://../../../charts/erpc
-  version: 0.1.35
+  version: 0.1.36
 - name: erpc
   repository: file://../../../charts/erpc
-  version: 0.1.35
+  version: 0.1.36
 - name: erpc
   repository: file://../../../charts/erpc
-  version: 0.1.35
+  version: 0.1.36
 - name: erpc
   repository: file://../../../charts/erpc
-  version: 0.1.35
+  version: 0.1.36
 - name: redis-ha
   repository: https://dandydeveloper.github.io/charts
   version: 4.35.2
@@ -29,5 +29,5 @@ dependencies:
 - name: prometheus-redis-exporter
   repository: https://prometheus-community.github.io/helm-charts
   version: 6.8.0
-digest: sha256:6f63ffe63edeae52172c50f6d1dd3ed8f12e964a7c8af088c49daeeb4f2a5cda
-generated: "2026-06-16T17:08:14.874547+02:00"
+digest: sha256:c0eab2e9c69ceeab79ea64c4154d2ec810eae54d0e0090cd39fffc953e08a00f
+generated: "2026-07-21T17:28:33.268154+02:00"
