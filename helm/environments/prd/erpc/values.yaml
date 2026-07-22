@@ -1453,7 +1453,10 @@ erpc-dev:
 
   image:
     repository: 537124939463.dkr.ecr.eu-west-3.amazonaws.com/erpc
-    tag: *erpcImageTag
+    # Staged rollout of the 0.1.7 upstream sync (PLA-2017): validate on the
+    # dev instance before flipping the shared erpcImageTag anchor (PR #124).
+    # Revert to `tag: *erpcImageTag` when the fleet moves to 0.1.7.
+    tag: "0.1.7"
 
   replicaCount: 1
 
