@@ -1482,7 +1482,10 @@ erpc-dev:
     configPath: "secret/data/erpc/config-dev"
     jobImage:
       repository: 537124939463.dkr.ecr.eu-west-3.amazonaws.com/erpc-validator
-      tag: *erpcValidatorImageTag
+      # Staged with the runtime image (see image.tag above): the pre-upgrade
+      # validation must exercise the same binary version that will serve the
+      # config. Revert to *erpcValidatorImageTag together with image.tag.
+      tag: "0.1.7"
       pullPolicy: IfNotPresent
 
   # Public ingress for erpc-dev is managed in morpho-infra via CloudFront and
