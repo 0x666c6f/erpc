@@ -2,7 +2,7 @@ apiVersion: v2
 name: erpc-prd
 description: eRPC fault-tolerant EVM RPC proxy - Production Environment
 type: application
-version: 0.1.40
+version: 0.1.42
 appVersion: "latest"
 
 dependencies:

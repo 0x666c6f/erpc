@@ -1,10 +1,12 @@
 {{- $prodErpcSelector := printf "job=~\"%s/erpc(-dev|-processing|-router|-fallback)?\"" .Release.Namespace }}
 {{- $prodErpcMatcher := printf "{%s}" $prodErpcSelector }}
-{{- $prodErpcActionableFailureMatcher := printf "{%s,error!=\"ErrUpstreamsExhausted\"}" $prodErpcSelector }}
+{{- $prodErpcInfrastructureFailureRegex := "ErrUpstreamsExhausted|ErrJsonRpcExceptionInternal(/-?[0-9]+)?|ErrUnexpectedPanic|ErrEndpoint(ServerSideException(/5[0-9][0-9])?|TransportFailure|RequestTimeout)|ErrUpstreamRequest( |/)(ErrEndpoint(ServerSideException(/5[0-9][0-9])?|TransportFailure|RequestTimeout)|ErrJsonRpcExceptionInternal(/-?[0-9]+)?|ErrUnexpectedPanic)" }}
+{{- $prodErpcActionableFailureMatcher := printf "{%s,error=~\"%s\"}" $prodErpcSelector $prodErpcInfrastructureFailureRegex }}
 {{- $prodErpcFallbackMatcher := printf "{job=\"%s/erpc-fallback\"}" .Release.Namespace }}
-{{- $prodErpcFallbackActionableFailureMatcher := printf "{job=\"%s/erpc-fallback\",error!=\"ErrUpstreamsExhausted\"}" .Release.Namespace }}
+{{- $prodErpcFallbackActionableFailureMatcher := printf "{job=\"%s/erpc-fallback\",error=~\"%s\"}" .Release.Namespace $prodErpcInfrastructureFailureRegex }}
 {{- $prodErpcPrimaryMatcher := printf "{job=~\"%s/erpc(-processing|-router)?\"}" .Release.Namespace }}
-{{- $prodErpcPodRegex := "(erpc|erpc-dev|erpc-processing|erpc-router|erpc-fallback)-[^-]+-[0-9a-z]{5}" }}
+{{- $prodErpcInstanceRegex := "erpc-dev|erpc-processing|erpc-router|erpc-fallback|erpc" }}
+{{- $prodErpcPodRegex := printf "(%s)-[^-]+-[0-9a-z]{5}" $prodErpcInstanceRegex }}
 {{- $prodErpcRuntimeContainerRegex := "erpc(-dev|-processing|-router|-fallback)?" }}
 {{- $fullName := include "erpc-prd.fullname" . }}
 {{- $dropLabels := list "agent_name" "container" "container_id" "endpoint" "host_arch" "host_name" "instance" "k8s_pod_name" "namespace" "net_host_name" "net_host_port" "net_peer_name" "net_peer_port" "otel_scope_version" "pod" "process_command" "process_command_args" "process_executable_name" "process_executable_path" "process_owner" "process_pid" "process_runtime_description" "process_runtime_name" "process_runtime_version" "server_address" "server_port" "service_instance_id" | join ", " }}
@@ -113,6 +115,153 @@ spec:
                 kube_pod_container_resource_limits{namespace="{{ .Release.Namespace }}",container=~"{{ $prodErpcRuntimeContainerRegex }}",resource="cpu",pod=~"{{ $prodErpcPodRegex }}"}
               ),
               0.001
+            )
+
+    - name: erpc.dashboard.rules
+      interval: 30s
+      rules:
+        - record: erpc:network_request_received_total:rate1m_by_instance
+          expr: |
+            sum by (erpc_instance) (
+              label_replace(
+                erpc:network_request_received_total:rate1m_by_pod{pod=~"{{ $prodErpcPodRegex }}"},
+                "erpc_instance", "$1", "pod", "^({{ $prodErpcInstanceRegex }})-[^-]+-[0-9a-z]{5}$"
+              )
+            )
+
+        - record: erpc:network_request_duration_seconds:p99:by_instance
+          expr: |
+            histogram_quantile(0.99,
+              sum by (erpc_instance, le) (
+                label_replace(
+                  erpc:network_request_duration_seconds_bucket:rate1m_by_pod{pod=~"{{ $prodErpcPodRegex }}"},
+                  "erpc_instance", "$1", "pod", "^({{ $prodErpcInstanceRegex }})-[^-]+-[0-9a-z]{5}$"
+                )
+              )
+            )
+
+        - record: erpc:network_failed_actionable_request_total:rate1m_by_instance
+          expr: |
+            sum by (erpc_instance) (
+              label_replace(
+                erpc:network_failed_actionable_request_total:rate1m_by_pod{pod=~"{{ $prodErpcPodRegex }}"},
+                "erpc_instance", "$1", "pod", "^({{ $prodErpcInstanceRegex }})-[^-]+-[0-9a-z]{5}$"
+              )
+            )
+
+        - record: erpc:network_actionable_failure_ratio:ratio1m_by_instance
+          expr: |
+            (
+              erpc:network_failed_actionable_request_total:rate1m_by_instance
+              or
+              erpc:network_request_received_total:rate1m_by_instance * 0
+            )
+            /
+            clamp_min(erpc:network_request_received_total:rate1m_by_instance, 1)
+
+        - record: erpc:container_cpu_usage:limit_ratio1m_by_instance
+          expr: |
+            avg by (erpc_instance) (
+              label_replace(
+                erpc:container_cpu_usage:limit_ratio1m_by_pod{pod=~"{{ $prodErpcPodRegex }}"},
+                "erpc_instance", "$1", "pod", "^({{ $prodErpcInstanceRegex }})-[^-]+-[0-9a-z]{5}$"
+              )
+            )
+
+        - record: erpc:container_memory_working_set:limit_ratio_by_instance
+          expr: |
+            avg by (erpc_instance) (
+              label_replace(
+                erpc:container_memory_working_set:limit_ratio_by_pod{pod=~"{{ $prodErpcPodRegex }}"},
+                "erpc_instance", "$1", "pod", "^({{ $prodErpcInstanceRegex }})-[^-]+-[0-9a-z]{5}$"
+              )
+            )
+
+        - record: erpc:kube_deployment_available_replicas:by_instance
+          expr: |
+            max by (erpc_instance) (
+              label_replace(
+                kube_deployment_status_replicas_available{namespace="{{ .Release.Namespace }}",deployment=~"{{ $prodErpcInstanceRegex }}"},
+                "erpc_instance", "$1", "deployment", "^({{ $prodErpcInstanceRegex }})$"
+              )
+            )
+
+        - record: erpc:kube_hpa_current_replicas:by_instance
+          expr: |
+            max by (erpc_instance) (
+              label_replace(
+                kube_horizontalpodautoscaler_status_current_replicas{namespace="{{ .Release.Namespace }}",horizontalpodautoscaler=~"{{ $prodErpcInstanceRegex }}"},
+                "erpc_instance", "$1", "horizontalpodautoscaler", "^({{ $prodErpcInstanceRegex }})$"
+              )
+            )
+
+        - record: erpc:kube_hpa_desired_replicas:by_instance
+          expr: |
+            max by (erpc_instance) (
+              label_replace(
+                kube_horizontalpodautoscaler_status_desired_replicas{namespace="{{ .Release.Namespace }}",horizontalpodautoscaler=~"{{ $prodErpcInstanceRegex }}"},
+                "erpc_instance", "$1", "horizontalpodautoscaler", "^({{ $prodErpcInstanceRegex }})$"
+              )
+            )
+
+        - record: erpc:kube_hpa_min_replicas:by_instance
+          expr: |
+            max by (erpc_instance) (
+              label_replace(
+                kube_horizontalpodautoscaler_spec_min_replicas{namespace="{{ .Release.Namespace }}",horizontalpodautoscaler=~"{{ $prodErpcInstanceRegex }}"},
+                "erpc_instance", "$1", "horizontalpodautoscaler", "^({{ $prodErpcInstanceRegex }})$"
+              )
+            )
+
+        - record: erpc:kube_hpa_max_replicas:by_instance
+          expr: |
+            max by (erpc_instance) (
+              label_replace(
+                kube_horizontalpodautoscaler_spec_max_replicas{namespace="{{ .Release.Namespace }}",horizontalpodautoscaler=~"{{ $prodErpcInstanceRegex }}"},
+                "erpc_instance", "$1", "horizontalpodautoscaler", "^({{ $prodErpcInstanceRegex }})$"
+              )
+            )
+
+        - record: erpc:up:count_by_instance
+          expr: |
+            count by (erpc_instance) (
+              label_replace(
+                up{namespace="{{ .Release.Namespace }}",job=~"{{ .Release.Namespace }}/({{ $prodErpcInstanceRegex }})"} == 1,
+                "erpc_instance", "$1", "job", "^{{ .Release.Namespace }}/({{ $prodErpcInstanceRegex }})$"
+              )
+            )
+
+        - record: erpc:fallback_up:count
+          expr: |
+            count(up{{ $prodErpcFallbackMatcher }} == 1) or on() vector(0)
+
+        - record: erpc:haproxy_fallback_request_share:ratio5m
+          expr: |
+            sum(erpc:haproxy_fallback_request_total:rate5m_by_proxy)
+            /
+            clamp_min(sum(erpc:haproxy_request_total:rate5m_by_proxy), 1)
+
+        - record: erpc:haproxy_direct_fallback_request_total:rate5m
+          expr: sum(erpc:haproxy_direct_fallback_request_total:rate5m_by_proxy)
+
+        - record: erpc:haproxy_weighted_fallback_request_total:rate5m
+          expr: sum(erpc:haproxy_weighted_fallback_request_total:rate5m_by_proxy)
+
+        - record: erpc:haproxy_fallback_weight:max_by_proxy
+          expr: |
+            max by (proxy) (
+              haproxy_server_uweight{namespace="{{ .Release.Namespace }}",service=~"erpc-erpc.*haproxy",proxy=~"erpc(-processing|-router)?-(backend|fallback-backend)",server=~"erpc-fallback[0-9]+"}
+            )
+
+        - record: erpc:haproxy_fallback_active_pools:count
+          expr: count(erpc:haproxy_fallback_weight:max_by_proxy > 0) or on() vector(0)
+
+        - record: erpc:haproxy_healthy_fallback_slots:min_by_proxy
+          expr: |
+            min by (proxy) (
+              sum by (proxy, pod) (
+                haproxy_server_status{namespace="{{ .Release.Namespace }}",service=~"erpc-erpc.*haproxy",proxy=~"erpc(-processing|-router)?-(backend|fallback-backend)",server=~"erpc-fallback.*",state="UP"}
+              )
             )
 
     - name: erpc.fallback-hot-standby.rules
