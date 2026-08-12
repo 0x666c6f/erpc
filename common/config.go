@@ -161,6 +161,7 @@ type ServerConfig struct {
 	TrustedIPForwarders []string          `yaml:"trustedIPForwarders,omitempty" json:"trustedIPForwarders"`
 	TrustedIPHeaders    []string          `yaml:"trustedIPHeaders,omitempty" json:"trustedIPHeaders"`
 	ResponseHeaders     map[string]string `yaml:"responseHeaders,omitempty" json:"responseHeaders"`
+	Websocket           *WebsocketServerConfig `yaml:"websocket,omitempty" json:"websocket,omitempty"`
 
 	// ExecutionHeaders controls the per-request diagnostic headers
 	// (X-ERPC-Attempts, X-ERPC-Upstreams-Tried, etc.) that expose how
@@ -175,6 +176,13 @@ type ServerConfig struct {
 	// default. Credit-unit pricing is vendor-level configuration — see
 	// CreditUnitsProvider and UpstreamConfig.CreditUnits.
 	CostHeaders *bool `yaml:"costHeaders,omitempty" json:"costHeaders"`
+}
+
+type WebsocketServerConfig struct {
+	DialTimeout           *Duration `yaml:"dialTimeout,omitempty" json:"dialTimeout" tstype:"Duration"`
+	IdleTimeout           *Duration `yaml:"idleTimeout,omitempty" json:"idleTimeout" tstype:"Duration"`
+	MaxLifetime           *Duration `yaml:"maxLifetime,omitempty" json:"maxLifetime" tstype:"Duration"`
+	MaxConnectionsPerUser *int      `yaml:"maxConnectionsPerUser,omitempty" json:"maxConnectionsPerUser"`
 }
 
 // ExecutionHeadersMode controls how much per-request execution detail is
@@ -892,6 +900,7 @@ type UpstreamConfig struct {
 
 	VendorName                   string                   `yaml:"vendorName,omitempty" json:"vendorName"`
 	Endpoint                     string                   `yaml:"endpoint,omitempty" json:"endpoint"`
+	WebsocketEndpoint            string                   `yaml:"websocketEndpoint,omitempty" json:"websocketEndpoint,omitempty"`
 	Evm                          *EvmUpstreamConfig       `yaml:"evm,omitempty" json:"evm"`
 	JsonRpc                      *JsonRpcUpstreamConfig   `yaml:"jsonRpc,omitempty" json:"jsonRpc"`
 	Grpc                         *GrpcUpstreamConfig      `yaml:"grpc,omitempty" json:"grpc"`
@@ -1214,10 +1223,12 @@ func (c *UpstreamIntegrityEthGetBlockReceiptsConfig) Copy() *UpstreamIntegrityEt
 func (u *UpstreamConfig) MarshalJSON() ([]byte, error) {
 	type UJAlias UpstreamConfig
 	return sonic.Marshal(&struct {
-		Endpoint string `json:"endpoint"`
+		Endpoint          string `json:"endpoint"`
+		WebsocketEndpoint string `json:"websocketEndpoint,omitempty"`
 		*UJAlias
 	}{
-		Endpoint: util.RedactEndpoint(u.Endpoint),
+		Endpoint:          util.RedactEndpoint(u.Endpoint),
+		WebsocketEndpoint: util.RedactEndpoint(u.WebsocketEndpoint),
 		UJAlias:  (*UJAlias)(u),
 	})
 }
@@ -1226,6 +1237,7 @@ func (u *UpstreamConfig) MarshalYAML() (interface{}, error) {
 	type UYAlias UpstreamConfig
 	cp := *u
 	cp.Endpoint = util.RedactEndpoint(u.Endpoint)
+	cp.WebsocketEndpoint = util.RedactEndpoint(u.WebsocketEndpoint)
 	return (*UYAlias)(&cp), nil
 }
 
@@ -2863,6 +2875,7 @@ type AuthStrategyConfig struct {
 	IgnoreMethods   []string `yaml:"ignoreMethods,omitempty" json:"ignoreMethods,omitempty"`
 	AllowMethods    []string `yaml:"allowMethods,omitempty" json:"allowMethods,omitempty"`
 	RateLimitBudget string   `yaml:"rateLimitBudget,omitempty" json:"rateLimitBudget,omitempty"`
+	AllowWebsocket bool     `yaml:"allowWebsocket,omitempty" json:"allowWebsocket,omitempty"`
 
 	Type     AuthType                `yaml:"type" json:"type" tstype:"TsAuthType"`
 	Network  *NetworkStrategyConfig  `yaml:"network,omitempty" json:"network,omitempty"`

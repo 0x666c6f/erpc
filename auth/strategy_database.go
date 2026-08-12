@@ -608,7 +608,7 @@ func (s *DatabaseStrategy) buildFailOpenUser() *common.User {
 	if s.cfg == nil || s.cfg.FailOpen == nil || !s.cfg.FailOpen.Enabled {
 		return nil
 	}
-	u := &common.User{Id: s.cfg.FailOpen.UserId}
+	u := &common.User{Id: s.cfg.FailOpen.UserId, AuthFailOpen: true}
 	if s.cfg.FailOpen.RateLimitBudget != "" {
 		u.RateLimitBudget = s.cfg.FailOpen.RateLimitBudget
 	}

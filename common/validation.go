@@ -110,6 +110,12 @@ func (s *ServerConfig) Validate() error {
 	if s.MaxBatchConcurrency != nil && *s.MaxBatchConcurrency <= 0 {
 		return fmt.Errorf("server.maxBatchConcurrency must be > 0")
 	}
+	if s.Websocket != nil {
+		if s.Websocket.DialTimeout == nil || *s.Websocket.DialTimeout <= 0 { return fmt.Errorf("server.websocket.dialTimeout must be > 0") }
+		if s.Websocket.IdleTimeout == nil || *s.Websocket.IdleTimeout <= 0 { return fmt.Errorf("server.websocket.idleTimeout must be > 0") }
+		if s.Websocket.MaxLifetime == nil || *s.Websocket.MaxLifetime <= 0 { return fmt.Errorf("server.websocket.maxLifetime must be > 0") }
+		if s.Websocket.MaxConnectionsPerUser == nil || *s.Websocket.MaxConnectionsPerUser <= 0 { return fmt.Errorf("server.websocket.maxConnectionsPerUser must be > 0") }
+	}
 
 	// Validate trusted IP forwarders if provided (IPs or CIDRs). Support legacy + new field
 	for _, entry := range s.TrustedIPForwarders {
@@ -1020,6 +1026,12 @@ func (u *ProviderConfig) Validate(c *Config) error {
 func (u *UpstreamConfig) Validate(c *Config, skipEndpointCheck bool) error {
 	if !skipEndpointCheck && u.Endpoint == "" {
 		return fmt.Errorf("upstream.*.endpoint is required")
+	}
+	if u.WebsocketEndpoint != "" {
+		parsed, err := url.Parse(u.WebsocketEndpoint)
+		if err != nil || (parsed.Scheme != "ws" && parsed.Scheme != "wss") {
+			return fmt.Errorf("upstream.*.websocketEndpoint must use ws:// or wss://")
+		}
 	}
 	if err := validateCapabilityTags("upstream.*.capabilities", u.Capabilities); err != nil {
 		return err
